@@ -110,20 +110,44 @@ export default function App() {
     setPhase("idle");
   };
 
-  const transcribeNow = useCallback(async (modelId: string, modelName: string) => {
-    setPhase("transcribing");
-    setStatus(`transcribing with ${modelName}…`);
+  const transcribeNow = useCallback(
+    async (modelId: string, modelName: string): Promise<string | null> => {
+      setPhase("transcribing");
+      setStatus(`transcribing with ${modelName}…`);
+      setError(null);
+      try {
+        const text = await api.transcribe(modelId);
+        setTranscript(text);
+        setPhase("idle");
+        setStatus("transcript ready — refine it, or swap models and re-run");
+        return text;
+      } catch (e) {
+        setError(String(e));
+        setPhase("idle");
+        return null;
+      }
+    },
+    [],
+  );
+
+  const runCleanup = async (text: string) => {
+    if (!llm || !text) return;
+    setPhase("cleaning");
+    setCleaned("");
+    cleaningRef.current = true;
+    setStatus(`refining with ${llm.name}…`);
     setError(null);
     try {
-      const text = await api.transcribe(modelId);
-      setTranscript(text);
-      setPhase("idle");
-      setStatus("transcript ready — refine it, or swap models and re-run");
+      const result = await api.cleanupText(llm.id, text, prompt || undefined);
+      cleaningRef.current = false;
+      setCleaned(result);
+      setStatus("refined — copy it out, or swap models and re-run");
     } catch (e) {
+      cleaningRef.current = false;
       setError(String(e));
-      setPhase("idle");
     }
-  }, []);
+    setPhase("idle");
+  };
 
   const toggleRecord = async () => {
     setError(null);
@@ -132,8 +156,13 @@ export default function App() {
         const res = await api.stopRecording();
         setDuration(res.durationSecs);
         setLevel(0);
-        if (stt) await transcribeNow(stt.id, stt.name);
-        else {
+        if (stt) {
+          const text = await transcribeNow(stt.id, stt.name);
+          // Full pipeline on stop: transcript flows straight into cleanup.
+          if (text && llm) await runCleanup(text);
+          else if (text && !llm)
+            setStatus("transcript ready — download a cleanup model to refine");
+        } else {
           setPhase("idle");
           setStatus("recorded — download a speech model to transcribe");
         }
@@ -155,22 +184,8 @@ export default function App() {
   };
 
   const refine = async () => {
-    if (!llm || !transcript || phase !== "idle") return;
-    setPhase("cleaning");
-    setCleaned("");
-    cleaningRef.current = true;
-    setStatus(`refining with ${llm.name}…`);
-    setError(null);
-    try {
-      const result = await api.cleanupText(llm.id, transcript, prompt || undefined);
-      cleaningRef.current = false;
-      setCleaned(result);
-      setStatus("refined — copy it out, or swap models and re-run");
-    } catch (e) {
-      cleaningRef.current = false;
-      setError(String(e));
-    }
-    setPhase("idle");
+    if (phase !== "idle") return;
+    await runCleanup(transcript);
   };
 
   const copy = (text: string, what: string) => {
