@@ -2,8 +2,10 @@ mod audio;
 mod deliver;
 mod llm;
 mod models;
+mod permissions;
 mod settings;
 mod stt;
+mod tray;
 
 use audio::{AudioState, RecordingResult};
 use llm::LlmState;
@@ -14,10 +16,12 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 #[derive(Default)]
-struct AppState {
+pub struct AppState {
     audio: AudioState,
     stt: SttState,
     llm: LlmState,
+    /// Most recent pipeline output, for the tray's "paste last take".
+    pub last_output: std::sync::Mutex<String>,
 }
 
 #[tauri::command]
@@ -47,7 +51,22 @@ fn add_custom_model(
 
 #[tauri::command]
 fn start_recording(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    audio::start_recording(app, &state.audio)
+    let mic = settings::load(&app).mic_device;
+    audio::start_recording(app, &state.audio, mic)
+}
+
+#[tauri::command]
+fn list_microphones() -> Vec<String> {
+    audio::list_input_devices()
+}
+
+#[tauri::command]
+fn set_microphone(app: AppHandle, device: String) -> Result<(), String> {
+    let mut s = settings::load(&app);
+    s.mic_device = device;
+    settings::save(&app, &s)?;
+    tray::refresh_menu(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -65,12 +84,15 @@ async fn transcribe(
     let model_path = models::downloaded_model_path(&app, &model_id)?;
     let samples = state.audio.last_recording.lock().unwrap().clone();
     // Whisper inference is heavy; keep it off the async runtime.
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
+    let worker_app = app.clone();
+    let text = tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app.state::<AppState>();
         stt::transcribe(&state.stt, &model_path, &samples, language.as_deref())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    *state.last_output.lock().unwrap() = text.clone();
+    Ok(text)
 }
 
 #[tauri::command]
@@ -92,6 +114,9 @@ async fn cleanup_text(
     .await
     .map_err(|e| e.to_string())?;
     let _ = emitter.emit("llm-done", result.is_ok());
+    if let Ok(refined) = &result {
+        *emitter.state::<AppState>().last_output.lock().unwrap() = refined.clone();
+    }
     result
 }
 
@@ -111,6 +136,25 @@ fn set_shortcut(app: AppHandle, shortcut: String) -> Result<(), String> {
     let mut s = settings::load(&app);
     s.shortcut = shortcut;
     settings::save(&app, &s)
+}
+
+#[tauri::command]
+fn permission_status() -> permissions::PermissionStatus {
+    permissions::status()
+}
+
+#[tauri::command]
+async fn request_accessibility() -> bool {
+    tauri::async_runtime::spawn_blocking(permissions::request_accessibility)
+        .await
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+async fn request_microphone() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(permissions::request_microphone)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -152,7 +196,16 @@ pub fn run() {
             if let Err(e) = apply_shortcut(app.handle(), &shortcut) {
                 eprintln!("global shortcut unavailable: {e}");
             }
+            tray::init(app.handle())?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Live in the menu bar: closing the window hides it, the tray
+            // (or the global shortcut) keeps working. Quit via the tray.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             list_models,
@@ -166,7 +219,12 @@ pub fn run() {
             default_cleanup_prompt,
             get_settings,
             set_shortcut,
-            deliver_text
+            deliver_text,
+            permission_status,
+            request_accessibility,
+            request_microphone,
+            list_microphones,
+            set_microphone
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

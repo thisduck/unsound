@@ -11,8 +11,14 @@ export interface ModelInfo {
   filename: string;
   sizeBytes: number;
   description: string;
+  languages: string;
+  recommended: boolean;
   custom: boolean;
   downloaded: boolean;
+}
+
+export interface PermissionStatus {
+  accessibility: boolean;
 }
 
 export interface RecordingResult {
@@ -34,6 +40,7 @@ export interface DownloadDone {
 
 export interface Settings {
   shortcut: string;
+  micDevice: string;
 }
 
 export const api = {
@@ -52,6 +59,11 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   setShortcut: (shortcut: string) => invoke<void>("set_shortcut", { shortcut }),
   deliverText: (text: string) => invoke<void>("deliver_text", { text }),
+  permissionStatus: () => invoke<PermissionStatus>("permission_status"),
+  requestAccessibility: () => invoke<boolean>("request_accessibility"),
+  requestMicrophone: () => invoke<void>("request_microphone"),
+  listMicrophones: () => invoke<string[]>("list_microphones"),
+  setMicrophone: (device: string) => invoke<void>("set_microphone", { device }),
 };
 
 export const on = {
@@ -65,6 +77,8 @@ export const on = {
     listen<string>("llm-token", (e) => cb(e.payload)),
   hotkeyToggle: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("hotkey-toggle", () => cb()),
+  settingsChanged: (cb: () => void): Promise<UnlistenFn> =>
+    listen<void>("settings-changed", () => cb()),
 };
 
 export function formatShortcut(shortcut: string): string {

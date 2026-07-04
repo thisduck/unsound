@@ -607,6 +607,165 @@ body {
   color: var(--faint);
 }
 
+.mic-chip {
+  max-width: 200px;
+  color: var(--faint);
+  border-color: transparent;
+  background: transparent;
+}
+
+.mic-chip:hover,
+.mic-chip:focus {
+  border-color: var(--edge);
+  background: var(--panel);
+}
+
+/* ── onboarding ── */
+.ob-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  overflow-y: auto;
+}
+
+.ob-frame {
+  width: min(560px, calc(100vw - 64px));
+  padding: 48px 0 24px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  justify-content: center;
+}
+
+.ob-step {
+  animation: ob-in 0.25s ease-out;
+}
+
+@keyframes ob-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+.ob-mark {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 18px;
+}
+
+.ob-title {
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: -0.4px;
+  line-height: 1.3;
+  color: #f0eee9;
+  margin-bottom: 16px;
+}
+
+.ob-text {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--dim);
+  margin-bottom: 12px;
+  max-width: 480px;
+}
+
+.ob-text b {
+  color: var(--soft);
+  font-weight: 600;
+}
+
+.ob-recommended {
+  margin: 18px 0 6px;
+}
+
+.ob-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.ob-primary {
+  font-family: var(--sans);
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #1e2024;
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  padding: 11px 22px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.ob-primary:hover:not(:disabled) {
+  background: #f0bd95;
+}
+
+.ob-primary:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.ob-primary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ob-library {
+  margin-top: 18px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.ob-step .row {
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.ob-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 40px;
+}
+
+.ob-dots {
+  display: flex;
+  gap: 7px;
+}
+
+.ob-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  background: var(--edge);
+  cursor: pointer;
+}
+
+.ob-dot.on {
+  background: var(--accent);
+}
+
+.granted {
+  color: var(--ok);
+  font-size: 11.5px;
+  margin-left: 6px;
+}
+
+.denied {
+  color: var(--danger);
+  font-size: 11.5px;
+  margin-left: 6px;
+}
+
 /* ── scrollbars ── */
 ::-webkit-scrollbar {
   width: 8px;

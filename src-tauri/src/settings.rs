@@ -10,12 +10,15 @@ pub const DEFAULT_SHORTCUT: &str = "cmd+shift+space";
 pub struct Settings {
     /// Global shortcut in "cmd+shift+space" form; empty string disables it.
     pub shortcut: String,
+    /// Input device name; empty string means the system default.
+    pub mic_device: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             shortcut: DEFAULT_SHORTCUT.into(),
+            mic_device: String::new(),
         }
     }
 }

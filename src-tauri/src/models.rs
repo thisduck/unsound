@@ -21,6 +21,12 @@ pub struct ModelInfo {
     /// Approximate download size in bytes, for display before the download starts.
     pub size_bytes: u64,
     pub description: String,
+    /// Human-readable language coverage, e.g. "Multilingual · 99 languages".
+    #[serde(default)]
+    pub languages: String,
+    /// Part of the "download recommended" pair in onboarding.
+    #[serde(default)]
+    pub recommended: bool,
     #[serde(default)]
     pub custom: bool,
     #[serde(default)]
@@ -47,7 +53,14 @@ const GB: u64 = 1_000_000_000;
 const MB: u64 = 1_000_000;
 
 fn builtin_registry() -> Vec<ModelInfo> {
-    let m = |id: &str, name: &str, kind: ModelKind, url: &str, size: u64, desc: &str| ModelInfo {
+    let m = |id: &str,
+             name: &str,
+             kind: ModelKind,
+             url: &str,
+             size: u64,
+             desc: &str,
+             languages: &str,
+             recommended: bool| ModelInfo {
         id: id.into(),
         name: name.into(),
         kind,
@@ -55,9 +68,15 @@ fn builtin_registry() -> Vec<ModelInfo> {
         filename: url.rsplit('/').next().unwrap_or(id).to_string(),
         size_bytes: size,
         description: desc.into(),
+        languages: languages.into(),
+        recommended,
         custom: false,
         downloaded: false,
     };
+    const WHISPER_LANGS: &str = "Multilingual · ~99 languages";
+    const EN_ONLY: &str = "English only";
+    const QWEN_LANGS: &str = "Multilingual · ~29 languages";
+    const LLAMA_LANGS: &str = "English + 7 languages (es, fr, de, it, pt, hi, th)";
     vec![
         // --- Speech to text (whisper.cpp GGML) ---
         m(
@@ -67,6 +86,8 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
             78 * MB,
             "Fastest, lowest accuracy. Good for quick tests.",
+            WHISPER_LANGS,
+            false,
         ),
         m(
             "whisper-base",
@@ -75,6 +96,18 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
             148 * MB,
             "Fast with reasonable accuracy.",
+            WHISPER_LANGS,
+            false,
+        ),
+        m(
+            "whisper-base-en",
+            "Whisper Base (English)",
+            ModelKind::Stt,
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+            148 * MB,
+            "Slightly better than Base when you only speak English.",
+            EN_ONLY,
+            false,
         ),
         m(
             "whisper-small",
@@ -83,6 +116,18 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
             488 * MB,
             "Good balance of speed and accuracy.",
+            WHISPER_LANGS,
+            true,
+        ),
+        m(
+            "whisper-small-en",
+            "Whisper Small (English)",
+            ModelKind::Stt,
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+            488 * MB,
+            "Slightly better than Small when you only speak English.",
+            EN_ONLY,
+            false,
         ),
         m(
             "whisper-medium",
@@ -91,6 +136,8 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
             1533 * MB,
             "High accuracy, slower.",
+            WHISPER_LANGS,
+            false,
         ),
         m(
             "whisper-large-v3-turbo",
@@ -99,6 +146,8 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
             1620 * MB,
             "Best accuracy at near-medium speed.",
+            WHISPER_LANGS,
+            false,
         ),
         // --- Text cleanup (llama.cpp GGUF) ---
         m(
@@ -108,6 +157,8 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
             1 * GB,
             "Small and fast; fine for light cleanup.",
+            QWEN_LANGS,
+            false,
         ),
         m(
             "qwen2.5-3b",
@@ -116,6 +167,8 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
             2 * GB,
             "Recommended default for transcript cleanup.",
+            QWEN_LANGS,
+            true,
         ),
         m(
             "llama-3.2-1b",
@@ -124,6 +177,8 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
             808 * MB,
             "Very fast, lighter cleanup quality.",
+            LLAMA_LANGS,
+            false,
         ),
         m(
             "llama-3.2-3b",
@@ -132,6 +187,8 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
             2020 * MB,
             "Strong quality for its size.",
+            LLAMA_LANGS,
+            false,
         ),
     ]
 }
@@ -217,6 +274,8 @@ pub fn add_custom(app: &AppHandle, name: String, kind: ModelKind, url: String) -
         filename,
         size_bytes: 0,
         description: "Custom model".into(),
+        languages: String::new(),
+        recommended: false,
         custom: true,
         downloaded: false,
     };

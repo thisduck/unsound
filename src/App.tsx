@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, on, ModelInfo } from "./api";
-import { ModelManager } from "./ModelManager";
+import { MicPicker } from "./sections";
+import { SettingsSheet } from "./SettingsSheet";
+import { Onboarding } from "./Onboarding";
 import { HistoryDrawer, Take } from "./HistoryDrawer";
 import "./App.css";
 
@@ -56,10 +58,10 @@ export default function App() {
   const [cleaned, setCleaned] = useState("");
   const [status, setStatus] = useState("ready — fully offline");
   const [error, setError] = useState<string | null>(null);
-  const [managerOpen, setManagerOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
-  const [promptOpen, setPromptOpen] = useState(false);
+  const [onboarding, setOnboarding] = useState(() => !localStorage.getItem("unsound.onboarded"));
   const [prompt, setPrompt] = useLocalStorage("unsound.prompt", "");
   const [defaultPrompt, setDefaultPrompt] = useState("");
   const [sttId, setSttId] = useLocalStorage("unsound.stt", "");
@@ -252,39 +254,11 @@ export default function App() {
       <header className="head">
         <span className="mark">unsound</span>
         <span className="spacer" />
-        {sttModels.length > 0 && (
-          <select
-            className="chip-select"
-            value={stt?.id ?? ""}
-            onChange={(e) => setSttId(e.target.value)}
-            title="Speech model"
-          >
-            {sttModels.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        )}
-        {llmModels.length > 0 && (
-          <select
-            className="chip-select"
-            value={llm?.id ?? ""}
-            onChange={(e) => setLlmId(e.target.value)}
-            title="Cleanup model"
-          >
-            {llmModels.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        )}
         <button className="quiet" onClick={() => setHistoryOpen(true)}>
           history
         </button>
-        <button className="quiet" onClick={() => setManagerOpen(true)}>
-          models
+        <button className="quiet" onClick={() => setSettingsOpen(true)}>
+          settings
         </button>
       </header>
 
@@ -314,7 +288,7 @@ export default function App() {
               unsound listens, transcribes with a local Whisper model, and tidies the words with a
               local LLM. Nothing leaves this machine.
             </p>
-            <button className="quiet accent" onClick={() => setManagerOpen(true)}>
+            <button className="quiet accent" onClick={() => setSettingsOpen(true)}>
               download models to get started →
             </button>
           </div>
@@ -337,19 +311,7 @@ export default function App() {
                       </button>
                     </>
                   )}
-                  <button className="quiet" onClick={() => setPromptOpen((o) => !o)}>
-                    {promptOpen ? "hide prompt" : "prompt"}
-                  </button>
                 </div>
-                {promptOpen && (
-                  <textarea
-                    className="prompt-editor"
-                    value={prompt || defaultPrompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    rows={8}
-                    spellCheck={false}
-                  />
-                )}
                 <div className="prose">
                   {heroText}
                   {phase === "cleaning" && <span className="caret" />}
@@ -407,10 +369,37 @@ export default function App() {
             dismiss
           </button>
         )}
+        <MicPicker className="chip-select mic-chip" />
       </footer>
 
-      {managerOpen && (
-        <ModelManager models={models} onClose={() => setManagerOpen(false)} onChanged={refreshModels} />
+      {settingsOpen && (
+        <SettingsSheet
+          models={models}
+          sttId={stt?.id ?? ""}
+          llmId={llm?.id ?? ""}
+          onSttChange={setSttId}
+          onLlmChange={setLlmId}
+          prompt={prompt}
+          defaultPrompt={defaultPrompt}
+          onPromptChange={setPrompt}
+          onClose={() => setSettingsOpen(false)}
+          onChanged={refreshModels}
+          onReplayOnboarding={() => {
+            setSettingsOpen(false);
+            setOnboarding(true);
+          }}
+        />
+      )}
+      {onboarding && (
+        <Onboarding
+          models={models}
+          onChanged={refreshModels}
+          onDone={() => {
+            localStorage.setItem("unsound.onboarded", "1");
+            setOnboarding(false);
+            refreshModels();
+          }}
+        />
       )}
       {historyOpen && (
         <HistoryDrawer

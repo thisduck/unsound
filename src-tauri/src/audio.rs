@@ -29,7 +29,28 @@ pub struct AudioState {
     pub last_recording: Mutex<Vec<f32>>,
 }
 
-pub fn start_recording(app: AppHandle, state: &AudioState) -> Result<(), String> {
+/// Names of available input devices, for the microphone picker.
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|devices| devices.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string())).collect())
+        .unwrap_or_default()
+}
+
+/// Resolve a device by name, falling back to the system default when the
+/// name is empty or no longer present (e.g. an unplugged USB mic).
+fn input_device(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
+    if !name.is_empty() {
+        if let Ok(mut devices) = host.input_devices() {
+            if let Some(d) = devices.find(|d| d.description().map(|desc| desc.name() == name).unwrap_or(false)) {
+                return Some(d);
+            }
+        }
+    }
+    host.default_input_device()
+}
+
+pub fn start_recording(app: AppHandle, state: &AudioState, device_name: String) -> Result<(), String> {
     let mut active = state.active.lock().unwrap();
     if active.is_some() {
         return Err("already recording".into());
@@ -46,8 +67,7 @@ pub fn start_recording(app: AppHandle, state: &AudioState) -> Result<(), String>
     std::thread::spawn(move || {
         let build = || -> Result<(cpal::Stream, u32, u16), String> {
             let host = cpal::default_host();
-            let device = host
-                .default_input_device()
+            let device = input_device(&host, &device_name)
                 .ok_or("no microphone found (check input devices and permissions)")?;
             let config = device.default_input_config().map_err(|e| e.to_string())?;
             let sample_rate = config.sample_rate();
