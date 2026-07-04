@@ -112,6 +112,15 @@ pub fn run() {
             cleanup_text,
             default_cleanup_prompt
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Release cached whisper/llama models before process exit;
+            // ggml's Metal teardown asserts if their buffers are still alive.
+            if let tauri::RunEvent::Exit = event {
+                let state = app.state::<AppState>();
+                state.stt.clear();
+                state.llm.clear();
+            }
+        });
 }

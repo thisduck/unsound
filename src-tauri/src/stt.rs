@@ -10,6 +10,12 @@ pub struct SttState {
 }
 
 impl SttState {
+    /// Drop the cached model so its Metal buffers are released before
+    /// ggml's static destructors run at process exit.
+    pub fn clear(&self) {
+        *self.loaded.lock().unwrap() = None;
+    }
+
     fn context_for(&self, model_path: &Path) -> Result<Arc<WhisperContext>, String> {
         let key = model_path.to_string_lossy().to_string();
         let mut loaded = self.loaded.lock().unwrap();

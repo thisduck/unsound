@@ -5,6 +5,9 @@ import "./App.css";
 
 type Phase = "idle" | "recording" | "transcribing" | "cleaning";
 
+const OLD_DEFAULT_PROMPT =
+  "You clean up raw speech-to-text transcripts. Fix punctuation, capitalization and obvious transcription errors, remove filler words (um, uh, you know), and break the text into paragraphs where natural. Preserve the speaker's wording and meaning; do not summarize or add anything. Output only the cleaned text.";
+
 function useLocalStorage(key: string, initial: string) {
   const [value, setValue] = useState(() => localStorage.getItem(key) ?? initial);
   useEffect(() => {
@@ -63,7 +66,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [managerOpen, setManagerOpen] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
+  // Only a user-edited prompt is persisted; empty means "use the backend default".
   const [prompt, setPrompt] = useLocalStorage("unsound.prompt", "");
+  const [defaultPrompt, setDefaultPrompt] = useState("");
   const [sttId, setSttId] = useLocalStorage("unsound.stt", "");
   const [llmId, setLlmId] = useLocalStorage("unsound.llm", "");
   const cleaningRef = useRef(false);
@@ -77,7 +82,10 @@ export default function App() {
   useEffect(() => {
     refreshModels();
     api.defaultCleanupPrompt().then((p) => {
-      setPrompt((cur) => cur || p);
+      setDefaultPrompt(p);
+      // Early builds persisted the default itself; clear it so updated
+      // defaults from the backend take effect.
+      setPrompt((cur) => (cur.trim() === OLD_DEFAULT_PROMPT ? "" : cur));
     });
     const subs = [
       on.audioLevel(setLevel),
@@ -290,9 +298,9 @@ export default function App() {
           {promptOpen && (
             <textarea
               className="prompt-editor"
-              value={prompt}
+              value={prompt || defaultPrompt}
               onChange={(e) => setPrompt(e.target.value)}
-              rows={4}
+              rows={10}
               spellCheck={false}
             />
           )}
