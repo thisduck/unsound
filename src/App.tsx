@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, on, ModelInfo } from "./api";
 import { ModelManager } from "./ModelManager";
+import { HistoryDrawer, Take } from "./HistoryDrawer";
 import "./App.css";
 
 type Phase = "idle" | "recording" | "transcribing" | "cleaning";
 
 const OLD_DEFAULT_PROMPT =
   "You clean up raw speech-to-text transcripts. Fix punctuation, capitalization and obvious transcription errors, remove filler words (um, uh, you know), and break the text into paragraphs where natural. Preserve the speaker's wording and meaning; do not summarize or add anything. Output only the cleaned text.";
+
+const HISTORY_KEY = "unsound.history";
+const HISTORY_CAP = 200;
 
 function useLocalStorage(key: string, initial: string) {
   const [value, setValue] = useState(() => localStorage.getItem(key) ?? initial);
@@ -16,42 +20,31 @@ function useLocalStorage(key: string, initial: string) {
   return [value, setValue] as const;
 }
 
-function Meter({ level }: { level: number }) {
-  const segments = 26;
-  const lit = Math.min(segments, Math.round(Math.sqrt(Math.min(level / 0.25, 1)) * segments));
-  return (
-    <div className="meter" aria-hidden>
-      {Array.from({ length: segments }, (_, i) => (
-        <span
-          key={i}
-          className={
-            "meter-seg" +
-            (i < lit ? " lit" : "") +
-            (i >= segments - 4 ? " hot" : i >= segments - 9 ? " warm" : "")
-          }
-        />
-      ))}
-    </div>
-  );
+function loadHistory(): Take[] {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
 }
 
 function Timer({ running }: { running: boolean }) {
   const [secs, setSecs] = useState(0);
   useEffect(() => {
-    if (!running) return;
-    setSecs(0);
+    if (!running) {
+      setSecs(0);
+      return;
+    }
     const started = Date.now();
-    const t = setInterval(() => setSecs((Date.now() - started) / 1000), 100);
+    const t = setInterval(() => setSecs((Date.now() - started) / 1000), 250);
     return () => clearInterval(t);
   }, [running]);
   const m = Math.floor(secs / 60);
   const s = Math.floor(secs % 60);
-  const d = Math.floor((secs % 1) * 10);
   return (
-    <div className="timer">
+    <span className="pill-time">
       {String(m).padStart(2, "0")}:{String(s).padStart(2, "0")}
-      <span className="timer-tenths">.{d}</span>
-    </div>
+    </span>
   );
 }
 
@@ -59,32 +52,34 @@ export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [phase, setPhase] = useState<Phase>("idle");
   const [level, setLevel] = useState(0);
-  const [duration, setDuration] = useState<number | null>(null);
   const [transcript, setTranscript] = useState("");
   const [cleaned, setCleaned] = useState("");
   const [status, setStatus] = useState("ready — fully offline");
   const [error, setError] = useState<string | null>(null);
   const [managerOpen, setManagerOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [rawOpen, setRawOpen] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
-  // Only a user-edited prompt is persisted; empty means "use the backend default".
   const [prompt, setPrompt] = useLocalStorage("unsound.prompt", "");
   const [defaultPrompt, setDefaultPrompt] = useState("");
   const [sttId, setSttId] = useLocalStorage("unsound.stt", "");
   const [llmId, setLlmId] = useLocalStorage("unsound.llm", "");
+  const [history, setHistory] = useState<Take[]>(loadHistory);
   const cleaningRef = useRef(false);
+  const takeRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  }, [history]);
 
   const refreshModels = useCallback(async () => {
-    const list = await api.listModels();
-    setModels(list);
-    return list;
+    setModels(await api.listModels());
   }, []);
 
   useEffect(() => {
     refreshModels();
     api.defaultCleanupPrompt().then((p) => {
       setDefaultPrompt(p);
-      // Early builds persisted the default itself; clear it so updated
-      // defaults from the backend take effect.
       setPrompt((cur) => (cur.trim() === OLD_DEFAULT_PROMPT ? "" : cur));
     });
     const subs = [
@@ -93,6 +88,7 @@ export default function App() {
         if (cleaningRef.current) setCleaned((c) => c + chunk);
       }),
       on.downloadDone(() => refreshModels()),
+      on.hotkeyToggle(() => hotkeyRef.current()),
     ];
     return () => {
       subs.forEach((p) => p.then((un) => un()));
@@ -105,33 +101,54 @@ export default function App() {
   const stt = sttModels.find((m) => m.id === sttId) ?? sttModels[0];
   const llm = llmModels.find((m) => m.id === llmId) ?? llmModels[0];
 
+  const upsertTake = (patch: Partial<Omit<Take, "id" | "at">>) => {
+    const id = takeRef.current;
+    if (!id) return;
+    setHistory((h) => {
+      const i = h.findIndex((t) => t.id === id);
+      if (i >= 0) {
+        const copy = [...h];
+        copy[i] = { ...copy[i], ...patch };
+        return copy;
+      }
+      const take: Take = {
+        id,
+        at: new Date().toISOString(),
+        raw: "",
+        refined: "",
+        sttModel: "",
+        llmModel: "",
+        ...patch,
+      };
+      return [take, ...h].slice(0, HISTORY_CAP);
+    });
+  };
+
   const fail = (e: unknown) => {
     setError(String(e));
     setPhase("idle");
   };
 
-  const transcribeNow = useCallback(
-    async (modelId: string, modelName: string): Promise<string | null> => {
-      setPhase("transcribing");
-      setStatus(`transcribing with ${modelName}…`);
-      setError(null);
-      try {
-        const text = await api.transcribe(modelId);
-        setTranscript(text);
-        setPhase("idle");
-        setStatus("transcript ready — refine it, or swap models and re-run");
-        return text;
-      } catch (e) {
-        setError(String(e));
-        setPhase("idle");
-        return null;
-      }
-    },
-    [],
-  );
+  const transcribeNow = async (model: ModelInfo): Promise<string | null> => {
+    setPhase("transcribing");
+    setStatus(`transcribing with ${model.name}…`);
+    setError(null);
+    try {
+      const text = await api.transcribe(model.id);
+      setTranscript(text);
+      upsertTake({ raw: text, sttModel: model.name });
+      setPhase("idle");
+      setStatus("transcript ready");
+      return text;
+    } catch (e) {
+      setError(String(e));
+      setPhase("idle");
+      return null;
+    }
+  };
 
-  const runCleanup = async (text: string) => {
-    if (!llm || !text) return;
+  const runCleanup = async (text: string): Promise<string | null> => {
+    if (!llm || !text) return null;
     setPhase("cleaning");
     setCleaned("");
     cleaningRef.current = true;
@@ -141,30 +158,42 @@ export default function App() {
       const result = await api.cleanupText(llm.id, text, prompt || undefined);
       cleaningRef.current = false;
       setCleaned(result);
+      upsertTake({ refined: result, llmModel: llm.name });
+      setPhase("idle");
       setStatus("refined — copy it out, or swap models and re-run");
+      return result;
     } catch (e) {
       cleaningRef.current = false;
       setError(String(e));
+      setPhase("idle");
+      return null;
     }
-    setPhase("idle");
   };
 
-  const toggleRecord = async () => {
+  const toggleRecord = async (fromHotkey = false) => {
     setError(null);
     if (phase === "recording") {
       try {
-        const res = await api.stopRecording();
-        setDuration(res.durationSecs);
+        await api.stopRecording();
         setLevel(0);
-        if (stt) {
-          const text = await transcribeNow(stt.id, stt.name);
-          // Full pipeline on stop: transcript flows straight into cleanup.
-          if (text && llm) await runCleanup(text);
-          else if (text && !llm)
-            setStatus("transcript ready — download a cleanup model to refine");
-        } else {
+        if (!stt) {
           setPhase("idle");
           setStatus("recorded — download a speech model to transcribe");
+          return;
+        }
+        takeRef.current = crypto.randomUUID();
+        const text = await transcribeNow(stt);
+        if (!text) return;
+        const refined = llm ? await runCleanup(text) : null;
+        if (!llm) setStatus("transcript ready — download a cleanup model to refine");
+        if (fromHotkey) {
+          const out = refined ?? text;
+          try {
+            await api.deliverText(out);
+            setStatus("delivered to the frontmost app — also on your clipboard");
+          } catch (e) {
+            setError(String(e));
+          }
         }
       } catch (e) {
         fail(e);
@@ -174,18 +203,24 @@ export default function App() {
         await api.startRecording();
         setTranscript("");
         setCleaned("");
-        setDuration(null);
+        setRawOpen(false);
         setPhase("recording");
-        setStatus("recording — everything stays on this machine");
+        setStatus(
+          fromHotkey
+            ? "recording — press the shortcut again to stop"
+            : "recording — everything stays on this machine",
+        );
       } catch (e) {
         fail(e);
       }
     }
   };
 
-  const refine = async () => {
-    if (phase !== "idle") return;
-    await runCleanup(transcript);
+  // The hotkey listener is registered once; route it through a ref so it
+  // always sees the current phase and model selection.
+  const hotkeyRef = useRef<() => void>(() => {});
+  hotkeyRef.current = () => {
+    if (phase === "idle" || phase === "recording") toggleRecord(true);
   };
 
   const copy = (text: string, what: string) => {
@@ -193,152 +228,182 @@ export default function App() {
     setStatus(`${what} copied to clipboard`);
   };
 
+  const loadTake = (take: Take) => {
+    setTranscript(take.raw);
+    setCleaned(take.refined);
+    setHistoryOpen(false);
+    setRawOpen(!take.refined);
+    setStatus("loaded from history");
+  };
+
   const busy = phase === "transcribing" || phase === "cleaning";
+  const heroText = cleaned || "";
+  const pillLabel =
+    phase === "recording"
+      ? "listening — tap to stop"
+      : phase === "transcribing"
+        ? "transcribing…"
+        : phase === "cleaning"
+          ? "refining…"
+          : "tap to speak";
 
   return (
     <div className="shell">
-      <header className="masthead">
-        <div className="wordmark">
-          <span className="wordmark-un">un</span>sound
-        </div>
-        <div className="masthead-note">local dictation &amp; cleanup · no cloud</div>
-        <button className="btn ghost" onClick={() => setManagerOpen(true)}>
+      <header className="head">
+        <span className="mark">unsound</span>
+        <span className="spacer" />
+        {sttModels.length > 0 && (
+          <select
+            className="chip-select"
+            value={stt?.id ?? ""}
+            onChange={(e) => setSttId(e.target.value)}
+            title="Speech model"
+          >
+            {sttModels.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        )}
+        {llmModels.length > 0 && (
+          <select
+            className="chip-select"
+            value={llm?.id ?? ""}
+            onChange={(e) => setLlmId(e.target.value)}
+            title="Cleanup model"
+          >
+            {llmModels.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <button className="quiet" onClick={() => setHistoryOpen(true)}>
+          history
+        </button>
+        <button className="quiet" onClick={() => setManagerOpen(true)}>
           models
         </button>
       </header>
 
-      <main className="deck">
-        <section className="transport panel">
-          <div className="panel-label">01 · record</div>
-          <button
-            className={"rec-btn" + (phase === "recording" ? " live" : "")}
-            onClick={toggleRecord}
-            disabled={busy}
-            title={phase === "recording" ? "Stop" : "Record"}
-          >
-            <span className="rec-core" />
-          </button>
+      <div className="stage">
+        <button
+          className={"pill" + (phase === "recording" ? " live" : "")}
+          onClick={() => toggleRecord()}
+          disabled={busy}
+        >
+          <span
+            className="pill-dot"
+            style={
+              phase === "recording"
+                ? { boxShadow: `0 0 0 ${3 + Math.min(level * 60, 14)}px rgba(232,168,124,0.16)` }
+                : undefined
+            }
+          />
+          {pillLabel}
           <Timer running={phase === "recording"} />
-          <Meter level={phase === "recording" ? level : 0} />
-          {duration !== null && phase !== "recording" && (
-            <div className="take-info">last take · {duration.toFixed(1)}s</div>
-          )}
+        </button>
+      </div>
 
-          <div className="selectors">
-            <label className="selector">
-              <span className="selector-label">speech model</span>
-              <select
-                value={stt?.id ?? ""}
-                onChange={(e) => setSttId(e.target.value)}
-                disabled={sttModels.length === 0}
-              >
-                {sttModels.length === 0 && <option value="">none downloaded</option>}
-                {sttModels.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="selector">
-              <span className="selector-label">cleanup model</span>
-              <select
-                value={llm?.id ?? ""}
-                onChange={(e) => setLlmId(e.target.value)}
-                disabled={llmModels.length === 0}
-              >
-                {llmModels.length === 0 && <option value="">none downloaded</option>}
-                {llmModels.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {(sttModels.length === 0 || llmModels.length === 0) && (
-              <button className="btn accent" onClick={() => setManagerOpen(true)}>
-                get models →
-              </button>
-            )}
+      <main className="body">
+        {(sttModels.length === 0 || llmModels.length === 0) && phase === "idle" && !transcript ? (
+          <div className="empty">
+            <p>
+              unsound listens, transcribes with a local Whisper model, and tidies the words with a
+              local LLM. Nothing leaves this machine.
+            </p>
+            <button className="quiet accent" onClick={() => setManagerOpen(true)}>
+              download models to get started →
+            </button>
           </div>
-        </section>
-
-        <section className="panel output">
-          <div className="panel-head">
-            <div className="panel-label">02 · raw transcript</div>
-            <div className="panel-actions">
-              {transcript && stt && (
-                <button
-                  className="btn ghost"
-                  disabled={busy}
-                  onClick={() => transcribeNow(stt.id, stt.name)}
-                  title="Re-run speech-to-text on the last take with the selected model"
-                >
-                  re-run
-                </button>
-              )}
-              {transcript && (
-                <button className="btn ghost" onClick={() => copy(transcript, "transcript")}>
-                  copy
-                </button>
-              )}
-            </div>
-          </div>
-          <div className={"text-well" + (phase === "transcribing" ? " working" : "")}>
-            {phase === "transcribing" ? (
-              "listening back…"
-            ) : (
-              transcript || <span className="placeholder">record a take to see its transcript</span>
-            )}
-          </div>
-        </section>
-
-        <section className="panel output">
-          <div className="panel-head">
-            <div className="panel-label">03 · refined</div>
-            <div className="panel-actions">
-              <button className="btn ghost" onClick={() => setPromptOpen((o) => !o)}>
-                {promptOpen ? "hide prompt" : "edit prompt"}
-              </button>
-              {cleaned && (
-                <button className="btn ghost" onClick={() => copy(cleaned, "refined text")}>
-                  copy
-                </button>
-              )}
-              <button className="btn accent" onClick={refine} disabled={!transcript || !llm || busy}>
-                {phase === "cleaning" ? "refining…" : "refine ↦"}
-              </button>
-            </div>
-          </div>
-          {promptOpen && (
-            <textarea
-              className="prompt-editor"
-              value={prompt || defaultPrompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              rows={10}
-              spellCheck={false}
-            />
-          )}
-          <div className={"text-well refined" + (phase === "cleaning" ? " working" : "")}>
-            {cleaned ? (
+        ) : (
+          <>
+            {heroText || phase === "cleaning" ? (
               <>
-                {cleaned}
-                {phase === "cleaning" && <span className="caret" />}
+                <div className="hero-tools">
+                  {cleaned && (
+                    <>
+                      <button className="quiet" onClick={() => copy(cleaned, "refined text")}>
+                        copy
+                      </button>
+                      <button
+                        className="quiet"
+                        disabled={busy || !transcript}
+                        onClick={() => runCleanup(transcript)}
+                      >
+                        re-refine
+                      </button>
+                    </>
+                  )}
+                  <button className="quiet" onClick={() => setPromptOpen((o) => !o)}>
+                    {promptOpen ? "hide prompt" : "prompt"}
+                  </button>
+                </div>
+                {promptOpen && (
+                  <textarea
+                    className="prompt-editor"
+                    value={prompt || defaultPrompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    rows={8}
+                    spellCheck={false}
+                  />
+                )}
+                <div className="prose">
+                  {heroText}
+                  {phase === "cleaning" && <span className="caret" />}
+                </div>
               </>
-            ) : phase === "cleaning" ? (
-              <span className="caret" />
             ) : (
-              <span className="placeholder">refined text will stream in here</span>
+              transcript && (
+                <div className="prose dim">
+                  {transcript}
+                  {llm && phase === "idle" && (
+                    <div className="hero-tools" style={{ marginTop: 16 }}>
+                      <button className="quiet accent" onClick={() => runCleanup(transcript)}>
+                        refine ↦
+                      </button>
+                      <button className="quiet" onClick={() => copy(transcript, "transcript")}>
+                        copy
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )
             )}
-          </div>
-        </section>
+
+            {transcript && cleaned && (
+              <div className="raw-block">
+                <button className="raw-toggle" onClick={() => setRawOpen((o) => !o)}>
+                  {rawOpen ? "▾" : "▸"} raw transcript
+                </button>
+                {rawOpen && (
+                  <div className="raw-body">
+                    <div className="raw-text">{transcript}</div>
+                    <div className="hero-tools">
+                      <button className="quiet" onClick={() => copy(transcript, "transcript")}>
+                        copy
+                      </button>
+                      {stt && (
+                        <button className="quiet" disabled={busy} onClick={() => transcribeNow(stt)}>
+                          re-transcribe
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
       </main>
 
-      <footer className="statusbar">
-        <span className={"status-dot" + (phase === "recording" ? " live" : "")} />
-        <span className="status-text">{error ?? status}</span>
+      <footer className="foot">
+        <span className={"foot-dot" + (phase === "recording" ? " live" : "")} />
+        <span className="foot-text">{error ?? status}</span>
         {error && (
-          <button className="btn ghost" onClick={() => setError(null)}>
+          <button className="quiet" onClick={() => setError(null)}>
             dismiss
           </button>
         )}
@@ -346,6 +411,16 @@ export default function App() {
 
       {managerOpen && (
         <ModelManager models={models} onClose={() => setManagerOpen(false)} onChanged={refreshModels} />
+      )}
+      {historyOpen && (
+        <HistoryDrawer
+          takes={history}
+          onClose={() => setHistoryOpen(false)}
+          onLoad={loadTake}
+          onDelete={(id) => setHistory((h) => h.filter((t) => t.id !== id))}
+          onClear={() => setHistory([])}
+          onCopy={copy}
+        />
       )}
     </div>
   );

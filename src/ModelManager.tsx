@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, formatBytes, ModelInfo, ModelKind, on } from "./api";
+import { api, formatBytes, formatShortcut, ModelInfo, ModelKind, on } from "./api";
 
 interface Props {
   models: ModelInfo[];
@@ -10,6 +10,93 @@ interface Props {
 interface Progress {
   downloaded: number;
   total: number;
+}
+
+function ShortcutSettings({ onError }: { onError: (msg: string | null) => void }) {
+  const [shortcut, setShortcut] = useState<string | null>(null);
+  const [capturing, setCapturing] = useState(false);
+
+  useEffect(() => {
+    api.getSettings().then((s) => setShortcut(s.shortcut));
+  }, []);
+
+  useEffect(() => {
+    if (!capturing) return;
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        setCapturing(false);
+        return;
+      }
+      const mods = [
+        e.metaKey ? "cmd" : null,
+        e.ctrlKey ? "ctrl" : null,
+        e.altKey ? "alt" : null,
+        e.shiftKey ? "shift" : null,
+      ].filter(Boolean) as string[];
+      if (mods.length === 0) return; // a bare key is not a global shortcut
+
+      let key: string | null = null;
+      if (e.code.startsWith("Key")) key = e.code.slice(3);
+      else if (e.code.startsWith("Digit")) key = e.code.slice(5);
+      else if (e.code === "Space") key = "space";
+      else if (/^F\d{1,2}$/.test(e.code)) key = e.code;
+      if (!key) return; // still holding only modifiers
+
+      const combo = [...mods, key.toLowerCase()].join("+");
+      setCapturing(false);
+      onError(null);
+      api
+        .setShortcut(combo)
+        .then(() => setShortcut(combo))
+        .catch((err) => onError(String(err)));
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [capturing, onError]);
+
+  const disable = () => {
+    onError(null);
+    api
+      .setShortcut("")
+      .then(() => setShortcut(""))
+      .catch((err) => onError(String(err)));
+  };
+
+  return (
+    <section className="sheet-section">
+      <div className="sheet-section-head">
+        <h3>global shortcut</h3>
+        <span className="sheet-hint">record from any app; refined text is pasted where you are</span>
+      </div>
+      <div className="row">
+        <div className="row-info">
+          <div className="row-name">
+            {capturing ? (
+              <span className="capture-hint">press a key combination… (esc to cancel)</span>
+            ) : (
+              <span className="shortcut-keys">{shortcut === null ? "…" : formatShortcut(shortcut)}</span>
+            )}
+          </div>
+          <div className="row-desc">
+            press once to start recording, again to stop — the refined text lands in the frontmost
+            app (macOS will ask for Accessibility permission the first time)
+          </div>
+        </div>
+        <div className="row-action">
+          <button className="quiet accent" onClick={() => setCapturing(true)} disabled={capturing}>
+            change
+          </button>
+          {shortcut && (
+            <button className="quiet" onClick={disable}>
+              disable
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  );
 }
 
 export function ModelManager({ models, onClose, onChanged }: Props) {
@@ -59,7 +146,11 @@ export function ModelManager({ models, onClose, onChanged }: Props) {
   const addCustom = async () => {
     setErr(null);
     try {
-      await api.addCustomModel(customName.trim() || customUrl.split("/").pop() || "custom", customKind, customUrl.trim());
+      await api.addCustomModel(
+        customName.trim() || customUrl.split("/").pop() || "custom",
+        customKind,
+        customUrl.trim(),
+      );
       setCustomName("");
       setCustomUrl("");
       setAddOpen(false);
@@ -70,10 +161,10 @@ export function ModelManager({ models, onClose, onChanged }: Props) {
   };
 
   const section = (kind: ModelKind, title: string, hint: string) => (
-    <section className="mm-section">
-      <div className="mm-section-head">
+    <section className="sheet-section">
+      <div className="sheet-section-head">
         <h3>{title}</h3>
-        <span className="mm-hint">{hint}</span>
+        <span className="sheet-hint">{hint}</span>
       </div>
       {models
         .filter((m) => m.kind === kind)
@@ -81,38 +172,33 @@ export function ModelManager({ models, onClose, onChanged }: Props) {
           const p = progress[m.id];
           const pct = p && p.total > 0 ? Math.round((p.downloaded / p.total) * 100) : null;
           return (
-            <div className="mm-row" key={m.id}>
-              <div className="mm-row-info">
-                <div className="mm-name">
+            <div className="row" key={m.id}>
+              <div className="row-info">
+                <div className="row-name">
                   {m.name}
-                  {m.custom && <span className="mm-tag">custom</span>}
+                  {m.custom && <span className="tag">custom</span>}
                 </div>
-                <div className="mm-desc">
+                <div className="row-desc">
                   {formatBytes(m.sizeBytes)} · {m.description}
                 </div>
               </div>
-              <div className="mm-row-action">
+              <div className="row-action">
                 {p ? (
-                  <div className="mm-progress">
-                    <div className="mm-progress-track">
-                      <div
-                        className="mm-progress-fill"
-                        style={{ width: `${pct ?? 2}%` }}
-                      />
+                  <div className="progress">
+                    <div className="progress-track">
+                      <div className="progress-fill" style={{ width: `${pct ?? 2}%` }} />
                     </div>
-                    <span className="mm-progress-label">
-                      {pct !== null ? `${pct}%` : "…"}
-                    </span>
+                    <span className="progress-label">{pct !== null ? `${pct}%` : "…"}</span>
                   </div>
                 ) : m.downloaded ? (
                   <>
-                    <span className="mm-installed">● installed</span>
-                    <button className="btn ghost" onClick={() => remove(m.id)}>
+                    <span className="installed">● installed</span>
+                    <button className="quiet" onClick={() => remove(m.id)}>
                       remove
                     </button>
                   </>
                 ) : (
-                  <button className="btn accent" onClick={() => download(m.id)}>
+                  <button className="quiet accent" onClick={() => download(m.id)}>
                     download
                   </button>
                 )}
@@ -124,26 +210,25 @@ export function ModelManager({ models, onClose, onChanged }: Props) {
   );
 
   return (
-    <div className="mm-overlay" onClick={onClose}>
-      <div className="mm-sheet" onClick={(e) => e.stopPropagation()}>
-        <header className="mm-head">
-          <h2>model library</h2>
-          <div className="mm-head-note">
-            downloads come from Hugging Face — the only time this app touches the network
-          </div>
-          <button className="btn ghost" onClick={onClose}>
+    <div className="sheet-overlay" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <header className="sheet-head">
+          <h2>models &amp; settings</h2>
+          <span className="sheet-note">downloads are the only time unsound touches the network</span>
+          <button className="quiet" onClick={onClose}>
             close ✕
           </button>
         </header>
 
-        <div className="mm-body">
+        <div className="sheet-body">
+          <ShortcutSettings onError={setErr} />
           {section("stt", "speech → text", "whisper.cpp GGML models")}
           {section("llm", "text cleanup", "any llama.cpp GGUF instruct model")}
 
-          <section className="mm-section">
+          <section className="sheet-section">
             {addOpen ? (
-              <div className="mm-add-form">
-                <div className="mm-add-row">
+              <div className="add-form">
+                <div className="add-row">
                   <select value={customKind} onChange={(e) => setCustomKind(e.target.value as ModelKind)}>
                     <option value="stt">speech (GGML)</option>
                     <option value="llm">cleanup (GGUF)</option>
@@ -159,23 +244,23 @@ export function ModelManager({ models, onClose, onChanged }: Props) {
                   value={customUrl}
                   onChange={(e) => setCustomUrl(e.target.value)}
                 />
-                <div className="mm-add-row">
-                  <button className="btn accent" disabled={!customUrl.trim()} onClick={addCustom}>
+                <div className="add-row">
+                  <button className="quiet accent" disabled={!customUrl.trim()} onClick={addCustom}>
                     add model
                   </button>
-                  <button className="btn ghost" onClick={() => setAddOpen(false)}>
+                  <button className="quiet" onClick={() => setAddOpen(false)}>
                     cancel
                   </button>
                 </div>
               </div>
             ) : (
-              <button className="btn ghost mm-add-btn" onClick={() => setAddOpen(true)}>
+              <button className="quiet add-btn" onClick={() => setAddOpen(true)}>
                 + add a custom model by URL
               </button>
             )}
           </section>
 
-          {err && <div className="mm-error">{err}</div>}
+          {err && <div className="sheet-error">{err}</div>}
         </div>
       </div>
     </div>

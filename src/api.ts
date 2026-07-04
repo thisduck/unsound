@@ -32,6 +32,10 @@ export interface DownloadDone {
   error: string | null;
 }
 
+export interface Settings {
+  shortcut: string;
+}
+
 export const api = {
   listModels: () => invoke<ModelInfo[]>("list_models"),
   downloadModel: (id: string) => invoke<void>("download_model", { id }),
@@ -45,6 +49,9 @@ export const api = {
   cleanupText: (modelId: string, text: string, prompt?: string) =>
     invoke<string>("cleanup_text", { modelId, text, prompt: prompt ?? null }),
   defaultCleanupPrompt: () => invoke<string>("default_cleanup_prompt"),
+  getSettings: () => invoke<Settings>("get_settings"),
+  setShortcut: (shortcut: string) => invoke<void>("set_shortcut", { shortcut }),
+  deliverText: (text: string) => invoke<void>("deliver_text", { text }),
 };
 
 export const on = {
@@ -56,7 +63,36 @@ export const on = {
     listen<DownloadDone>("model-download-done", (e) => cb(e.payload)),
   llmToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
     listen<string>("llm-token", (e) => cb(e.payload)),
+  hotkeyToggle: (cb: () => void): Promise<UnlistenFn> =>
+    listen<void>("hotkey-toggle", () => cb()),
 };
+
+export function formatShortcut(shortcut: string): string {
+  if (!shortcut) return "disabled";
+  return shortcut
+    .split("+")
+    .map((part) => {
+      switch (part.toLowerCase()) {
+        case "cmd":
+        case "super":
+        case "command":
+          return "⌘";
+        case "shift":
+          return "⇧";
+        case "alt":
+        case "option":
+          return "⌥";
+        case "ctrl":
+        case "control":
+          return "⌃";
+        case "space":
+          return "Space";
+        default:
+          return part.length === 1 ? part.toUpperCase() : part;
+      }
+    })
+    .join("");
+}
 
 export function formatBytes(n: number): string {
   if (!n) return "?";

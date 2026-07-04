@@ -1,13 +1,17 @@
 mod audio;
+mod deliver;
 mod llm;
 mod models;
+mod settings;
 mod stt;
 
 use audio::{AudioState, RecordingResult};
 use llm::LlmState;
 use models::{ModelInfo, ModelKind};
+use settings::Settings;
 use stt::SttState;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 #[derive(Default)]
 struct AppState {
@@ -96,11 +100,60 @@ fn default_cleanup_prompt() -> String {
     llm::DEFAULT_CLEANUP_PROMPT.to_string()
 }
 
+#[tauri::command]
+fn get_settings(app: AppHandle) -> Settings {
+    settings::load(&app)
+}
+
+#[tauri::command]
+fn set_shortcut(app: AppHandle, shortcut: String) -> Result<(), String> {
+    apply_shortcut(&app, &shortcut)?;
+    let mut s = settings::load(&app);
+    s.shortcut = shortcut;
+    settings::save(&app, &s)
+}
+
+#[tauri::command]
+async fn deliver_text(text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || deliver::deliver_text(&text))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// (Re)register the global shortcut; an empty string disables it.
+fn apply_shortcut(app: &AppHandle, shortcut: &str) -> Result<(), String> {
+    let gs = app.global_shortcut();
+    gs.unregister_all().map_err(|e| e.to_string())?;
+    if shortcut.trim().is_empty() {
+        return Ok(());
+    }
+    gs.register(shortcut)
+        .map_err(|e| format!("could not register shortcut '{shortcut}': {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        // The frontend owns the pipeline; it reacts to this
+                        // exactly like a click on the record control.
+                        let _ = app.emit("hotkey-toggle", ());
+                    }
+                })
+                .build(),
+        )
         .manage(AppState::default())
+        .setup(|app| {
+            let shortcut = settings::load(app.handle()).shortcut;
+            if let Err(e) = apply_shortcut(app.handle(), &shortcut) {
+                eprintln!("global shortcut unavailable: {e}");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_models,
             download_model,
@@ -110,7 +163,10 @@ pub fn run() {
             stop_recording,
             transcribe,
             cleanup_text,
-            default_cleanup_prompt
+            default_cleanup_prompt,
+            get_settings,
+            set_shortcut,
+            deliver_text
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
