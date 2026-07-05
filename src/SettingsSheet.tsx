@@ -5,8 +5,8 @@ import { MicPicker, ModelLibrary, PermissionsSection, ShortcutsSection } from ".
 type Section = "models" | "shortcuts" | "microphone" | "prompt" | "permissions";
 
 const SECTIONS: { id: Section; label: string }[] = [
-  { id: "models", label: "models" },
   { id: "shortcuts", label: "shortcuts" },
+  { id: "models", label: "models" },
   { id: "microphone", label: "microphone" },
   { id: "prompt", label: "prompt" },
   { id: "permissions", label: "permissions" },
@@ -39,7 +39,7 @@ export function SettingsSheet({
   onChanged,
   onReplayOnboarding,
 }: Props) {
-  const [section, setSection] = useState<Section>("models");
+  const [section, setSection] = useState<Section>("shortcuts");
   const [err, setErr] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [customName, setCustomName] = useState("");
