@@ -321,12 +321,15 @@ pub fn run() {
                         .copied();
                     match (mode, event.state()) {
                         (Some(ShortcutMode::HandsFree), ShortcutState::Pressed) => {
+                            eprintln!("[shortcut] hands-free pressed");
                             let _ = app.emit("hotkey-toggle", ());
                         }
                         (Some(ShortcutMode::PushToTalk), ShortcutState::Pressed) => {
+                            eprintln!("[shortcut] ptt pressed");
                             let _ = app.emit("ptt-down", ());
                         }
                         (Some(ShortcutMode::PushToTalk), ShortcutState::Released) => {
+                            eprintln!("[shortcut] ptt released");
                             let _ = app.emit("ptt-up", ());
                         }
                         _ => {}

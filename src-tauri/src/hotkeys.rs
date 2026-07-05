@@ -181,6 +181,7 @@ fn combo_string(mods: &BTreeSet<&'static str>, key: Option<&str>) -> String {
 }
 
 fn emit(event: &str, payload: Option<CaptureUpdate>) {
+    eprintln!("[hotkeys] emit {event}");
     if let Some(app) = APP.get() {
         match payload {
             Some(p) => {

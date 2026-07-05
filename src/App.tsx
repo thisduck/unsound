@@ -69,6 +69,16 @@ export default function App() {
   const [history, setHistory] = useState<Take[]>(loadHistory);
   const cleaningRef = useRef(false);
   const takeRef = useRef<string | null>(null);
+  // Event handlers race React state: phaseRef is always current, and a
+  // release that lands while the mic is still starting queues the stop.
+  const phaseRef = useRef<Phase>("idle");
+  const startingRef = useRef(false);
+  const stopQueuedRef = useRef(false);
+
+  const changePhase = (p: Phase) => {
+    phaseRef.current = p;
+    setPhase(p);
+  };
 
   useEffect(() => {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
@@ -130,30 +140,30 @@ export default function App() {
 
   const fail = (e: unknown) => {
     setError(String(e));
-    setPhase("idle");
+    changePhase("idle");
   };
 
   const transcribeNow = async (model: ModelInfo): Promise<string | null> => {
-    setPhase("transcribing");
+    changePhase("transcribing");
     setStatus(`transcribing with ${model.name}…`);
     setError(null);
     try {
       const text = await api.transcribe(model.id);
       setTranscript(text);
       upsertTake({ raw: text, sttModel: model.name });
-      setPhase("idle");
+      changePhase("idle");
       setStatus("transcript ready");
       return text;
     } catch (e) {
       setError(String(e));
-      setPhase("idle");
+      changePhase("idle");
       return null;
     }
   };
 
   const runCleanup = async (text: string): Promise<string | null> => {
     if (!llm || !text) return null;
-    setPhase("cleaning");
+    changePhase("cleaning");
     setCleaned("");
     cleaningRef.current = true;
     setStatus(`refining with ${llm.name}…`);
@@ -163,13 +173,13 @@ export default function App() {
       cleaningRef.current = false;
       setCleaned(result);
       upsertTake({ refined: result, llmModel: llm.name });
-      setPhase("idle");
+      changePhase("idle");
       setStatus("refined — copy it out, or swap models and re-run");
       return result;
     } catch (e) {
       cleaningRef.current = false;
       setError(String(e));
-      setPhase("idle");
+      changePhase("idle");
       return null;
     }
   };
@@ -181,17 +191,17 @@ export default function App() {
 
   const toggleRecord = async (fromHotkey = false) => {
     setError(null);
-    if (phase === "recording") {
+    if (phaseRef.current === "recording") {
       try {
         const res = await api.stopRecording();
         if (fromHotkey) api.emitOverlayState("processing");
         if (res.durationSecs < 0.35) {
-          setPhase("idle");
+          changePhase("idle");
           setStatus("take too short — hold a moment longer");
           return;
         }
         if (!stt) {
-          setPhase("idle");
+          changePhase("idle");
           setStatus("recorded — download a speech model to transcribe");
           return;
         }
@@ -214,13 +224,15 @@ export default function App() {
       } finally {
         if (fromHotkey) overlayOff();
       }
-    } else if (phase === "idle") {
+    } else if (phaseRef.current === "idle" && !startingRef.current) {
+      startingRef.current = true;
+      stopQueuedRef.current = false;
       try {
         await api.startRecording();
         setTranscript("");
         setCleaned("");
         setRawOpen(false);
-        setPhase("recording");
+        changePhase("recording");
         if (fromHotkey) {
           await api.setOverlay(true).catch(() => {});
           api.emitOverlayState("recording");
@@ -232,6 +244,13 @@ export default function App() {
         );
       } catch (e) {
         fail(e);
+      } finally {
+        startingRef.current = false;
+      }
+      // The release arrived while the mic was still starting; honor it now.
+      if (stopQueuedRef.current && (phaseRef.current as Phase) === "recording") {
+        stopQueuedRef.current = false;
+        await toggleRecord(fromHotkey);
       }
     }
   };
@@ -240,18 +259,22 @@ export default function App() {
   // they always see the current phase and model selection.
   const hotkeyRef = useRef<() => void>(() => {});
   hotkeyRef.current = () => {
-    if (phase === "idle" || phase === "recording") toggleRecord(true);
+    if (startingRef.current) stopQueuedRef.current = true;
+    else if (phaseRef.current === "idle" || phaseRef.current === "recording") toggleRecord(true);
   };
 
   const pttRef = useRef<(what: "down" | "up" | "cancel") => void>(() => {});
   pttRef.current = (what) => {
-    if (what === "down" && phase === "idle") toggleRecord(true);
-    else if (what === "up" && phase === "recording") toggleRecord(true);
-    else if (what === "cancel" && phase === "recording") {
+    if (what === "down") {
+      if (phaseRef.current === "idle" && !startingRef.current) toggleRecord(true);
+    } else if (what === "up") {
+      if (startingRef.current) stopQueuedRef.current = true;
+      else if (phaseRef.current === "recording") toggleRecord(true);
+    } else if (what === "cancel" && phaseRef.current === "recording") {
       // The held key turned out to be part of a bigger combo; discard.
       api.stopRecording().catch(() => {});
       overlayOff();
-      setPhase("idle");
+      changePhase("idle");
       setStatus("cancelled");
     }
   };
