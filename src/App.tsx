@@ -307,6 +307,7 @@ export default function App() {
   return (
     <div className="shell">
       <header className="head">
+        <img src="/unsound.svg" alt="" className="mark-logo" />
         <span className="mark">unsound</span>
         <span className="spacer" />
         <button className="quiet" onClick={() => setHistoryOpen(true)}>

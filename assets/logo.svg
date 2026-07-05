@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- unsound app icon: wave pill on charcoal, macOS icon-grid proportions -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#282b31"/>
+      <stop offset="1" stop-color="#1b1d21"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#tile)"/>
+  <g fill="#e8a87c">
+    <rect x="210.5" y="454.5" width="45" height="115" rx="22.5"/>
+    <rect x="303.5" y="403"   width="45" height="218" rx="22.5"/>
+    <rect x="396.5" y="345.5" width="45" height="333" rx="22.5"/>
+    <rect x="489.5" y="288"   width="45" height="448" rx="22.5"/>
+    <rect x="582.5" y="345.5" width="45" height="333" rx="22.5"/>
+    <rect x="675.5" y="403"   width="45" height="218" rx="22.5"/>
+    <rect x="768.5" y="454.5" width="45" height="115" rx="22.5"/>
+  </g>
+</svg>

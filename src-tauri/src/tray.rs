@@ -51,8 +51,11 @@ pub fn build_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
 
 pub fn init(app: &AppHandle) -> Result<(), tauri::Error> {
     let menu = build_menu(app)?;
+    // include_bytes! keeps the tray icon in lockstep with the icons dir —
+    // cargo re-embeds it whenever the file changes.
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png"))?;
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(app.default_window_icon().cloned().expect("app icon missing"))
+        .icon(icon)
         .icon_as_template(false)
         .tooltip("unsound")
         .menu(&menu)

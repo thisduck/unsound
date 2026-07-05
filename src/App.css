@@ -60,6 +60,13 @@ body {
   color: #f0eee9;
 }
 
+.mark-logo {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  margin-right: -2px;
+}
+
 .quiet {
   font-family: var(--sans);
   font-size: 12.5px;
@@ -773,6 +780,15 @@ body {
   font-weight: 600;
   color: var(--accent);
   margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.ob-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
 }
 
 .ob-title {

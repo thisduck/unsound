@@ -29,7 +29,10 @@ export function Onboarding({ models, onChanged, onDone }: Props) {
   const steps = [
     /* ── 0 · private by design ── */
     <div className="ob-step" key="welcome">
-      <div className="ob-mark">unsound</div>
+      <div className="ob-mark">
+        <img src="/unsound.svg" alt="" className="ob-logo" />
+        unsound
+      </div>
       <h1 className="ob-title">your voice, into clean text.<br />entirely on this Mac.</h1>
       <p className="ob-text">
         Speak — unsound writes it down, then quietly tidies it up: punctuation, paragraphs, the
