@@ -72,6 +72,8 @@ export const api = {
   stopRecording: () => invoke<RecordingResult>("stop_recording"),
   transcribe: (modelId: string, language?: string) =>
     invoke<string>("transcribe", { modelId, language: language ?? null }),
+  transcribeFile: (path: string, modelId: string, language?: string) =>
+    invoke<string>("transcribe_file", { path, modelId, language: language ?? null }),
   cleanupText: (modelId: string, text: string, prompt?: string, styleId?: string) =>
     invoke<string>("cleanup_text", {
       modelId,
@@ -123,7 +125,16 @@ export const on = {
     listen<OverlayState>("overlay-state", (e) => cb(e.payload)),
   settingsChanged: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("settings-changed", () => cb()),
+  fileInfo: (cb: (info: { sizeBytes: number; durationSecs: number }) => void): Promise<UnlistenFn> =>
+    listen<{ sizeBytes: number; durationSecs: number }>("file-info", (e) => cb(e.payload)),
 };
+
+export function formatDuration(secs: number): string {
+  const s = Math.round(secs);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return m > 0 ? `${m}:${String(r).padStart(2, "0")}` : `${r}s`;
+}
 
 export function formatShortcut(shortcut: string): string {
   if (!shortcut) return "disabled";

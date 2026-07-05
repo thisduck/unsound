@@ -1,4 +1,5 @@
-mod audio;
+pub mod audio;
+pub mod audiofile;
 mod deliver;
 mod frontapp;
 mod hotkeys;
@@ -108,6 +109,63 @@ async fn transcribe(
     let initial_prompt =
         (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
     // Whisper inference is heavy; keep it off the async runtime.
+    let worker_app = app.clone();
+    let text = tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app.state::<AppState>();
+        stt::transcribe(
+            &state.stt,
+            &model_path,
+            &samples,
+            language.as_deref(),
+            initial_prompt.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    *state.last_output.lock().unwrap() = text.clone();
+    Ok(text)
+}
+
+/// Decode an uploaded audio file into the recording buffer, then run the
+/// same transcription path as a mic take.
+#[tauri::command]
+async fn transcribe_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    model_id: String,
+    language: Option<String>,
+) -> Result<String, String> {
+    let model_path = models::downloaded_model_path(&app, &model_id)?;
+    let file = std::path::PathBuf::from(&path);
+    let size_bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+    let decode_file = file.clone();
+    let samples =
+        tauri::async_runtime::spawn_blocking(move || audiofile::decode_to_samples(&decode_file))
+            .await
+            .map_err(|e| e.to_string())??;
+    let duration_secs = samples.len() as f32 / audio::WHISPER_SAMPLE_RATE as f32;
+    if duration_secs < 0.2 {
+        return Err("that file has almost no audio in it".into());
+    }
+    // Tell the UI the file's size and length now that decode is done, before
+    // the slow transcription step.
+    let _ = app.emit(
+        "file-info",
+        serde_json::json!({ "sizeBytes": size_bytes, "durationSecs": duration_secs }),
+    );
+    *state.audio.last_recording.lock().unwrap() = samples.clone();
+
+    let vocab: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        settings::load(&app)
+            .dictionary
+            .iter()
+            .map(|e| e.to.trim().to_string())
+            .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
+            .collect()
+    };
+    let initial_prompt = (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
     let worker_app = app.clone();
     let text = tauri::async_runtime::spawn_blocking(move || {
         let state = worker_app.state::<AppState>();
@@ -382,6 +440,7 @@ fn cancel_shortcut_capture() {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -438,6 +497,7 @@ pub fn run() {
             start_recording,
             stop_recording,
             transcribe,
+            transcribe_file,
             cleanup_text,
             default_cleanup_prompt,
             get_settings,

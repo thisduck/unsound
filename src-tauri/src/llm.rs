@@ -221,20 +221,34 @@ pub fn cleanup_text(
         .str_to_token(&prompt, AddBos::Always)
         .map_err(|e| format!("tokenization failed: {e}"))?;
 
+    if tokens.is_empty() {
+        return Ok(String::new());
+    }
     let n_ctx = (tokens.len() + MAX_NEW_TOKENS + 16).max(2048) as u32;
     let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx));
     let mut ctx = model
         .new_context(backend, ctx_params)
         .map_err(|e| format!("failed to create LLM context: {e}"))?;
 
-    let mut batch = LlamaBatch::new(tokens.len().max(512), 1);
+    // Ingest the prompt in chunks that fit llama.cpp's batch limit; a single
+    // batch of thousands of tokens (long files) otherwise aborts in ggml.
+    const CHUNK: usize = 512;
     let last = tokens.len() - 1;
-    for (i, token) in tokens.iter().enumerate() {
-        batch
-            .add(*token, i as i32, &[0], i == last)
-            .map_err(|e| e.to_string())?;
+    let mut batch = LlamaBatch::new(CHUNK, 1);
+    let mut start = 0;
+    while start < tokens.len() {
+        let end = (start + CHUNK).min(tokens.len());
+        batch.clear();
+        for (offset, token) in tokens[start..end].iter().enumerate() {
+            let pos = (start + offset) as i32;
+            batch
+                .add(*token, pos, &[0], (start + offset) == last)
+                .map_err(|e| e.to_string())?;
+        }
+        ctx.decode(&mut batch)
+            .map_err(|e| format!("prompt decode failed: {e}"))?;
+        start = end;
     }
-    ctx.decode(&mut batch).map_err(|e| format!("prompt decode failed: {e}"))?;
 
     let mut sampler = LlamaSampler::chain_simple([
         LlamaSampler::temp(0.2),
@@ -245,7 +259,7 @@ pub fn cleanup_text(
     let force_lowercase = style.map(|s| s.lowercase).unwrap_or(false);
     let mut utf8 = Utf8Stream::new();
     let mut output = String::new();
-    let mut n_cur = batch.n_tokens();
+    let mut n_cur = tokens.len() as i32;
     let mut generated = 0usize;
 
     loop {

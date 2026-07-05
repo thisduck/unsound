@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, on, ModelInfo, Style } from "./api";
+import { api, on, formatBytes, formatDuration, ModelInfo, Style } from "./api";
 import { CorrectableText } from "./Correctable";
 import { useLevelHistory, Wave } from "./Wave";
 import { MicPicker } from "./sections";
@@ -69,6 +69,7 @@ export default function App() {
   const [llmId, setLlmId] = useLocalStorage("unsound.llm", "");
   const [history, setHistory] = useState<Take[]>(loadHistory);
   const [stylesList, setStylesList] = useState<Style[]>([]);
+  const [dragOver, setDragOver] = useState(false);
   const [styleId, setStyleId] = useState("");
   const styleIdRef = useRef("");
   const cleaningRef = useRef(false);
@@ -130,8 +131,22 @@ export default function App() {
       on.pttUp(() => pttRef.current("up")),
       on.pttCancel(() => pttRef.current("cancel")),
     ];
+    // Window drag-and-drop for audio files.
+    const dropUnlisten = import("@tauri-apps/api/webview").then(({ getCurrentWebview }) =>
+      getCurrentWebview().onDragDropEvent((event) => {
+        if (event.payload.type === "over" || event.payload.type === "enter") setDragOver(true);
+        else if (event.payload.type === "leave") setDragOver(false);
+        else if (event.payload.type === "drop") {
+          setDragOver(false);
+          const path = event.payload.paths?.[0];
+          if (path) dropRef.current(path);
+        }
+      }),
+    );
+
     return () => {
       subs.forEach((p) => p.then((un) => un()));
+      dropUnlisten.then((un) => un());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -185,6 +200,55 @@ export default function App() {
       changePhase("idle");
       return null;
     }
+  };
+
+  // Decode + transcribe an uploaded/dropped audio file, then refine like a
+  // mic take. Handles the whole pipeline; runs the file through the same
+  // transcript → cleanup path.
+  const transcribeFromFile = async (path: string) => {
+    if (busy || phaseRef.current !== "idle") return;
+    if (!stt) {
+      setError("download a speech model first (settings → models)");
+      return;
+    }
+    const name = path.split("/").pop() || "file";
+    changePhase("transcribing");
+    setTranscript("");
+    setCleaned("");
+    setRawOpen(false);
+    setStatus(`decoding ${name}…`);
+    setError(null);
+    takeRef.current = crypto.randomUUID();
+    // A one-shot listener shows the file's size and length once decoding
+    // finishes, so long files don't look stuck.
+    const infoSub = on.fileInfo(({ sizeBytes, durationSecs }) => {
+      setStatus(
+        `transcribing ${name} · ${formatDuration(durationSecs)} · ${formatBytes(sizeBytes)}…`,
+      );
+    });
+    try {
+      const text = await api.transcribeFile(path, stt.id);
+      setTranscript(text);
+      upsertTake({ raw: text, sttModel: stt.name, app: name });
+      changePhase("idle");
+      setStatus(`transcribed ${name}`);
+      if (llm) await runCleanup(text);
+    } catch (e) {
+      setError(String(e));
+      changePhase("idle");
+    } finally {
+      infoSub.then((un) => un());
+    }
+  };
+
+  const pickFile = async () => {
+    if (busy || phaseRef.current !== "idle") return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    // No extension filter — the real format is sniffed from the bytes, and
+    // WhatsApp files often carry a wrong extension (e.g. a voice note saved
+    // as .jpeg), so any file must be selectable.
+    const path = await open({ multiple: false });
+    if (typeof path === "string") transcribeFromFile(path);
   };
 
   const runCleanup = async (text: string, styleOverride?: string): Promise<string | null> => {
@@ -283,13 +347,16 @@ export default function App() {
     }
   };
 
-  // The hotkey listeners are registered once; route them through refs so
-  // they always see the current phase and model selection.
+  // The hotkey and drop listeners are registered once; route them through
+  // refs so they always see the current phase and model selection.
   const hotkeyRef = useRef<() => void>(() => {});
   hotkeyRef.current = () => {
     if (startingRef.current) stopQueuedRef.current = true;
     else if (phaseRef.current === "idle" || phaseRef.current === "recording") toggleRecord(true);
   };
+
+  const dropRef = useRef<(path: string) => void>(() => {});
+  dropRef.current = (path: string) => transcribeFromFile(path);
 
   const pttRef = useRef<(what: "down" | "up" | "cancel") => void>(() => {});
   pttRef.current = (what) => {
@@ -401,6 +468,14 @@ export default function App() {
           )}
           {pillLabel}
           <Timer running={phase === "recording"} />
+        </button>
+        <button
+          className="upload-btn"
+          onClick={pickFile}
+          disabled={busy || phase === "recording"}
+          title="Transcribe an audio file (or drop one on the window)"
+        >
+          ↑ upload
         </button>
       </div>
 
@@ -541,6 +616,11 @@ export default function App() {
           onClear={() => setHistory([])}
           onCopy={copy}
         />
+      )}
+      {dragOver && (
+        <div className="drop-veil">
+          <div className="drop-veil-inner">drop an audio file to transcribe</div>
+        </div>
       )}
     </div>
   );

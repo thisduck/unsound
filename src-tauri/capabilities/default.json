@@ -5,6 +5,8 @@
   "windows": ["main", "overlay"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "dialog:default",
+    "core:window:allow-start-dragging"
   ]
 }

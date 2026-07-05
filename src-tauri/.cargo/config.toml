@@ -1,0 +1,5 @@
+# libopus (via audiopus_sys) ships a CMakeLists that predates CMake 4's
+# minimum-policy floor; this lets its old cmake_minimum_required pass.
+# Applies to local and CI builds alike.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
