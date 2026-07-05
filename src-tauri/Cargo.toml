@@ -1,6 +1,6 @@
 [package]
 name = "unsound"
-version = "0.4.0"
+version = "0.4.1"
 description = "Local dictation and cleanup - offline whisper + LLM"
 authors = ["you"]
 edition = "2021"
