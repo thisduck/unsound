@@ -38,6 +38,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git stash
+          # The dispatch snapshot can trail a just-pushed commit; build the
+          # real tip of main so the release matches it.
+          git pull --rebase origin main
+          git stash pop
           git add -A
           git commit -m "release v${{ inputs.version }}"
           git tag "v${{ inputs.version }}"
