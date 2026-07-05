@@ -233,6 +233,66 @@ fn apply_shortcuts(app: &AppHandle, s: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+const OVERLAY_W: f64 = 200.0;
+const OVERLAY_H: f64 = 56.0;
+
+/// Small always-on-top wave shown while dictating into other apps.
+fn create_overlay(app: &AppHandle) -> tauri::Result<()> {
+    let overlay = tauri::WebviewWindowBuilder::new(
+        app,
+        "overlay",
+        tauri::WebviewUrl::App("index.html#overlay".into()),
+    )
+    .title("unsound")
+    .inner_size(OVERLAY_W, OVERLAY_H)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .visible(false)
+    .focused(false)
+    .resizable(false)
+    .skip_taskbar(true)
+    .shadow(false)
+    .accept_first_mouse(false)
+    .visible_on_all_workspaces(true)
+    .build()?;
+    // Purely an indicator; clicks pass through to whatever is underneath.
+    let _ = overlay.set_ignore_cursor_events(true);
+    Ok(())
+}
+
+/// Park the overlay bottom-center of the monitor the cursor is on.
+fn position_overlay(app: &AppHandle, overlay: &tauri::WebviewWindow) {
+    let monitor = app
+        .cursor_position()
+        .ok()
+        .and_then(|pos| app.monitor_from_point(pos.x, pos.y).ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else { return };
+    let scale = monitor.scale_factor();
+    let mpos = monitor.position();
+    let msize = monitor.size();
+    let w = OVERLAY_W * scale;
+    let h = OVERLAY_H * scale;
+    let x = mpos.x as f64 + (msize.width as f64 - w) / 2.0;
+    let y = mpos.y as f64 + msize.height as f64 - h - 96.0 * scale;
+    let _ = overlay.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+#[tauri::command]
+fn set_overlay(app: AppHandle, visible: bool) -> Result<(), String> {
+    let Some(overlay) = app.get_webview_window("overlay") else {
+        return Ok(());
+    };
+    if visible {
+        position_overlay(&app, &overlay);
+        overlay.show().map_err(|e| e.to_string())?;
+    } else {
+        overlay.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn start_shortcut_capture(app: AppHandle) -> bool {
     hotkeys::start_capture(&app)
@@ -281,6 +341,7 @@ pub fn run() {
                 eprintln!("global shortcuts unavailable: {e}");
             }
             tray::init(app.handle())?;
+            create_overlay(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -305,6 +366,7 @@ pub fn run() {
             set_shortcuts,
             start_shortcut_capture,
             cancel_shortcut_capture,
+            set_overlay,
             deliver_text,
             permission_status,
             request_accessibility,

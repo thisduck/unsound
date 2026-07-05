@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, on, ModelInfo } from "./api";
+import { useLevelHistory, Wave } from "./Wave";
 import { MicPicker } from "./sections";
 import { SettingsSheet } from "./SettingsSheet";
 import { Onboarding } from "./Onboarding";
@@ -53,7 +54,6 @@ function Timer({ running }: { running: boolean }) {
 export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [phase, setPhase] = useState<Phase>("idle");
-  const [level, setLevel] = useState(0);
   const [transcript, setTranscript] = useState("");
   const [cleaned, setCleaned] = useState("");
   const [status, setStatus] = useState("ready — fully offline");
@@ -85,7 +85,6 @@ export default function App() {
       setPrompt((cur) => (cur.trim() === OLD_DEFAULT_PROMPT ? "" : cur));
     });
     const subs = [
-      on.audioLevel(setLevel),
       on.llmToken((chunk) => {
         if (cleaningRef.current) setCleaned((c) => c + chunk);
       }),
@@ -175,12 +174,17 @@ export default function App() {
     }
   };
 
+  const overlayOff = () => {
+    api.emitOverlayState("hidden");
+    api.setOverlay(false).catch(() => {});
+  };
+
   const toggleRecord = async (fromHotkey = false) => {
     setError(null);
     if (phase === "recording") {
       try {
         const res = await api.stopRecording();
-        setLevel(0);
+        if (fromHotkey) api.emitOverlayState("processing");
         if (res.durationSecs < 0.35) {
           setPhase("idle");
           setStatus("take too short — hold a moment longer");
@@ -207,6 +211,8 @@ export default function App() {
         }
       } catch (e) {
         fail(e);
+      } finally {
+        if (fromHotkey) overlayOff();
       }
     } else if (phase === "idle") {
       try {
@@ -215,6 +221,10 @@ export default function App() {
         setCleaned("");
         setRawOpen(false);
         setPhase("recording");
+        if (fromHotkey) {
+          await api.setOverlay(true).catch(() => {});
+          api.emitOverlayState("recording");
+        }
         setStatus(
           fromHotkey
             ? "recording — press the shortcut again to stop"
@@ -240,6 +250,7 @@ export default function App() {
     else if (what === "cancel" && phase === "recording") {
       // The held key turned out to be part of a bigger combo; discard.
       api.stopRecording().catch(() => {});
+      overlayOff();
       setPhase("idle");
       setStatus("cancelled");
     }
@@ -259,6 +270,7 @@ export default function App() {
   };
 
   const busy = phase === "transcribing" || phase === "cleaning";
+  const waveBars = useLevelHistory(phase === "recording");
   const heroText = cleaned || "";
   const pillLabel =
     phase === "recording"
@@ -288,14 +300,11 @@ export default function App() {
           onClick={() => toggleRecord()}
           disabled={busy}
         >
-          <span
-            className="pill-dot"
-            style={
-              phase === "recording"
-                ? { boxShadow: `0 0 0 ${3 + Math.min(level * 60, 14)}px rgba(232,168,124,0.16)` }
-                : undefined
-            }
-          />
+          {phase === "recording" ? (
+            <Wave bars={waveBars} className="pill-wave" />
+          ) : (
+            <span className="pill-dot" />
+          )}
           {pillLabel}
           <Timer running={phase === "recording"} />
         </button>

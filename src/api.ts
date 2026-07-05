@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, UnlistenFn } from "@tauri-apps/api/event";
+
+export type OverlayState = "recording" | "processing" | "hidden";
 
 export type ModelKind = "stt" | "llm";
 
@@ -68,6 +70,8 @@ export const api = {
   requestMicrophone: () => invoke<void>("request_microphone"),
   listMicrophones: () => invoke<string[]>("list_microphones"),
   setMicrophone: (device: string) => invoke<void>("set_microphone", { device }),
+  setOverlay: (visible: boolean) => invoke<void>("set_overlay", { visible }),
+  emitOverlayState: (state: OverlayState) => emit("overlay-state", state),
 };
 
 export const on = {
@@ -90,6 +94,8 @@ export const on = {
     listen<{ combo: string }>("capture-commit", (e) => cb(e.payload.combo)),
   captureCancel: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("capture-cancel", () => cb()),
+  overlayState: (cb: (state: OverlayState) => void): Promise<UnlistenFn> =>
+    listen<OverlayState>("overlay-state", (e) => cb(e.payload)),
   settingsChanged: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("settings-changed", () => cb()),
 };
