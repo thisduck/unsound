@@ -309,8 +309,8 @@ export function PermissionsSection({ onError }: { onError: (msg: string | null) 
             {accessibility === false && <span className="denied">not granted</span>}
           </div>
           <div className="row-desc">
-            lets unsound press ⌘V for you so shortcut dictation lands in the app you're using;
-            without it the text still goes to your clipboard
+            lets unsound type the refined text into the app you're using — the clipboard is never
+            touched
           </div>
         </div>
         <div className="row-action">

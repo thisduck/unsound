@@ -9,7 +9,7 @@ const MIC_DEFAULT_ID: &str = "mic:";
 
 pub fn build_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
     let open = MenuItem::with_id(app, "open", "Open unsound", true, None::<&str>)?;
-    let paste = MenuItem::with_id(app, "paste-last", "Paste last take", true, None::<&str>)?;
+    let paste = MenuItem::with_id(app, "paste-last", "Insert last take", true, None::<&str>)?;
 
     let selected = settings::load(app).mic_device;
     let mut mic_items: Vec<CheckMenuItem<Wry>> = vec![CheckMenuItem::with_id(

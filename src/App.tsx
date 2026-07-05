@@ -214,7 +214,7 @@ export default function App() {
           const out = refined ?? text;
           try {
             await api.deliverText(out);
-            setStatus("delivered to the frontmost app — also on your clipboard");
+            setStatus("typed into the frontmost app");
           } catch (e) {
             setError(String(e));
           }
