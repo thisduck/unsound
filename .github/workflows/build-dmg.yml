@@ -1,0 +1,34 @@
+name: build dmg
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: macOS dmg (Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build app and dmg
+        run: npm run tauri build
+
+      - name: Upload dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsound-dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
