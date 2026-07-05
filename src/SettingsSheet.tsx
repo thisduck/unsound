@@ -198,21 +198,29 @@ export function SettingsSheet({
         );
       case "prompt":
         return (
-          <section className="sheet-section">
-            <div className="sheet-section-head">
-              <h3>cleanup prompt</h3>
-              <span className="sheet-hint">
-                instructions the text model follows; clear it to use the default
-              </span>
-            </div>
-            <textarea
-              className="prompt-editor"
-              value={prompt || defaultPrompt}
-              onChange={(e) => onPromptChange(e.target.value)}
-              rows={16}
-              spellCheck={false}
-            />
-          </section>
+          <>
+            <section className="sheet-section">
+              <div className="sheet-section-head">
+                <h3>system prompt</h3>
+                <span className="sheet-hint">what the cleanup model is told — fixed</span>
+              </div>
+              <textarea className="prompt-editor readonly" value={defaultPrompt} readOnly rows={12} />
+            </section>
+            <section className="sheet-section">
+              <div className="sheet-section-head">
+                <h3>your additions</h3>
+                <span className="sheet-hint">appended to the system prompt on every refine</span>
+              </div>
+              <textarea
+                className="prompt-editor"
+                placeholder="e.g. never use em dashes; spell it “colour”; keep numbers as digits"
+                value={prompt}
+                onChange={(e) => onPromptChange(e.target.value)}
+                rows={6}
+                spellCheck={false}
+              />
+            </section>
+          </>
         );
       case "permissions":
         return (

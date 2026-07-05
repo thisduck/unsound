@@ -134,9 +134,13 @@ async fn cleanup_text(
     style_id: Option<String>,
 ) -> Result<String, String> {
     let model_path = models::downloaded_model_path(&app, &model_id)?;
-    let mut system_prompt = prompt
-        .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| llm::DEFAULT_CLEANUP_PROMPT.to_string());
+    // The base prompt is fixed; the user contributes additions on top.
+    let mut system_prompt = llm::DEFAULT_CLEANUP_PROMPT.to_string();
+    if let Some(additions) = prompt.filter(|p| !p.trim().is_empty()) {
+        system_prompt.push_str(&format!(
+            "\n\nAdditional instructions from the user (apply alongside the rules above):\n{additions}"
+        ));
+    }
     system_prompt.push_str(&llm::dictionary_addendum(&settings::load(&app).dictionary));
     let style = style_id
         .filter(|id| !id.is_empty())

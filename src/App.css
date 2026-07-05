@@ -298,6 +298,16 @@ body {
   border-color: rgba(232, 168, 124, 0.4);
 }
 
+.prompt-editor.readonly {
+  color: var(--faint);
+  resize: none;
+  cursor: default;
+}
+
+.prompt-editor.readonly:focus {
+  border-color: var(--edge);
+}
+
 /* ── raw transcript disclosure ── */
 .raw-block {
   margin-top: 28px;

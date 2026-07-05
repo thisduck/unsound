@@ -111,7 +111,13 @@ export default function App() {
     refreshStyles(true);
     api.defaultCleanupPrompt().then((p) => {
       setDefaultPrompt(p);
-      setPrompt((cur) => (cur.trim() === OLD_DEFAULT_PROMPT ? "" : cur));
+      // The prompt field used to hold the whole system prompt; now it holds
+      // only user additions. Clear any stored copy of a full base prompt so
+      // it isn't appended to itself.
+      setPrompt((cur) => {
+        const t = cur.trim();
+        return t === OLD_DEFAULT_PROMPT || t === p.trim() ? "" : cur;
+      });
     });
     const subs = [
       on.settingsChanged(() => refreshStyles()),
