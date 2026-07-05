@@ -37,6 +37,12 @@ GGML files for speech, llama.cpp GGUF files for cleanup.
 
 The cleanup system prompt is editable in the app (panel 03 → edit prompt).
 
+## Installing a release
+
+Grab the `.dmg` from [Releases](https://github.com/thisduck/unsound/releases),
+drag unsound to Applications, and open it — builds are code-signed and
+notarized.
+
 ## Development
 
 Prereqs: Rust, Node 20+, cmake (`brew install cmake`).
@@ -57,9 +63,14 @@ terminal. The bundled app has its own `NSMicrophoneUsageDescription`
 ## Roadmap
 
 - [x] macOS desktop app
+- [x] Global shortcuts — hands-free and push-to-talk (multiple bindings,
+      fn-key support), typing the refined text into any app, with a floating
+      waveform overlay
+- [x] History of past takes (raw + refined, local only)
+- [x] Menu bar tray, microphone switching, onboarding
+- [x] Signed + notarized releases from CI
 - [ ] Windows build (same codebase; CPU inference by default, Vulkan optional)
 - [ ] iOS / Android — whisper.cpp and llama.cpp both run on mobile; the plan
       is to reuse the pipeline design and model registry, with a native or
       React Native UI (`whisper.rn` / `llama.rn`)
 - [ ] Download resume + checksum verification
-- [ ] Global push-to-talk hotkey, history of past takes
