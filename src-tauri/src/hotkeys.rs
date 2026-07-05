@@ -107,10 +107,6 @@ pub fn set_bindings(bindings: &[(String, Mode)]) -> Result<(), String> {
     Ok(())
 }
 
-pub fn has_bindings() -> bool {
-    !MATCHER.lock().unwrap().bindings.is_empty()
-}
-
 /// Start (or confirm) the event-tap listener. Returns true if it is running.
 pub fn ensure_listener(app: &AppHandle) -> bool {
     let _ = APP.set(app.clone());
