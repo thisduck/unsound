@@ -460,14 +460,107 @@ body {
 }
 
 .shortcut-keys {
-  font-size: 15px;
+  font-size: 14px;
   letter-spacing: 1px;
+  background: #1e2024;
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  padding: 4px 10px;
+  display: inline-block;
+}
+
+.shortcut-keys.live {
+  border-color: rgba(232, 168, 124, 0.5);
+  color: var(--accent);
+  animation: none;
 }
 
 .capture-hint {
   font-size: 12.5px;
   color: var(--accent);
   animation: soft-pulse 1.4s ease-in-out infinite;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.shortcut-block {
+  align-items: flex-start;
+}
+
+.shortcut-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+  flex-shrink: 0;
+}
+
+.shortcut-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.shortcut-item .quiet {
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+/* ── settings sidebar ── */
+.sheet.settings {
+  flex-direction: row;
+  height: min(600px, calc(100vh - 64px));
+  width: min(760px, calc(100vw - 48px));
+}
+
+.settings-nav {
+  width: 150px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 18px 10px 14px;
+  border-right: 1px solid var(--edge);
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 14px 0 0 14px;
+}
+
+.settings-nav-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--faint);
+  padding: 0 10px 10px;
+}
+
+.settings-nav-item {
+  font-family: var(--sans);
+  font-size: 13px;
+  text-align: left;
+  color: var(--dim);
+  background: none;
+  border: none;
+  border-radius: 7px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.settings-nav-item:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.settings-nav-item.on {
+  color: var(--ink);
+  background: rgba(232, 168, 124, 0.12);
+}
+
+.settings-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .progress {

@@ -91,6 +91,9 @@ export default function App() {
       }),
       on.downloadDone(() => refreshModels()),
       on.hotkeyToggle(() => hotkeyRef.current()),
+      on.pttDown(() => pttRef.current("down")),
+      on.pttUp(() => pttRef.current("up")),
+      on.pttCancel(() => pttRef.current("cancel")),
     ];
     return () => {
       subs.forEach((p) => p.then((un) => un()));
@@ -176,8 +179,13 @@ export default function App() {
     setError(null);
     if (phase === "recording") {
       try {
-        await api.stopRecording();
+        const res = await api.stopRecording();
         setLevel(0);
+        if (res.durationSecs < 0.35) {
+          setPhase("idle");
+          setStatus("take too short — hold a moment longer");
+          return;
+        }
         if (!stt) {
           setPhase("idle");
           setStatus("recorded — download a speech model to transcribe");
@@ -218,11 +226,23 @@ export default function App() {
     }
   };
 
-  // The hotkey listener is registered once; route it through a ref so it
-  // always sees the current phase and model selection.
+  // The hotkey listeners are registered once; route them through refs so
+  // they always see the current phase and model selection.
   const hotkeyRef = useRef<() => void>(() => {});
   hotkeyRef.current = () => {
     if (phase === "idle" || phase === "recording") toggleRecord(true);
+  };
+
+  const pttRef = useRef<(what: "down" | "up" | "cancel") => void>(() => {});
+  pttRef.current = (what) => {
+    if (what === "down" && phase === "idle") toggleRecord(true);
+    else if (what === "up" && phase === "recording") toggleRecord(true);
+    else if (what === "cancel" && phase === "recording") {
+      // The held key turned out to be part of a bigger combo; discard.
+      api.stopRecording().catch(() => {});
+      setPhase("idle");
+      setStatus("cancelled");
+    }
   };
 
   const copy = (text: string, what: string) => {

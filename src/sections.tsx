@@ -1,86 +1,210 @@
 import { useEffect, useState } from "react";
 import { api, formatBytes, formatShortcut, ModelInfo, ModelKind, on } from "./api";
 
-/* ── global shortcut ─────────────────────────────────────────────── */
+/* ── global shortcuts (hands-free + push-to-talk, multiple each) ── */
 
-export function ShortcutSection({ onError }: { onError: (msg: string | null) => void }) {
-  const [shortcut, setShortcut] = useState<string | null>(null);
-  const [capturing, setCapturing] = useState(false);
+type ShortcutMode = "handsFree" | "pushToTalk";
+
+function comboFromEvent(e: KeyboardEvent): string | null {
+  const mods = [
+    e.metaKey ? "cmd" : null,
+    e.ctrlKey ? "ctrl" : null,
+    e.altKey ? "alt" : null,
+    e.shiftKey ? "shift" : null,
+  ].filter(Boolean) as string[];
+
+  let key: string | null = null;
+  if (e.code.startsWith("Key")) key = e.code.slice(3);
+  else if (e.code.startsWith("Digit")) key = e.code.slice(5);
+  else if (e.code === "Space") key = "space";
+  else if (e.code === "Backspace") key = "backspace";
+  else if (e.code === "Delete") key = "delete";
+  else if (e.code === "Home") key = "home";
+  else if (e.code === "End") key = "end";
+  else if (/^F\d{1,2}$/.test(e.code)) key = e.code;
+  if (!key) return null; // still holding only modifiers
+
+  // A bare letter/digit would hijack normal typing; F-keys are fine alone.
+  if (mods.length === 0 && !/^F\d{1,2}$/.test(key)) return null;
+  return [...mods, key.toLowerCase()].join("+");
+}
+
+function partialFromEvent(e: KeyboardEvent): string {
+  return [
+    e.metaKey ? "cmd" : null,
+    e.ctrlKey ? "ctrl" : null,
+    e.altKey ? "alt" : null,
+    e.shiftKey ? "shift" : null,
+  ]
+    .filter(Boolean)
+    .join("+");
+}
+
+export function ShortcutsSection({ onError }: { onError: (msg: string | null) => void }) {
+  const [handsFree, setHandsFree] = useState<string[]>([]);
+  const [pushToTalk, setPushToTalk] = useState<string[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  // Which binding is being recorded: mode + index (-1 appends a new one).
+  const [capturing, setCapturing] = useState<{ mode: ShortcutMode; index: number } | null>(null);
+  // Keys currently held, shown live while capturing.
+  const [held, setHeld] = useState("");
+  const [nativeCapture, setNativeCapture] = useState(false);
 
   useEffect(() => {
-    api.getSettings().then((s) => setShortcut(s.shortcut));
+    api.getSettings().then((s) => {
+      setHandsFree(s.handsFree);
+      setPushToTalk(s.pushToTalk);
+      setLoaded(true);
+    });
   }, []);
 
-  useEffect(() => {
+  const save = (hf: string[], ptt: string[]) => {
+    onError(null);
+    api
+      .setShortcuts(hf, ptt)
+      .then(() => {
+        setHandsFree(hf);
+        setPushToTalk(ptt);
+      })
+      .catch((err) => onError(String(err)));
+  };
+
+  const commit = (combo: string) => {
     if (!capturing) return;
+    const { mode, index } = capturing;
+    const current = mode === "handsFree" ? handsFree : pushToTalk;
+    const next = index === -1 ? [...current, combo] : current.map((c, i) => (i === index ? combo : c));
+    setCapturing(null);
+    setHeld("");
+    save(mode === "handsFree" ? next : handsFree, mode === "pushToTalk" ? next : pushToTalk);
+  };
+
+  const beginCapture = async (mode: ShortcutMode, index: number) => {
+    setHeld("");
+    setCapturing({ mode, index });
+    // The native event tap sees every key incl. fn; falls back to webview
+    // key events (no fn) when Accessibility isn't granted.
+    setNativeCapture(await api.startShortcutCapture());
+  };
+
+  const endCapture = () => {
+    api.cancelShortcutCapture();
+    setCapturing(null);
+    setHeld("");
+  };
+
+  // Native capture: live updates + commit come from the Rust listener.
+  useEffect(() => {
+    if (!capturing || !nativeCapture) return;
+    const subs = [
+      on.captureUpdate(setHeld),
+      on.captureCommit((combo) => commit(combo)),
+      on.captureCancel(() => {
+        setCapturing(null);
+        setHeld("");
+      }),
+    ];
+    return () => {
+      subs.forEach((p) => p.then((un) => un()));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [capturing, nativeCapture, handsFree, pushToTalk]);
+
+  // Webview fallback: modifier keydowns give the live display, a full combo commits.
+  useEffect(() => {
+    if (!capturing || nativeCapture) return;
     const onKey = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
       if (e.key === "Escape") {
-        setCapturing(false);
+        endCapture();
         return;
       }
-      const mods = [
-        e.metaKey ? "cmd" : null,
-        e.ctrlKey ? "ctrl" : null,
-        e.altKey ? "alt" : null,
-        e.shiftKey ? "shift" : null,
-      ].filter(Boolean) as string[];
-      if (mods.length === 0) return; // a bare key is not a global shortcut
-
-      let key: string | null = null;
-      if (e.code.startsWith("Key")) key = e.code.slice(3);
-      else if (e.code.startsWith("Digit")) key = e.code.slice(5);
-      else if (e.code === "Space") key = "space";
-      else if (/^F\d{1,2}$/.test(e.code)) key = e.code;
-      if (!key) return; // still holding only modifiers
-
-      const combo = [...mods, key.toLowerCase()].join("+");
-      setCapturing(false);
-      onError(null);
-      api
-        .setShortcut(combo)
-        .then(() => setShortcut(combo))
-        .catch((err) => onError(String(err)));
+      const combo = comboFromEvent(e);
+      if (combo) commit(combo);
+      else setHeld(partialFromEvent(e));
     };
+    const onUp = (e: KeyboardEvent) => setHeld(partialFromEvent(e));
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [capturing, onError]);
+    window.addEventListener("keyup", onUp, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keyup", onUp, true);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [capturing, nativeCapture, handsFree, pushToTalk]);
 
-  const disable = () => {
-    onError(null);
-    api
-      .setShortcut("")
-      .then(() => setShortcut(""))
-      .catch((err) => onError(String(err)));
-  };
+  const liveChip = (
+    <span className="capture-hint">
+      {held ? <span className="shortcut-keys live">{formatShortcut(held)}</span> : "press keys…"}
+      <button className="quiet" onClick={endCapture} title="Cancel (esc)">
+        esc
+      </button>
+    </span>
+  );
 
-  return (
-    <div className="row">
+  const block = (mode: ShortcutMode, title: string, desc: string, combos: string[]) => (
+    <div className="row shortcut-block">
       <div className="row-info">
-        <div className="row-name">
-          {capturing ? (
-            <span className="capture-hint">press a key combination… (esc to cancel)</span>
-          ) : (
-            <span className="shortcut-keys">{shortcut === null ? "…" : formatShortcut(shortcut)}</span>
-          )}
-        </div>
-        <div className="row-desc">
-          press once to start recording — in any app — and again to stop; the refined text is
-          pasted where your cursor is
-        </div>
+        <div className="row-name">{title}</div>
+        <div className="row-desc">{desc}</div>
       </div>
-      <div className="row-action">
-        <button className="quiet accent" onClick={() => setCapturing(true)} disabled={capturing}>
-          change
-        </button>
-        {shortcut && (
-          <button className="quiet" onClick={disable}>
-            disable
+      <div className="shortcut-list">
+        {combos.map((combo, i) => (
+          <div className="shortcut-item" key={`${combo}-${i}`}>
+            {capturing?.mode === mode && capturing.index === i ? (
+              liveChip
+            ) : (
+              <span className="shortcut-keys">{formatShortcut(combo)}</span>
+            )}
+            <button className="quiet" title="Change" onClick={() => beginCapture(mode, i)}>
+              ✎
+            </button>
+            <button
+              className="quiet"
+              title="Remove"
+              onClick={() =>
+                save(
+                  mode === "handsFree" ? combos.filter((_, j) => j !== i) : handsFree,
+                  mode === "pushToTalk" ? combos.filter((_, j) => j !== i) : pushToTalk,
+                )
+              }
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+        {capturing?.mode === mode && capturing.index === -1 ? (
+          <div className="shortcut-item">{liveChip}</div>
+        ) : (
+          <button className="quiet accent" onClick={() => beginCapture(mode, -1)}>
+            + add
           </button>
         )}
       </div>
     </div>
+  );
+
+  if (!loaded) return null;
+  return (
+    <>
+      {block(
+        "handsFree",
+        "hands-free",
+        "press once to start recording, press again to stop",
+        handsFree,
+      )}
+      {block(
+        "pushToTalk",
+        "push to talk",
+        "hold to say something short; release to finish",
+        pushToTalk,
+      )}
+      <div className="sheet-hint" style={{ display: "block", marginTop: 6 }}>
+        fn-based shortcuts (bare fn, fn Space…) need the Accessibility permission; other combos
+        (⌘⇧Space, ⌥⌫, ⇧Home…) work without it. release modifier-only combos to set them.
+      </div>
+    </>
   );
 }
 

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { formatBytes, ModelInfo } from "./api";
-import { ModelLibrary, ModelRow, PermissionsSection, ShortcutSection, useDownloads } from "./sections";
+import { ModelLibrary, ModelRow, PermissionsSection, ShortcutsSection, useDownloads } from "./sections";
 
 interface Props {
   models: ModelInfo[];
@@ -91,10 +91,11 @@ export function Onboarding({ models, onChanged, onDone }: Props) {
     <div className="ob-step" key="shortcut">
       <h1 className="ob-title">dictate into any app</h1>
       <p className="ob-text">
-        Press the shortcut in any app to start recording, press it again to stop — the cleaned-up
-        text is typed right where your cursor is. macOS needs your okay for two things:
+        Two ways to talk, in any app: <b>hands-free</b> — press the shortcut to start, again to
+        stop — or <b>push to talk</b> — hold it, speak, let go. Either way the cleaned-up text is
+        typed right where your cursor is. macOS needs your okay for two things below.
       </p>
-      <ShortcutSection onError={setErr} />
+      <ShortcutsSection onError={setErr} />
       <PermissionsSection onError={setErr} />
       <div className="ob-actions">
         <button className="ob-primary" onClick={onDone}>

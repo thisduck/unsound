@@ -39,7 +39,8 @@ export interface DownloadDone {
 }
 
 export interface Settings {
-  shortcut: string;
+  handsFree: string[];
+  pushToTalk: string[];
   micDevice: string;
 }
 
@@ -57,9 +58,12 @@ export const api = {
     invoke<string>("cleanup_text", { modelId, text, prompt: prompt ?? null }),
   defaultCleanupPrompt: () => invoke<string>("default_cleanup_prompt"),
   getSettings: () => invoke<Settings>("get_settings"),
-  setShortcut: (shortcut: string) => invoke<void>("set_shortcut", { shortcut }),
+  setShortcuts: (handsFree: string[], pushToTalk: string[]) =>
+    invoke<void>("set_shortcuts", { handsFree, pushToTalk }),
   deliverText: (text: string) => invoke<void>("deliver_text", { text }),
   permissionStatus: () => invoke<PermissionStatus>("permission_status"),
+  startShortcutCapture: () => invoke<boolean>("start_shortcut_capture"),
+  cancelShortcutCapture: () => invoke<void>("cancel_shortcut_capture"),
   requestAccessibility: () => invoke<boolean>("request_accessibility"),
   requestMicrophone: () => invoke<void>("request_microphone"),
   listMicrophones: () => invoke<string[]>("list_microphones"),
@@ -77,6 +81,15 @@ export const on = {
     listen<string>("llm-token", (e) => cb(e.payload)),
   hotkeyToggle: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("hotkey-toggle", () => cb()),
+  pttDown: (cb: () => void): Promise<UnlistenFn> => listen<void>("ptt-down", () => cb()),
+  pttUp: (cb: () => void): Promise<UnlistenFn> => listen<void>("ptt-up", () => cb()),
+  pttCancel: (cb: () => void): Promise<UnlistenFn> => listen<void>("ptt-cancel", () => cb()),
+  captureUpdate: (cb: (combo: string) => void): Promise<UnlistenFn> =>
+    listen<{ combo: string }>("capture-update", (e) => cb(e.payload.combo)),
+  captureCommit: (cb: (combo: string) => void): Promise<UnlistenFn> =>
+    listen<{ combo: string }>("capture-commit", (e) => cb(e.payload.combo)),
+  captureCancel: (cb: () => void): Promise<UnlistenFn> =>
+    listen<void>("capture-cancel", () => cb()),
   settingsChanged: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("settings-changed", () => cb()),
 };
@@ -99,13 +112,35 @@ export function formatShortcut(shortcut: string): string {
         case "ctrl":
         case "control":
           return "⌃";
+        case "fn":
+          return "fn";
         case "space":
           return "Space";
+        case "backspace":
+          return "⌫";
+        case "delete":
+          return "⌦";
+        case "enter":
+          return "↩";
+        case "tab":
+          return "⇥";
+        case "home":
+          return "Home";
+        case "end":
+          return "End";
+        case "up":
+          return "↑";
+        case "down":
+          return "↓";
+        case "left":
+          return "←";
+        case "right":
+          return "→";
         default:
-          return part.length === 1 ? part.toUpperCase() : part;
+          return part.toUpperCase();
       }
     })
-    .join("");
+    .join(" ");
 }
 
 export function formatBytes(n: number): string {

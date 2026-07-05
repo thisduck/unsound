@@ -1,5 +1,6 @@
 mod audio;
 mod deliver;
+mod hotkeys;
 mod llm;
 mod models;
 mod permissions;
@@ -12,8 +13,16 @@ use llm::LlmState;
 use models::{ModelInfo, ModelKind};
 use settings::Settings;
 use stt::SttState;
+use std::collections::HashMap;
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+
+#[derive(Clone, Copy, PartialEq)]
+enum ShortcutMode {
+    HandsFree,
+    PushToTalk,
+}
 
 #[derive(Default)]
 pub struct AppState {
@@ -21,7 +30,9 @@ pub struct AppState {
     stt: SttState,
     llm: LlmState,
     /// Most recent pipeline output, for the tray's "paste last take".
-    pub last_output: std::sync::Mutex<String>,
+    pub last_output: Mutex<String>,
+    /// Registered shortcut id → which mode it drives.
+    shortcut_modes: Mutex<HashMap<u32, ShortcutMode>>,
 }
 
 #[tauri::command]
@@ -131,10 +142,20 @@ fn get_settings(app: AppHandle) -> Settings {
 }
 
 #[tauri::command]
-fn set_shortcut(app: AppHandle, shortcut: String) -> Result<(), String> {
-    apply_shortcut(&app, &shortcut)?;
+fn set_shortcuts(
+    app: AppHandle,
+    hands_free: Vec<String>,
+    push_to_talk: Vec<String>,
+) -> Result<(), String> {
     let mut s = settings::load(&app);
-    s.shortcut = shortcut;
+    let previous = s.clone();
+    s.hands_free = hands_free;
+    s.push_to_talk = push_to_talk;
+    if let Err(e) = apply_shortcuts(&app, &s) {
+        // Restore the working set so a bad combo doesn't kill the others.
+        let _ = apply_shortcuts(&app, &previous);
+        return Err(e);
+    }
     settings::save(&app, &s)
 }
 
@@ -164,15 +185,62 @@ async fn deliver_text(text: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
-/// (Re)register the global shortcut; an empty string disables it.
-fn apply_shortcut(app: &AppHandle, shortcut: &str) -> Result<(), String> {
+/// (Re)register all global shortcuts. Combos involving the fn key go to the
+/// low-level event-tap listener; everything else uses the OS hotkey API.
+fn apply_shortcuts(app: &AppHandle, s: &Settings) -> Result<(), String> {
     let gs = app.global_shortcut();
     gs.unregister_all().map_err(|e| e.to_string())?;
-    if shortcut.trim().is_empty() {
-        return Ok(());
+
+    let mut modes = HashMap::new();
+    let mut fn_bindings: Vec<(String, hotkeys::Mode)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let entries = s
+        .hands_free
+        .iter()
+        .map(|c| (c, ShortcutMode::HandsFree))
+        .chain(s.push_to_talk.iter().map(|c| (c, ShortcutMode::PushToTalk)));
+    for (combo, mode) in entries {
+        if combo.trim().is_empty() {
+            continue;
+        }
+        if !seen.insert(combo.clone()) {
+            return Err(format!("'{combo}' is assigned twice"));
+        }
+        if combo.split('+').any(|p| p == "fn") {
+            let mode = match mode {
+                ShortcutMode::HandsFree => hotkeys::Mode::HandsFree,
+                ShortcutMode::PushToTalk => hotkeys::Mode::PushToTalk,
+            };
+            fn_bindings.push((combo.clone(), mode));
+            continue;
+        }
+        let shortcut: Shortcut = combo
+            .parse()
+            .map_err(|e| format!("'{combo}' is not a valid shortcut: {e}"))?;
+        modes.insert(shortcut.id(), mode);
+        gs.register(shortcut)
+            .map_err(|e| format!("could not register '{combo}': {e}"))?;
     }
-    gs.register(shortcut)
-        .map_err(|e| format!("could not register shortcut '{shortcut}': {e}"))
+    *app.state::<AppState>().shortcut_modes.lock().unwrap() = modes;
+
+    hotkeys::set_bindings(&fn_bindings)?;
+    if !fn_bindings.is_empty() && !hotkeys::ensure_listener(app) {
+        return Err(
+            "shortcuts using the fn key need the Accessibility permission (settings → permissions), then try again"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn start_shortcut_capture(app: AppHandle) -> bool {
+    hotkeys::start_capture(&app)
+}
+
+#[tauri::command]
+fn cancel_shortcut_capture() {
+    hotkeys::cancel_capture();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -181,20 +249,36 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        // The frontend owns the pipeline; it reacts to this
-                        // exactly like a click on the record control.
-                        let _ = app.emit("hotkey-toggle", ());
+                .with_handler(|app, shortcut, event| {
+                    // The frontend owns the pipeline; these events drive it
+                    // exactly like clicks on the record control.
+                    let mode = app
+                        .state::<AppState>()
+                        .shortcut_modes
+                        .lock()
+                        .unwrap()
+                        .get(&shortcut.id())
+                        .copied();
+                    match (mode, event.state()) {
+                        (Some(ShortcutMode::HandsFree), ShortcutState::Pressed) => {
+                            let _ = app.emit("hotkey-toggle", ());
+                        }
+                        (Some(ShortcutMode::PushToTalk), ShortcutState::Pressed) => {
+                            let _ = app.emit("ptt-down", ());
+                        }
+                        (Some(ShortcutMode::PushToTalk), ShortcutState::Released) => {
+                            let _ = app.emit("ptt-up", ());
+                        }
+                        _ => {}
                     }
                 })
                 .build(),
         )
         .manage(AppState::default())
         .setup(|app| {
-            let shortcut = settings::load(app.handle()).shortcut;
-            if let Err(e) = apply_shortcut(app.handle(), &shortcut) {
-                eprintln!("global shortcut unavailable: {e}");
+            let s = settings::load(app.handle());
+            if let Err(e) = apply_shortcuts(app.handle(), &s) {
+                eprintln!("global shortcuts unavailable: {e}");
             }
             tray::init(app.handle())?;
             Ok(())
@@ -218,7 +302,9 @@ pub fn run() {
             cleanup_text,
             default_cleanup_prompt,
             get_settings,
-            set_shortcut,
+            set_shortcuts,
+            start_shortcut_capture,
+            cancel_shortcut_capture,
             deliver_text,
             permission_status,
             request_accessibility,

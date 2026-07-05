@@ -1,6 +1,16 @@
 import { useState } from "react";
 import { api, ModelInfo, ModelKind } from "./api";
-import { MicPicker, ModelLibrary, PermissionsSection, ShortcutSection } from "./sections";
+import { MicPicker, ModelLibrary, PermissionsSection, ShortcutsSection } from "./sections";
+
+type Section = "models" | "shortcuts" | "microphone" | "prompt" | "permissions";
+
+const SECTIONS: { id: Section; label: string }[] = [
+  { id: "models", label: "models" },
+  { id: "shortcuts", label: "shortcuts" },
+  { id: "microphone", label: "microphone" },
+  { id: "prompt", label: "prompt" },
+  { id: "permissions", label: "permissions" },
+];
 
 interface Props {
   models: ModelInfo[];
@@ -29,6 +39,7 @@ export function SettingsSheet({
   onChanged,
   onReplayOnboarding,
 }: Props) {
+  const [section, setSection] = useState<Section>("models");
   const [err, setErr] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [customName, setCustomName] = useState("");
@@ -55,65 +66,99 @@ export function SettingsSheet({
     }
   };
 
-  return (
-    <div className="sheet-overlay" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()}>
-        <header className="sheet-head">
-          <h2>settings</h2>
-          <span className="sheet-note">downloads are the only time unsound touches the network</span>
-          <button className="quiet" onClick={onClose}>
-            close ✕
-          </button>
-        </header>
+  const activePicker = (
+    label: string,
+    value: string,
+    onChange: (id: string) => void,
+    options: ModelInfo[],
+  ) => (
+    <div className="row">
+      <div className="row-info">
+        <div className="row-name">{label}</div>
+      </div>
+      <div className="row-action">
+        <select
+          className="chip-select"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={options.length === 0}
+        >
+          {options.length === 0 && <option value="">none installed</option>}
+          {options.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
 
-        <div className="sheet-body">
+  const body = () => {
+    switch (section) {
+      case "models":
+        return (
+          <>
+            <section className="sheet-section">
+              <div className="sheet-section-head">
+                <h3>active models</h3>
+                <span className="sheet-hint">which installed model each stage uses</span>
+              </div>
+              {activePicker("voice → text", sttId, onSttChange, sttModels)}
+              {activePicker("text cleanup", llmId, onLlmChange, llmModels)}
+            </section>
+            <ModelLibrary models={models} onChanged={onChanged} onError={setErr} />
+            <section className="sheet-section">
+              {addOpen ? (
+                <div className="add-form">
+                  <div className="add-row">
+                    <select
+                      value={customKind}
+                      onChange={(e) => setCustomKind(e.target.value as ModelKind)}
+                    >
+                      <option value="stt">voice (GGML)</option>
+                      <option value="llm">cleanup (GGUF)</option>
+                    </select>
+                    <input
+                      placeholder="display name (optional)"
+                      value={customName}
+                      onChange={(e) => setCustomName(e.target.value)}
+                    />
+                  </div>
+                  <input
+                    placeholder="direct download URL, e.g. https://huggingface.co/…/resolve/main/model.gguf"
+                    value={customUrl}
+                    onChange={(e) => setCustomUrl(e.target.value)}
+                  />
+                  <div className="add-row">
+                    <button className="quiet accent" disabled={!customUrl.trim()} onClick={addCustom}>
+                      add model
+                    </button>
+                    <button className="quiet" onClick={() => setAddOpen(false)}>
+                      cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button className="quiet add-btn" onClick={() => setAddOpen(true)}>
+                  + add a custom model by URL
+                </button>
+              )}
+            </section>
+          </>
+        );
+      case "shortcuts":
+        return (
           <section className="sheet-section">
             <div className="sheet-section-head">
-              <h3>active models</h3>
-              <span className="sheet-hint">which installed models each stage uses</span>
+              <h3>global shortcuts</h3>
+              <span className="sheet-hint">dictate into any app; the text lands at your cursor</span>
             </div>
-            <div className="row">
-              <div className="row-info">
-                <div className="row-name">voice → text</div>
-              </div>
-              <div className="row-action">
-                <select
-                  className="chip-select"
-                  value={sttId}
-                  onChange={(e) => onSttChange(e.target.value)}
-                  disabled={sttModels.length === 0}
-                >
-                  {sttModels.length === 0 && <option value="">none installed</option>}
-                  {sttModels.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div className="row">
-              <div className="row-info">
-                <div className="row-name">text cleanup</div>
-              </div>
-              <div className="row-action">
-                <select
-                  className="chip-select"
-                  value={llmId}
-                  onChange={(e) => onLlmChange(e.target.value)}
-                  disabled={llmModels.length === 0}
-                >
-                  {llmModels.length === 0 && <option value="">none installed</option>}
-                  {llmModels.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
+            <ShortcutsSection onError={setErr} />
           </section>
-
+        );
+      case "microphone":
+        return (
           <section className="sheet-section">
             <div className="sheet-section-head">
               <h3>microphone</h3>
@@ -128,15 +173,27 @@ export function SettingsSheet({
               </div>
             </div>
           </section>
-
+        );
+      case "prompt":
+        return (
           <section className="sheet-section">
             <div className="sheet-section-head">
-              <h3>global shortcut</h3>
-              <span className="sheet-hint">dictate into any app on this Mac</span>
+              <h3>cleanup prompt</h3>
+              <span className="sheet-hint">
+                instructions the text model follows; clear it to use the default
+              </span>
             </div>
-            <ShortcutSection onError={setErr} />
+            <textarea
+              className="prompt-editor"
+              value={prompt || defaultPrompt}
+              onChange={(e) => onPromptChange(e.target.value)}
+              rows={16}
+              spellCheck={false}
+            />
           </section>
-
+        );
+      case "permissions":
+        return (
           <section className="sheet-section">
             <div className="sheet-section-head">
               <h3>permissions</h3>
@@ -144,65 +201,44 @@ export function SettingsSheet({
             </div>
             <PermissionsSection onError={setErr} />
           </section>
+        );
+    }
+  };
 
-          <section className="sheet-section">
-            <div className="sheet-section-head">
-              <h3>cleanup prompt</h3>
-              <span className="sheet-hint">instructions the text model follows; clear it to use the default</span>
-            </div>
-            <textarea
-              className="prompt-editor"
-              value={prompt || defaultPrompt}
-              onChange={(e) => onPromptChange(e.target.value)}
-              rows={10}
-              spellCheck={false}
-            />
-          </section>
-
-          <ModelLibrary models={models} onChanged={onChanged} onError={setErr} />
-
-          <section className="sheet-section">
-            {addOpen ? (
-              <div className="add-form">
-                <div className="add-row">
-                  <select value={customKind} onChange={(e) => setCustomKind(e.target.value as ModelKind)}>
-                    <option value="stt">voice (GGML)</option>
-                    <option value="llm">cleanup (GGUF)</option>
-                  </select>
-                  <input
-                    placeholder="display name (optional)"
-                    value={customName}
-                    onChange={(e) => setCustomName(e.target.value)}
-                  />
-                </div>
-                <input
-                  placeholder="direct download URL, e.g. https://huggingface.co/…/resolve/main/model.gguf"
-                  value={customUrl}
-                  onChange={(e) => setCustomUrl(e.target.value)}
-                />
-                <div className="add-row">
-                  <button className="quiet accent" disabled={!customUrl.trim()} onClick={addCustom}>
-                    add model
-                  </button>
-                  <button className="quiet" onClick={() => setAddOpen(false)}>
-                    cancel
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <button className="quiet add-btn" onClick={() => setAddOpen(true)}>
-                + add a custom model by URL
-              </button>
-            )}
-          </section>
-
-          <section className="sheet-section" style={{ textAlign: "center" }}>
-            <button className="quiet" onClick={onReplayOnboarding}>
-              show the welcome guide again
+  return (
+    <div className="sheet-overlay" onClick={onClose}>
+      <div className="sheet settings" onClick={(e) => e.stopPropagation()}>
+        <nav className="settings-nav">
+          <div className="settings-nav-title">settings</div>
+          {SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              className={"settings-nav-item" + (section === s.id ? " on" : "")}
+              onClick={() => {
+                setErr(null);
+                setSection(s.id);
+              }}
+            >
+              {s.label}
             </button>
-          </section>
-
-          {err && <div className="sheet-error">{err}</div>}
+          ))}
+          <div className="spacer" />
+          <button className="settings-nav-item" onClick={onReplayOnboarding}>
+            welcome guide
+          </button>
+        </nav>
+        <div className="settings-pane">
+          <header className="sheet-head">
+            <h2>{SECTIONS.find((s) => s.id === section)?.label}</h2>
+            <span className="sheet-note">downloads are the only time unsound touches the network</span>
+            <button className="quiet" onClick={onClose}>
+              close ✕
+            </button>
+          </header>
+          <div className="sheet-body">
+            {body()}
+            {err && <div className="sheet-error">{err}</div>}
+          </div>
         </div>
       </div>
     </div>
