@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, on, ModelInfo, Style } from "./api";
+import { CorrectableText } from "./Correctable";
 import { useLevelHistory, Wave } from "./Wave";
 import { MicPicker } from "./sections";
 import { SettingsSheet } from "./SettingsSheet";
@@ -233,8 +234,9 @@ export default function App() {
         if (fromHotkey) {
           const out = refined ?? text;
           try {
-            await api.deliverText(out);
-            setStatus("typed into the frontmost app");
+            const target = await api.deliverText(out);
+            if (target) upsertTake({ app: target });
+            setStatus(`typed into ${target || "the frontmost app"}`);
           } catch (e) {
             setError(String(e));
           }
@@ -297,6 +299,27 @@ export default function App() {
       changePhase("idle");
       setStatus("cancelled");
     }
+  };
+
+  const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const correctIn = (source: "raw" | "refined") => async (from: string, to: string) => {
+    try {
+      await api.addCorrection(from, to);
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
+    const fix = (s: string) => s.replace(new RegExp(`\\b${escapeRe(from)}\\b`, "g"), to);
+    if (source === "raw") {
+      const next = fix(transcript);
+      setTranscript(next);
+      upsertTake({ raw: next });
+    } else {
+      const next = fix(cleaned);
+      setCleaned(next);
+      upsertTake({ refined: next });
+    }
+    setStatus(`learned: "${from}" → "${to}" — future takes will hear it right`);
   };
 
   const copy = (text: string, what: string) => {
@@ -408,14 +431,18 @@ export default function App() {
                   )}
                 </div>
                 <div className="prose">
-                  {heroText}
+                  {phase === "cleaning" ? (
+                    heroText
+                  ) : (
+                    <CorrectableText text={heroText} onCorrect={correctIn("refined")} />
+                  )}
                   {phase === "cleaning" && <span className="caret" />}
                 </div>
               </>
             ) : (
               transcript && (
                 <div className="prose dim">
-                  {transcript}
+                  <CorrectableText text={transcript} onCorrect={correctIn("raw")} />
                   {llm && phase === "idle" && (
                     <div className="hero-tools" style={{ marginTop: 16 }}>
                       {styleSwitcher}
@@ -438,7 +465,9 @@ export default function App() {
                 </button>
                 {rawOpen && (
                   <div className="raw-body">
-                    <div className="raw-text">{transcript}</div>
+                    <div className="raw-text">
+                      <CorrectableText text={transcript} onCorrect={correctIn("raw")} />
+                    </div>
                     <div className="hero-tools">
                       <button className="quiet" onClick={() => copy(transcript, "transcript")}>
                         copy

@@ -37,6 +37,7 @@ pub fn transcribe(
     model_path: &Path,
     samples: &[f32],
     language: Option<&str>,
+    initial_prompt: Option<&str>,
 ) -> Result<String, String> {
     if samples.len() < 1600 {
         return Err("recording is too short to transcribe".into());
@@ -59,6 +60,10 @@ pub fn transcribe(
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
     params.set_suppress_blank(true);
+    // Bias recognition toward the user's vocabulary (names, jargon).
+    if let Some(p) = initial_prompt {
+        params.set_initial_prompt(p);
+    }
 
     ws.full(params, samples)
         .map_err(|e| format!("transcription failed: {e}"))?;

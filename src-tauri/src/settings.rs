@@ -5,6 +5,15 @@ use tauri::{AppHandle, Manager};
 
 pub const DEFAULT_SHORTCUT: &str = "cmd+shift+space";
 
+/// A learned correction: `from` is what whisper tends to hear, `to` is what
+/// the speaker actually means. The `to` side also biases recognition.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictEntry {
+    pub from: String,
+    pub to: String,
+}
+
 /// A writing style the cleanup model imitates, defined by pasted samples
 /// of the user's own writing.
 #[derive(Clone, Serialize, Deserialize)]
@@ -36,6 +45,8 @@ pub struct Settings {
     pub styles: Vec<Style>,
     /// Style id applied by default; empty string means neutral (no style).
     pub default_style: String,
+    /// Personal dictionary built from the user's corrections.
+    pub dictionary: Vec<DictEntry>,
 }
 
 impl Default for Settings {
@@ -46,6 +57,7 @@ impl Default for Settings {
             mic_device: String::new(),
             styles: vec![],
             default_style: String::new(),
+            dictionary: vec![],
         }
     }
 }
@@ -60,6 +72,7 @@ struct RawSettings {
     mic_device: Option<String>,
     styles: Option<Vec<Style>>,
     default_style: Option<String>,
+    dictionary: Option<Vec<DictEntry>>,
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -87,6 +100,7 @@ pub fn load(app: &AppHandle) -> Settings {
         mic_device: raw.mic_device.unwrap_or_default(),
         styles: raw.styles.unwrap_or_default(),
         default_style: raw.default_style.unwrap_or_default(),
+        dictionary: raw.dictionary.unwrap_or_default(),
     }
 }
 

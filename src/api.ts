@@ -40,6 +40,11 @@ export interface DownloadDone {
   error: string | null;
 }
 
+export interface DictEntry {
+  from: string;
+  to: string;
+}
+
 export interface Style {
   id: string;
   name: string;
@@ -54,6 +59,7 @@ export interface Settings {
   micDevice: string;
   styles: Style[];
   defaultStyle: string;
+  dictionary: DictEntry[];
 }
 
 export const api = {
@@ -79,7 +85,9 @@ export const api = {
     invoke<void>("set_shortcuts", { handsFree, pushToTalk }),
   setStyles: (styles: Style[], defaultStyle: string) =>
     invoke<void>("set_styles", { styles, defaultStyle }),
-  deliverText: (text: string) => invoke<void>("deliver_text", { text }),
+  deliverText: (text: string) => invoke<string>("deliver_text", { text }),
+  addCorrection: (from: string, to: string) => invoke<void>("add_correction", { from, to }),
+  setDictionary: (entries: DictEntry[]) => invoke<void>("set_dictionary", { entries }),
   permissionStatus: () => invoke<PermissionStatus>("permission_status"),
   startShortcutCapture: () => invoke<boolean>("start_shortcut_capture"),
   cancelShortcutCapture: () => invoke<void>("cancel_shortcut_capture"),

@@ -101,6 +101,20 @@ impl Utf8Stream {
     }
 }
 
+/// Corrections the user has taught unsound, injected into the cleanup prompt.
+pub fn dictionary_addendum(entries: &[crate::settings::DictEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "\n\nThe transcription often mis-hears these words. When the transcript contains the left form (or something close to it), the speaker means the right form - use it:\n",
+    );
+    for e in entries {
+        s.push_str(&format!("- \"{}\" -> \"{}\"\n", e.from, e.to));
+    }
+    s
+}
+
 /// Cap what style samples may add to the context: whole samples are taken in
 /// order until the budget runs out; an oversized sample is truncated.
 const STYLE_SAMPLE_CHARS: usize = 2000;

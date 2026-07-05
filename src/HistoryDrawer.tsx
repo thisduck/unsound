@@ -5,6 +5,7 @@ export interface Take {
   refined: string;
   sttModel: string;
   llmModel: string;
+  app?: string;
 }
 
 interface Props {
@@ -56,6 +57,7 @@ export function HistoryDrawer({ takes, onClose, onLoad, onDelete, onClear, onCop
                 <span className="take-time">{timeLabel(t.at)}</span>
                 <span className="take-models">
                   {[t.sttModel, t.llmModel].filter(Boolean).join(" → ")}
+                  {t.app ? ` · typed into ${t.app}` : ""}
                 </span>
               </div>
               <div className="take-text" onClick={() => onLoad(t)} title="Open this take">

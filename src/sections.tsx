@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, formatBytes, formatShortcut, ModelInfo, ModelKind, on, Style } from "./api";
+import { api, DictEntry, formatBytes, formatShortcut, ModelInfo, ModelKind, on, Style } from "./api";
 
 /* ── global shortcuts (hands-free + push-to-talk, multiple each) ── */
 
@@ -344,6 +344,80 @@ export function StylesSection({ onError }: { onError: (msg: string | null) => vo
         <div className="sheet-hint" style={{ display: "block", marginTop: 8 }}>
           a style is a name plus a few blocks of your own writing; refined text is rendered to
           match how those samples are written
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ── personal dictionary ─────────────────────────────────────────── */
+
+export function DictionarySection({ onError }: { onError: (msg: string | null) => void }) {
+  const [entries, setEntries] = useState<DictEntry[]>([]);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+
+  const load = () => api.getSettings().then((s) => setEntries(s.dictionary));
+  useEffect(() => {
+    load();
+  }, []);
+
+  const remove = (i: number) => {
+    const next = entries.filter((_, j) => j !== i);
+    api.setDictionary(next).then(() => setEntries(next)).catch((e) => onError(String(e)));
+  };
+
+  const add = () => {
+    onError(null);
+    api
+      .addCorrection(from, to)
+      .then(() => {
+        setFrom("");
+        setTo("");
+        load();
+      })
+      .catch((e) => onError(String(e)));
+  };
+
+  return (
+    <>
+      {entries.map((e, i) => (
+        <div className="row" key={`${e.from}-${i}`}>
+          <div className="row-info">
+            <div className="row-name">
+              “{e.from}” <span className="dict-arrow">→</span> “{e.to}”
+            </div>
+          </div>
+          <div className="row-action">
+            <button className="quiet" onClick={() => remove(i)}>
+              remove
+            </button>
+          </div>
+        </div>
+      ))}
+      <div className="add-form">
+        <div className="add-row">
+          <input
+            placeholder="what whisper hears"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+            spellCheck={false}
+          />
+          <input
+            placeholder="what you mean"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+            spellCheck={false}
+          />
+          <button className="quiet accent" disabled={!from.trim() || !to.trim()} onClick={add}>
+            add
+          </button>
+        </div>
+      </div>
+      {entries.length === 0 && (
+        <div className="sheet-hint" style={{ display: "block", marginTop: 8 }}>
+          click any word in a transcript to correct it — corrections land here, bias recognition
+          toward your vocabulary, and teach the cleanup model
         </div>
       )}
     </>

@@ -1,5 +1,6 @@
 mod audio;
 mod deliver;
+mod frontapp;
 mod hotkeys;
 mod llm;
 mod models;
@@ -94,11 +95,29 @@ async fn transcribe(
 ) -> Result<String, String> {
     let model_path = models::downloaded_model_path(&app, &model_id)?;
     let samples = state.audio.last_recording.lock().unwrap().clone();
+    // The user's corrected vocabulary biases recognition.
+    let vocab: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        settings::load(&app)
+            .dictionary
+            .iter()
+            .map(|e| e.to.trim().to_string())
+            .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
+            .collect()
+    };
+    let initial_prompt =
+        (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
     // Whisper inference is heavy; keep it off the async runtime.
     let worker_app = app.clone();
     let text = tauri::async_runtime::spawn_blocking(move || {
         let state = worker_app.state::<AppState>();
-        stt::transcribe(&state.stt, &model_path, &samples, language.as_deref())
+        stt::transcribe(
+            &state.stt,
+            &model_path,
+            &samples,
+            language.as_deref(),
+            initial_prompt.as_deref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -115,9 +134,10 @@ async fn cleanup_text(
     style_id: Option<String>,
 ) -> Result<String, String> {
     let model_path = models::downloaded_model_path(&app, &model_id)?;
-    let system_prompt = prompt
+    let mut system_prompt = prompt
         .filter(|p| !p.trim().is_empty())
         .unwrap_or_else(|| llm::DEFAULT_CLEANUP_PROMPT.to_string());
+    system_prompt.push_str(&llm::dictionary_addendum(&settings::load(&app).dictionary));
     let style = style_id
         .filter(|id| !id.is_empty())
         .and_then(|id| settings::load(&app).styles.into_iter().find(|s| s.id == id));
@@ -204,10 +224,36 @@ async fn request_microphone() -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn deliver_text(app: AppHandle, text: String) -> Result<(), String> {
+async fn deliver_text(app: AppHandle, text: String) -> Result<String, String> {
+    // Capture the target before typing; unsound stays in the background.
+    let target = frontapp::frontmost_app().unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || deliver::deliver_text(&app, &text))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    Ok(target)
+}
+
+#[tauri::command]
+fn add_correction(app: AppHandle, from: String, to: String) -> Result<(), String> {
+    let (from, to) = (from.trim().to_string(), to.trim().to_string());
+    if from.is_empty() || to.is_empty() || from == to {
+        return Err("correction needs a word and a different replacement".into());
+    }
+    let mut s = settings::load(&app);
+    s.dictionary.retain(|e| e.from.to_lowercase() != from.to_lowercase());
+    s.dictionary.push(settings::DictEntry { from, to });
+    settings::save(&app, &s)?;
+    let _ = app.emit("settings-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn set_dictionary(app: AppHandle, entries: Vec<settings::DictEntry>) -> Result<(), String> {
+    let mut s = settings::load(&app);
+    s.dictionary = entries;
+    settings::save(&app, &s)?;
+    let _ = app.emit("settings-changed", ());
+    Ok(())
 }
 
 /// (Re)register all global shortcuts. Combos involving the fn key go to the
@@ -393,6 +439,8 @@ pub fn run() {
             get_settings,
             set_shortcuts,
             set_styles,
+            add_correction,
+            set_dictionary,
             start_shortcut_capture,
             cancel_shortcut_capture,
             set_overlay,
