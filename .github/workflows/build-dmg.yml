@@ -2,6 +2,14 @@ name: build dmg
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.2.0). Leave empty for a test build (artifact only, no release)."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -19,6 +27,21 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: dmg
+
+      - name: Bump version
+        if: inputs.version != ''
+        run: python3 scripts/bump-version.py "${{ inputs.version }}"
+
+      - name: Commit and tag release
+        if: inputs.version != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "release v${{ inputs.version }}"
+          git tag "v${{ inputs.version }}"
+          git push origin HEAD:main --tags
 
       - name: Install frontend dependencies
         run: npm ci
@@ -26,9 +49,20 @@ jobs:
       - name: Build app and dmg
         run: npm run tauri build
 
-      - name: Upload dmg
+      - name: Upload dmg artifact (test build)
+        if: inputs.version == ''
         uses: actions/upload-artifact@v4
         with:
           name: unsound-dmg
           path: src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
+
+      - name: Create GitHub release
+        if: inputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ inputs.version }}" \
+            src-tauri/target/release/bundle/dmg/*.dmg \
+            --title "unsound v${{ inputs.version }}" \
+            --generate-notes
