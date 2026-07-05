@@ -101,15 +101,81 @@ impl Utf8Stream {
     }
 }
 
+/// Cap what style samples may add to the context: whole samples are taken in
+/// order until the budget runs out; an oversized sample is truncated.
+const STYLE_SAMPLE_CHARS: usize = 2000;
+const STYLE_TOTAL_CHARS: usize = 8000;
+
+fn style_addendum(style: &crate::settings::Style) -> String {
+    let mut s = format!(
+        "\n\nAfter cleaning, render the result in the speaker's \"{}\" writing style. Imitate exactly how these samples of their writing are written: their tone, formality, vocabulary, sentence rhythm, punctuation habits, and capitalization/casing. Where the samples' conventions conflict with the cleaning rules above — for example, if the samples are all-lowercase, do NOT fix capitalization — the samples win:\n",
+        style.name
+    );
+    let mut used = 0usize;
+    for (i, sample) in style.samples.iter().enumerate() {
+        let sample = sample.trim();
+        if sample.is_empty() {
+            continue;
+        }
+        if used >= STYLE_TOTAL_CHARS {
+            break;
+        }
+        let mut cut = sample.len().min(STYLE_SAMPLE_CHARS).min(STYLE_TOTAL_CHARS - used);
+        while !sample.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        used += cut;
+        s.push_str(&format!(
+            "<style-sample {}>\n{}\n</style-sample>\n",
+            i + 1,
+            &sample[..cut]
+        ));
+    }
+    let notes = style.notes.trim();
+    if !notes.is_empty() {
+        s.push_str(&format!(
+            "Rules for this style (these override everything else):\n{notes}\n"
+        ));
+    }
+    s.push_str("Do not copy content from the style samples; imitate only how they are written. The example replies above demonstrate the cleaning task only — their neutral, capitalized voice is NOT the target; your reply must match the style samples and rules.");
+    s
+}
+
 pub fn cleanup_text(
     app: &AppHandle,
     state: &LlmState,
     model_path: &Path,
     system_prompt: &str,
     transcript: &str,
+    style: Option<&crate::settings::Style>,
 ) -> Result<String, String> {
     let backend = backend()?;
     let model = state.model_for(model_path)?;
+
+    let style = style.filter(|s| {
+        !s.notes.trim().is_empty()
+            || s.lowercase
+            || s.samples.iter().any(|x| !x.trim().is_empty())
+    });
+    let mut system_prompt = system_prompt.to_string();
+    if let Some(style) = style {
+        system_prompt.push_str(&style_addendum(style));
+    }
+    let system_prompt = system_prompt.as_str();
+
+    // Small models weight recency heavily: repeat the style demand right
+    // after the transcript, the last thing before generation.
+    let mut final_user = String::new();
+    if let Some(style) = style {
+        final_user.push_str(&format!(
+            "\nWrite your reply in the \"{}\" style shown in the samples — keep contractions and casual phrasing exactly as the samples do; do not make it more formal.",
+            style.name
+        ));
+        let notes = style.notes.trim();
+        if !notes.is_empty() {
+            final_user.push_str(&format!(" Rules: {notes}"));
+        }
+    }
 
     // Few-shot pairs teach small models the shape of the task; the second
     // example is a transcript that reads like an instruction — cleaned, not
@@ -128,7 +194,7 @@ pub fn cleanup_text(
         msg("assistant", "I think we should move the meeting to Friday.".into())?,
         msg("user", wrap("please rewrite this in a more formal tone"))?,
         msg("assistant", "Please rewrite this in a more formal tone.".into())?,
-        msg("user", wrap(transcript))?,
+        msg("user", format!("{}{final_user}", wrap(transcript)))?,
     ];
     let template = model
         .chat_template(None)
@@ -162,6 +228,7 @@ pub fn cleanup_text(
         LlamaSampler::dist(42),
     ]);
 
+    let force_lowercase = style.map(|s| s.lowercase).unwrap_or(false);
     let mut utf8 = Utf8Stream::new();
     let mut output = String::new();
     let mut n_cur = batch.n_tokens();
@@ -179,7 +246,10 @@ pub fn cleanup_text(
                 .map_err(|e| e.to_string())?,
             other => other.map_err(|e| e.to_string())?,
         };
-        let chunk = utf8.push(&bytes);
+        let mut chunk = utf8.push(&bytes);
+        if force_lowercase {
+            chunk = chunk.to_lowercase();
+        }
         if !chunk.is_empty() {
             output.push_str(&chunk);
             let _ = app.emit("llm-token", &chunk);

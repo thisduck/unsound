@@ -40,10 +40,20 @@ export interface DownloadDone {
   error: string | null;
 }
 
+export interface Style {
+  id: string;
+  name: string;
+  notes: string;
+  lowercase: boolean;
+  samples: string[];
+}
+
 export interface Settings {
   handsFree: string[];
   pushToTalk: string[];
   micDevice: string;
+  styles: Style[];
+  defaultStyle: string;
 }
 
 export const api = {
@@ -56,12 +66,19 @@ export const api = {
   stopRecording: () => invoke<RecordingResult>("stop_recording"),
   transcribe: (modelId: string, language?: string) =>
     invoke<string>("transcribe", { modelId, language: language ?? null }),
-  cleanupText: (modelId: string, text: string, prompt?: string) =>
-    invoke<string>("cleanup_text", { modelId, text, prompt: prompt ?? null }),
+  cleanupText: (modelId: string, text: string, prompt?: string, styleId?: string) =>
+    invoke<string>("cleanup_text", {
+      modelId,
+      text,
+      prompt: prompt ?? null,
+      styleId: styleId ?? null,
+    }),
   defaultCleanupPrompt: () => invoke<string>("default_cleanup_prompt"),
   getSettings: () => invoke<Settings>("get_settings"),
   setShortcuts: (handsFree: string[], pushToTalk: string[]) =>
     invoke<void>("set_shortcuts", { handsFree, pushToTalk }),
+  setStyles: (styles: Style[], defaultStyle: string) =>
+    invoke<void>("set_styles", { styles, defaultStyle }),
   deliverText: (text: string) => invoke<void>("deliver_text", { text }),
   permissionStatus: () => invoke<PermissionStatus>("permission_status"),
   startShortcutCapture: () => invoke<boolean>("start_shortcut_capture"),

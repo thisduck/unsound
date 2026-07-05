@@ -112,15 +112,26 @@ async fn cleanup_text(
     model_id: String,
     text: String,
     prompt: Option<String>,
+    style_id: Option<String>,
 ) -> Result<String, String> {
     let model_path = models::downloaded_model_path(&app, &model_id)?;
     let system_prompt = prompt
         .filter(|p| !p.trim().is_empty())
         .unwrap_or_else(|| llm::DEFAULT_CLEANUP_PROMPT.to_string());
+    let style = style_id
+        .filter(|id| !id.is_empty())
+        .and_then(|id| settings::load(&app).styles.into_iter().find(|s| s.id == id));
     let emitter = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        llm::cleanup_text(&app, &state.llm, &model_path, &system_prompt, &text)
+        llm::cleanup_text(
+            &app,
+            &state.llm,
+            &model_path,
+            &system_prompt,
+            &text,
+            style.as_ref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -157,6 +168,20 @@ fn set_shortcuts(
         return Err(e);
     }
     settings::save(&app, &s)
+}
+
+#[tauri::command]
+fn set_styles(
+    app: AppHandle,
+    styles: Vec<settings::Style>,
+    default_style: String,
+) -> Result<(), String> {
+    let mut s = settings::load(&app);
+    s.styles = styles;
+    s.default_style = default_style;
+    settings::save(&app, &s)?;
+    let _ = app.emit("settings-changed", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -367,6 +392,7 @@ pub fn run() {
             default_cleanup_prompt,
             get_settings,
             set_shortcuts,
+            set_styles,
             start_shortcut_capture,
             cancel_shortcut_capture,
             set_overlay,

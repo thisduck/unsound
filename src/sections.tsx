@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, formatBytes, formatShortcut, ModelInfo, ModelKind, on } from "./api";
+import { api, formatBytes, formatShortcut, ModelInfo, ModelKind, on, Style } from "./api";
 
 /* ── global shortcuts (hands-free + push-to-talk, multiple each) ── */
 
@@ -204,6 +204,148 @@ export function ShortcutsSection({ onError }: { onError: (msg: string | null) =>
         fn-based shortcuts (bare fn, fn Space…) need the Accessibility permission; other combos
         (⌘⇧Space, ⌥⌫, ⇧Home…) work without it. release modifier-only combos to set them.
       </div>
+    </>
+  );
+}
+
+/* ── writing styles ──────────────────────────────────────────────── */
+
+export function StylesSection({ onError }: { onError: (msg: string | null) => void }) {
+  const [styles, setStyles] = useState<Style[]>([]);
+  const [defaultStyle, setDefaultStyle] = useState("");
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    api.getSettings().then((s) => {
+      setStyles(s.styles);
+      setDefaultStyle(s.defaultStyle);
+      setLoaded(true);
+    });
+  }, []);
+
+  const persist = (nextStyles: Style[], nextDefault: string) => {
+    onError(null);
+    setStyles(nextStyles);
+    setDefaultStyle(nextDefault);
+    api.setStyles(nextStyles, nextDefault).catch((e) => onError(String(e)));
+  };
+
+  // Text edits update local state on each keystroke and persist on blur,
+  // so settings.json isn't rewritten per character.
+  const updateLocal = (next: Style[]) => setStyles(next);
+  const persistCurrent = () => persist(styles, defaultStyle);
+
+  const patchStyle = (id: string, patch: Partial<Style>) =>
+    styles.map((s) => (s.id === id ? { ...s, ...patch } : s));
+
+  const addStyle = () => {
+    const style: Style = {
+      id: crypto.randomUUID(),
+      name: "new style",
+      notes: "",
+      lowercase: false,
+      samples: [""],
+    };
+    persist([...styles, style], defaultStyle || style.id);
+  };
+
+  const removeStyle = (id: string) => {
+    const next = styles.filter((s) => s.id !== id);
+    persist(next, defaultStyle === id ? (next[0]?.id ?? "") : defaultStyle);
+  };
+
+  if (!loaded) return null;
+  return (
+    <>
+      {styles.map((style) => (
+        <div className="style-card" key={style.id}>
+          <div className="style-head">
+            <input
+              className="style-name"
+              value={style.name}
+              onChange={(e) => updateLocal(patchStyle(style.id, { name: e.target.value }))}
+              onBlur={persistCurrent}
+              spellCheck={false}
+            />
+            <label className="style-default">
+              <input
+                type="radio"
+                name="default-style"
+                checked={defaultStyle === style.id}
+                onChange={() => persist(styles, style.id)}
+              />
+              default
+            </label>
+            <label className="style-default" title="Applied in code — always exact, unlike model behavior">
+              <input
+                type="checkbox"
+                checked={style.lowercase ?? false}
+                onChange={(e) =>
+                  persist(patchStyle(style.id, { lowercase: e.target.checked }), defaultStyle)
+                }
+              />
+              lowercase
+            </label>
+            <span className="spacer" />
+            <button className="quiet danger" onClick={() => removeStyle(style.id)}>
+              delete style
+            </button>
+          </div>
+          <input
+            className="style-notes"
+            placeholder="style rules (optional) — e.g. all lowercase, even 'i'; short sentences; no emoji"
+            value={style.notes ?? ""}
+            onChange={(e) => updateLocal(patchStyle(style.id, { notes: e.target.value }))}
+            onBlur={persistCurrent}
+            spellCheck={false}
+          />
+          {style.samples.map((sample, i) => (
+            <div className="style-sample" key={i}>
+              <textarea
+                rows={3}
+                placeholder="paste a block of your writing in this style…"
+                value={sample}
+                onChange={(e) =>
+                  updateLocal(
+                    patchStyle(style.id, {
+                      samples: style.samples.map((s, j) => (j === i ? e.target.value : s)),
+                    }),
+                  )
+                }
+                onBlur={persistCurrent}
+                spellCheck={false}
+              />
+              <button
+                className="quiet"
+                title="Remove sample"
+                onClick={() =>
+                  persist(
+                    patchStyle(style.id, { samples: style.samples.filter((_, j) => j !== i) }),
+                    defaultStyle,
+                  )
+                }
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+          <button
+            className="quiet accent"
+            onClick={() => persist(patchStyle(style.id, { samples: [...style.samples, ""] }), defaultStyle)}
+          >
+            + add sample
+          </button>
+        </div>
+      ))}
+      <button className="quiet add-btn" onClick={addStyle}>
+        + add a style
+      </button>
+      {styles.length === 0 && (
+        <div className="sheet-hint" style={{ display: "block", marginTop: 8 }}>
+          a style is a name plus a few blocks of your own writing; refined text is rendered to
+          match how those samples are written
+        </div>
+      )}
     </>
   );
 }

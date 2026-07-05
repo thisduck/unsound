@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { api, ModelInfo, ModelKind } from "./api";
-import { MicPicker, ModelLibrary, PermissionsSection, ShortcutsSection } from "./sections";
+import { MicPicker, ModelLibrary, PermissionsSection, ShortcutsSection, StylesSection } from "./sections";
 
-type Section = "models" | "shortcuts" | "microphone" | "prompt" | "permissions";
+type Section = "models" | "shortcuts" | "styles" | "microphone" | "prompt" | "permissions";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "shortcuts", label: "shortcuts" },
+  { id: "styles", label: "styles" },
   { id: "models", label: "models" },
   { id: "microphone", label: "microphone" },
   { id: "prompt", label: "prompt" },
@@ -155,6 +156,16 @@ export function SettingsSheet({
               <span className="sheet-hint">dictate into any app; the text lands at your cursor</span>
             </div>
             <ShortcutsSection onError={setErr} />
+          </section>
+        );
+      case "styles":
+        return (
+          <section className="sheet-section">
+            <div className="sheet-section-head">
+              <h3>writing styles</h3>
+              <span className="sheet-hint">refined text imitates the samples of the active style</span>
+            </div>
+            <StylesSection onError={setErr} />
           </section>
         );
       case "microphone":

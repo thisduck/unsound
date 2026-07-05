@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, on, ModelInfo } from "./api";
+import { api, on, ModelInfo, Style } from "./api";
 import { useLevelHistory, Wave } from "./Wave";
 import { MicPicker } from "./sections";
 import { SettingsSheet } from "./SettingsSheet";
@@ -67,6 +67,9 @@ export default function App() {
   const [sttId, setSttId] = useLocalStorage("unsound.stt", "");
   const [llmId, setLlmId] = useLocalStorage("unsound.llm", "");
   const [history, setHistory] = useState<Take[]>(loadHistory);
+  const [stylesList, setStylesList] = useState<Style[]>([]);
+  const [styleId, setStyleId] = useState("");
+  const styleIdRef = useRef("");
   const cleaningRef = useRef(false);
   const takeRef = useRef<string | null>(null);
   // Event handlers race React state: phaseRef is always current, and a
@@ -88,13 +91,29 @@ export default function App() {
     setModels(await api.listModels());
   }, []);
 
+  const chooseStyle = (id: string) => {
+    styleIdRef.current = id;
+    setStyleId(id);
+  };
+
+  const refreshStyles = useCallback(async (adoptDefault = false) => {
+    const s = await api.getSettings();
+    setStylesList(s.styles);
+    if (adoptDefault || !s.styles.some((st) => st.id === styleIdRef.current)) {
+      styleIdRef.current = s.defaultStyle;
+      setStyleId(s.defaultStyle);
+    }
+  }, []);
+
   useEffect(() => {
     refreshModels();
+    refreshStyles(true);
     api.defaultCleanupPrompt().then((p) => {
       setDefaultPrompt(p);
       setPrompt((cur) => (cur.trim() === OLD_DEFAULT_PROMPT ? "" : cur));
     });
     const subs = [
+      on.settingsChanged(() => refreshStyles()),
       on.llmToken((chunk) => {
         if (cleaningRef.current) setCleaned((c) => c + chunk);
       }),
@@ -161,15 +180,16 @@ export default function App() {
     }
   };
 
-  const runCleanup = async (text: string): Promise<string | null> => {
+  const runCleanup = async (text: string, styleOverride?: string): Promise<string | null> => {
     if (!llm || !text) return null;
+    const useStyle = styleOverride !== undefined ? styleOverride : styleIdRef.current;
     changePhase("cleaning");
     setCleaned("");
     cleaningRef.current = true;
     setStatus(`refining with ${llm.name}…`);
     setError(null);
     try {
-      const result = await api.cleanupText(llm.id, text, prompt || undefined);
+      const result = await api.cleanupText(llm.id, text, prompt || undefined, useStyle || undefined);
       cleaningRef.current = false;
       setCleaned(result);
       upsertTake({ refined: result, llmModel: llm.name });
@@ -295,6 +315,27 @@ export default function App() {
   const busy = phase === "transcribing" || phase === "cleaning";
   const waveBars = useLevelHistory(phase === "recording");
   const heroText = cleaned || "";
+
+  // Switching style re-renders the current take immediately.
+  const styleSwitcher = stylesList.length > 0 && (
+    <select
+      className="chip-select style-chip"
+      value={styleId}
+      disabled={busy}
+      onChange={(e) => {
+        chooseStyle(e.target.value);
+        if (transcript && phaseRef.current === "idle") runCleanup(transcript, e.target.value);
+      }}
+      title="Writing style"
+    >
+      <option value="">no style</option>
+      {stylesList.map((s) => (
+        <option key={s.id} value={s.id}>
+          ✍ {s.name}
+        </option>
+      ))}
+    </select>
+  );
   const pillLabel =
     phase === "recording"
       ? "listening — tap to stop"
@@ -350,6 +391,7 @@ export default function App() {
             {heroText || phase === "cleaning" ? (
               <>
                 <div className="hero-tools">
+                  {styleSwitcher}
                   {cleaned && (
                     <>
                       <button className="quiet" onClick={() => copy(cleaned, "refined text")}>
@@ -376,6 +418,7 @@ export default function App() {
                   {transcript}
                   {llm && phase === "idle" && (
                     <div className="hero-tools" style={{ marginTop: 16 }}>
+                      {styleSwitcher}
                       <button className="quiet accent" onClick={() => runCleanup(transcript)}>
                         refine ↦
                       </button>
