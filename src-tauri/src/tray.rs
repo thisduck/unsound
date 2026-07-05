@@ -79,8 +79,9 @@ fn on_menu_event(app: &AppHandle, id: &str) {
                 .unwrap()
                 .clone();
             if !text.is_empty() {
+                let app = app.clone();
                 std::thread::spawn(move || {
-                    let _ = deliver::deliver_text(&text);
+                    let _ = deliver::deliver_text(&app, &text);
                 });
             }
         }

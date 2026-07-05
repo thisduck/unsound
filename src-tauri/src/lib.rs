@@ -179,8 +179,8 @@ async fn request_microphone() -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn deliver_text(text: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || deliver::deliver_text(&text))
+async fn deliver_text(app: AppHandle, text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || deliver::deliver_text(&app, &text))
         .await
         .map_err(|e| e.to_string())?
 }
