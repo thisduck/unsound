@@ -70,16 +70,25 @@ export const api = {
     invoke<ModelInfo>("add_custom_model", { name, kind, url }),
   startRecording: () => invoke<void>("start_recording"),
   stopRecording: () => invoke<RecordingResult>("stop_recording"),
-  transcribe: (modelId: string, language?: string) =>
-    invoke<string>("transcribe", { modelId, language: language ?? null }),
-  transcribeFile: (path: string, modelId: string, language?: string) =>
-    invoke<string>("transcribe_file", { path, modelId, language: language ?? null }),
-  cleanupText: (modelId: string, text: string, prompt?: string, styleId?: string) =>
+  transcribe: (modelId: string, language?: string, translate = false) =>
+    invoke<string>("transcribe", { modelId, language: language ?? null, translate }),
+  transcribeFile: (path: string, modelId: string, language?: string, translate = false) =>
+    invoke<string>("transcribe_file", { path, modelId, language: language ?? null, translate }),
+  cleanupText: (
+    modelId: string,
+    text: string,
+    prompt?: string,
+    styleId?: string,
+    targetLang?: string,
+    transliterate = false,
+  ) =>
     invoke<string>("cleanup_text", {
       modelId,
       text,
       prompt: prompt ?? null,
       styleId: styleId ?? null,
+      targetLang: targetLang ?? null,
+      transliterate,
     }),
   defaultCleanupPrompt: () => invoke<string>("default_cleanup_prompt"),
   getSettings: () => invoke<Settings>("get_settings"),
@@ -184,6 +193,32 @@ export function formatShortcut(shortcut: string): string {
     })
     .join(" ");
 }
+
+// Common Whisper languages; "" means auto-detect. Whisper supports ~99 —
+// this is the frequently-used subset, alphabetical after Auto.
+export const LANGUAGES: { code: string; name: string }[] = [
+  { code: "", name: "Auto-detect" },
+  { code: "ar", name: "Arabic" },
+  { code: "zh", name: "Chinese" },
+  { code: "nl", name: "Dutch" },
+  { code: "en", name: "English" },
+  { code: "fr", name: "French" },
+  { code: "de", name: "German" },
+  { code: "hi", name: "Hindi" },
+  { code: "it", name: "Italian" },
+  { code: "ja", name: "Japanese" },
+  { code: "ko", name: "Korean" },
+  { code: "pl", name: "Polish" },
+  { code: "pa", name: "Punjabi" },
+  { code: "pt", name: "Portuguese" },
+  { code: "ru", name: "Russian" },
+  { code: "es", name: "Spanish" },
+  { code: "sv", name: "Swedish" },
+  { code: "tr", name: "Turkish" },
+  { code: "uk", name: "Ukrainian" },
+  { code: "ur", name: "Urdu" },
+  { code: "vi", name: "Vietnamese" },
+];
 
 export function formatBytes(n: number): string {
   if (!n) return "?";

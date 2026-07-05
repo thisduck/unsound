@@ -6,6 +6,8 @@ export interface Take {
   sttModel: string;
   llmModel: string;
   app?: string;
+  /// Spoken-language code this take was recorded in ("" = auto).
+  lang?: string;
 }
 
 interface Props {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, on, formatBytes, formatDuration, ModelInfo, Style } from "./api";
+import { api, on, formatBytes, formatDuration, LANGUAGES, ModelInfo, Style } from "./api";
 import { CorrectableText } from "./Correctable";
 import { useLevelHistory, Wave } from "./Wave";
 import { MicPicker } from "./sections";
@@ -67,11 +67,18 @@ export default function App() {
   const [defaultPrompt, setDefaultPrompt] = useState("");
   const [sttId, setSttId] = useLocalStorage("unsound.stt", "");
   const [llmId, setLlmId] = useLocalStorage("unsound.llm", "");
+  // Spoken language (what Whisper listens for) vs. output language (what the
+  // cleanup model translates into; "" keeps the transcript's language).
+  const [language, setLanguage] = useLocalStorage("unsound.lang", "");
+  const [outLang, setOutLang] = useLocalStorage("unsound.outlang", "");
+  const [textScale, setTextScale] = useLocalStorage("unsound.textscale", "1");
   const [history, setHistory] = useState<Take[]>(loadHistory);
   const [stylesList, setStylesList] = useState<Style[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [styleId, setStyleId] = useState("");
   const styleIdRef = useRef("");
+  const outLangRef = useRef("");
+  outLangRef.current = outLang;
   const cleaningRef = useRef(false);
   const takeRef = useRef<string | null>(null);
   // Event handlers race React state: phaseRef is always current, and a
@@ -88,6 +95,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
   }, [history]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--text-scale", textScale);
+  }, [textScale]);
 
   const refreshModels = useCallback(async () => {
     setModels(await api.listModels());
@@ -189,9 +200,9 @@ export default function App() {
     setStatus(`transcribing with ${model.name}…`);
     setError(null);
     try {
-      const text = await api.transcribe(model.id);
+      const text = await api.transcribe(model.id, language || undefined);
       setTranscript(text);
-      upsertTake({ raw: text, sttModel: model.name });
+      upsertTake({ raw: text, sttModel: model.name, lang: language });
       changePhase("idle");
       setStatus("transcript ready");
       return text;
@@ -227,9 +238,9 @@ export default function App() {
       );
     });
     try {
-      const text = await api.transcribeFile(path, stt.id);
+      const text = await api.transcribeFile(path, stt.id, language || undefined);
       setTranscript(text);
-      upsertTake({ raw: text, sttModel: stt.name, app: name });
+      upsertTake({ raw: text, sttModel: stt.name, app: name, lang: language });
       changePhase("idle");
       setStatus(`transcribed ${name}`);
       if (llm) await runCleanup(text);
@@ -251,16 +262,38 @@ export default function App() {
     if (typeof path === "string") transcribeFromFile(path);
   };
 
-  const runCleanup = async (text: string, styleOverride?: string): Promise<string | null> => {
+  const runCleanup = async (
+    text: string,
+    styleOverride?: string,
+    langOverride?: string,
+  ): Promise<string | null> => {
     if (!llm || !text) return null;
     const useStyle = styleOverride !== undefined ? styleOverride : styleIdRef.current;
+    const useLangCode = langOverride !== undefined ? langOverride : outLangRef.current;
+    const transliterate = useLangCode === "translit";
+    const targetName = transliterate
+      ? undefined
+      : LANGUAGES.find((l) => l.code === useLangCode && l.code !== "")?.name;
     changePhase("cleaning");
     setCleaned("");
     cleaningRef.current = true;
-    setStatus(`refining with ${llm.name}…`);
+    setStatus(
+      transliterate
+        ? "refining → romanized…"
+        : targetName
+          ? `refining → ${targetName}…`
+          : `refining with ${llm.name}…`,
+    );
     setError(null);
     try {
-      const result = await api.cleanupText(llm.id, text, prompt || undefined, useStyle || undefined);
+      const result = await api.cleanupText(
+        llm.id,
+        text,
+        prompt || undefined,
+        useStyle || undefined,
+        targetName,
+        transliterate,
+      );
       cleaningRef.current = false;
       setCleaned(result);
       upsertTake({ refined: result, llmModel: llm.name });
@@ -405,6 +438,8 @@ export default function App() {
     setCleaned(take.refined);
     setHistoryOpen(false);
     setRawOpen(!take.refined);
+    // Restore the spoken language this take was recorded in.
+    if (take.lang !== undefined) setLanguage(take.lang);
     setStatus("loaded from history");
   };
 
@@ -428,6 +463,28 @@ export default function App() {
       {stylesList.map((s) => (
         <option key={s.id} value={s.id}>
           ✍ {s.name}
+        </option>
+      ))}
+    </select>
+  );
+
+  // Output-language switcher — re-renders the current take when changed.
+  const outLangSwitcher = (
+    <select
+      className="chip-select outlang-chip"
+      value={outLang}
+      disabled={busy}
+      onChange={(e) => {
+        setOutLang(e.target.value);
+        if (transcript && phaseRef.current === "idle") runCleanup(transcript, undefined, e.target.value);
+      }}
+      title="Output language — keep the original, or translate"
+    >
+      <option value="">keep language</option>
+      <option value="translit">transliterate (Latin script)</option>
+      {LANGUAGES.filter((l) => l.code !== "").map((l) => (
+        <option key={l.code} value={l.code}>
+          → {l.name}
         </option>
       ))}
     </select>
@@ -469,14 +526,32 @@ export default function App() {
           {pillLabel}
           <Timer running={phase === "recording"} />
         </button>
+      </div>
+
+      <div className="stage-utils">
         <button
-          className="upload-btn"
+          className="util-link"
           onClick={pickFile}
           disabled={busy || phase === "recording"}
           title="Transcribe an audio file (or drop one on the window)"
         >
-          ↑ upload
+          ↑ upload a file
         </button>
+        <span className="util-sep">·</span>
+        <span className="util-lang" title="Spoken language — what Whisper listens for">
+          <select
+            className="util-select"
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            disabled={busy}
+          >
+            {LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.code === "" ? "auto-detect" : `speaking ${l.name}`}
+              </option>
+            ))}
+          </select>
+        </span>
       </div>
 
       <main className="body">
@@ -496,6 +571,7 @@ export default function App() {
               <>
                 <div className="hero-tools">
                   {styleSwitcher}
+                  {outLangSwitcher}
                   {cleaned && (
                     <>
                       <button className="quiet" onClick={() => copy(cleaned, "refined text")}>
@@ -527,6 +603,7 @@ export default function App() {
                   {llm && phase === "idle" && (
                     <div className="hero-tools" style={{ marginTop: 16 }}>
                       {styleSwitcher}
+                      {outLangSwitcher}
                       <button className="quiet accent" onClick={() => runCleanup(transcript)}>
                         refine ↦
                       </button>
@@ -588,6 +665,8 @@ export default function App() {
           prompt={prompt}
           defaultPrompt={defaultPrompt}
           onPromptChange={setPrompt}
+          textScale={textScale}
+          onTextScaleChange={setTextScale}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshModels}
           onReplayOnboarding={() => {

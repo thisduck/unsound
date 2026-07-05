@@ -2,7 +2,15 @@ import { useState } from "react";
 import { api, ModelInfo, ModelKind } from "./api";
 import { DictionarySection, MicPicker, ModelLibrary, PermissionsSection, ShortcutsSection, StylesSection } from "./sections";
 
-type Section = "models" | "shortcuts" | "styles" | "dictionary" | "microphone" | "prompt" | "permissions";
+type Section =
+  | "models"
+  | "shortcuts"
+  | "styles"
+  | "dictionary"
+  | "microphone"
+  | "prompt"
+  | "accessibility"
+  | "permissions";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "shortcuts", label: "shortcuts" },
@@ -11,7 +19,16 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: "models", label: "models" },
   { id: "microphone", label: "microphone" },
   { id: "prompt", label: "prompt" },
+  { id: "accessibility", label: "accessibility" },
   { id: "permissions", label: "permissions" },
+];
+
+const TEXT_SIZES: { label: string; value: string }[] = [
+  { label: "Small", value: "0.9" },
+  { label: "Default", value: "1" },
+  { label: "Large", value: "1.2" },
+  { label: "Larger", value: "1.4" },
+  { label: "Largest", value: "1.6" },
 ];
 
 interface Props {
@@ -23,6 +40,8 @@ interface Props {
   prompt: string;
   defaultPrompt: string;
   onPromptChange: (p: string) => void;
+  textScale: string;
+  onTextScaleChange: (v: string) => void;
   onClose: () => void;
   onChanged: () => void;
   onReplayOnboarding: () => void;
@@ -37,6 +56,8 @@ export function SettingsSheet({
   prompt,
   defaultPrompt,
   onPromptChange,
+  textScale,
+  onTextScaleChange,
   onClose,
   onChanged,
   onReplayOnboarding,
@@ -221,6 +242,32 @@ export function SettingsSheet({
               />
             </section>
           </>
+        );
+      case "accessibility":
+        return (
+          <section className="sheet-section">
+            <div className="sheet-section-head">
+              <h3>text size</h3>
+              <span className="sheet-hint">scales the transcript and refined text</span>
+            </div>
+            <div className="size-row">
+              {TEXT_SIZES.map((s) => (
+                <button
+                  key={s.value}
+                  className={"size-btn" + (textScale === s.value ? " on" : "")}
+                  onClick={() => onTextScaleChange(s.value)}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+            <div
+              className="size-preview"
+              style={{ fontSize: `calc(15.5px * ${textScale})` }}
+            >
+              The quick brown fox jumps over the lazy dog.
+            </div>
+          </section>
         );
       case "permissions":
         return (

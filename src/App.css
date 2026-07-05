@@ -12,6 +12,8 @@
   --ok: #8fb996;
   --danger: #d98a80;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* Accessibility: scales the reading text (transcript, refined, history). */
+  --text-scale: 1;
 }
 
 * {
@@ -122,34 +124,89 @@ body {
   border-color: #454a54;
 }
 
-/* ── record pill ── */
+/* ── record pill (the single primary action) ── */
 .stage {
+  display: flex;
+  justify-content: center;
+  padding: 34px 0 12px;
+}
+
+/* ── quiet utility line under the pill (tertiary controls) ── */
+.stage-utils {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  padding: 34px 0 26px;
+  gap: 8px;
+  padding-bottom: 26px;
+  font-size: 12px;
+  color: var(--faint);
 }
 
-.upload-btn {
+.util-sep {
+  color: var(--edge);
+  user-select: none;
+}
+
+.util-link {
   font-family: var(--sans);
-  font-size: 12.5px;
-  color: var(--dim);
-  background: var(--panel);
-  border: 1px solid var(--edge);
-  border-radius: 999px;
-  padding: 10px 16px;
+  font-size: 12px;
+  color: var(--faint);
+  background: none;
+  border: none;
+  padding: 2px 2px;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition: color 0.15s;
 }
 
-.upload-btn:hover:not(:disabled) {
+.util-link:hover:not(:disabled) {
   color: var(--ink);
-  border-color: #454a54;
 }
 
-.upload-btn:disabled {
-  opacity: 0.4;
+.util-link.on {
+  color: var(--accent);
+}
+
+.util-link:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.util-lang {
+  display: inline-flex;
+  align-items: center;
+}
+
+.util-lang::after {
+  content: "⌄";
+  margin-left: -1px;
+  margin-top: -3px;
+  color: var(--faint);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.util-select {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--faint);
+  background: none;
+  border: none;
+  padding: 2px 2px;
+  outline: none;
+  cursor: pointer;
+  transition: color 0.15s;
+  /* strip the native chrome so it reads as text, not a form field */
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.util-select:hover:not(:disabled),
+.util-select:focus {
+  color: var(--ink);
+}
+
+.util-select:disabled {
+  opacity: 0.5;
   cursor: default;
 }
 
@@ -273,7 +330,7 @@ body {
 }
 
 .prose {
-  font-size: 15.5px;
+  font-size: calc(15.5px * var(--text-scale));
   line-height: 1.75;
   color: var(--soft);
   white-space: pre-wrap;
@@ -378,7 +435,7 @@ body {
 }
 
 .raw-text {
-  font-size: 13.5px;
+  font-size: calc(13.5px * var(--text-scale));
   line-height: 1.7;
   color: var(--dim);
   white-space: pre-wrap;
@@ -599,6 +656,10 @@ body {
   max-width: 170px;
 }
 
+.outlang-chip {
+  max-width: 160px;
+}
+
 .style-card {
   border: 1px solid var(--edge);
   border-radius: 10px;
@@ -743,6 +804,45 @@ body {
 
 .dict-arrow {
   color: var(--accent);
+}
+
+/* ── accessibility text size ── */
+.size-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.size-btn {
+  font-family: var(--sans);
+  font-size: 12.5px;
+  color: var(--dim);
+  background: #1e2024;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  padding: 7px 13px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.size-btn:hover {
+  color: var(--ink);
+  border-color: #454a54;
+}
+
+.size-btn.on {
+  color: var(--accent);
+  border-color: rgba(232, 168, 124, 0.5);
+  background: rgba(232, 168, 124, 0.1);
+}
+
+.size-preview {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  color: var(--soft);
+  line-height: 1.7;
 }
 
 /* ── settings sidebar ── */
@@ -908,7 +1008,7 @@ body {
 }
 
 .take-text {
-  font-size: 13px;
+  font-size: calc(13px * var(--text-scale));
   line-height: 1.6;
   color: var(--soft);
   cursor: pointer;

@@ -190,6 +190,8 @@ async fn cleanup_text(
     text: String,
     prompt: Option<String>,
     style_id: Option<String>,
+    target_lang: Option<String>,
+    transliterate: bool,
 ) -> Result<String, String> {
     let model_path = models::downloaded_model_path(&app, &model_id)?;
     // The base prompt is fixed; the user contributes additions on top.
@@ -213,6 +215,8 @@ async fn cleanup_text(
             &system_prompt,
             &text,
             style.as_ref(),
+            target_lang.as_deref(),
+            transliterate,
         )
     })
     .await

@@ -151,7 +151,7 @@ fn style_addendum(style: &crate::settings::Style) -> String {
             "Rules for this style (these override everything else):\n{notes}\n"
         ));
     }
-    s.push_str("Do not copy content from the style samples; imitate only how they are written. The example replies above demonstrate the cleaning task only — their neutral, capitalized voice is NOT the target; your reply must match the style samples and rules.");
+    s.push_str("Do not copy content from the style samples; imitate only how they are written. Match only the writing manner (tone, formality, rhythm, punctuation, casing) — never change or translate the language of the text; the style samples' language is irrelevant to the output language. The example replies above demonstrate the cleaning task only — their neutral, capitalized voice is NOT the target; your reply must match the style samples and rules.");
     s
 }
 
@@ -162,6 +162,11 @@ pub fn cleanup_text(
     system_prompt: &str,
     transcript: &str,
     style: Option<&crate::settings::Style>,
+    // Target language to translate into (e.g. "English", "Urdu"); None keeps
+    // the transcript's own language. Ignored when `transliterate` is set.
+    target_lang: Option<&str>,
+    // Romanize the original words into the Latin alphabet without translating.
+    transliterate: bool,
 ) -> Result<String, String> {
     let backend = backend()?;
     let model = state.model_for(model_path)?;
@@ -171,14 +176,29 @@ pub fn cleanup_text(
             || s.lowercase
             || s.samples.iter().any(|x| !x.trim().is_empty())
     });
+    let target_lang = target_lang
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty());
     let mut system_prompt = system_prompt.to_string();
     if let Some(style) = style {
         system_prompt.push_str(&style_addendum(style));
     }
+    // Language is an explicit axis, independent of style: keep the
+    // transcript's language, transliterate it, or translate to a target.
+    if transliterate {
+        system_prompt.push_str("\n\nOutput script: transliterate (romanize) the cleaned result into the Latin/English alphabet — write the SAME words and sounds of the original language using English letters. Do NOT translate the meaning into English. For example, the Urdu \"کبھی کبھی\" becomes \"kabhi kabhi\" (not \"sometimes\"), and Hindi \"नमस्ते\" becomes \"namaste\" (not \"hello\").");
+    } else {
+        match target_lang {
+            Some(lang) => system_prompt.push_str(&format!(
+                "\n\nOutput language: translate the cleaned (and styled, if a style is set) result into natural, fluent {lang}. The reply must be in {lang} regardless of the transcript's language."
+            )),
+            None => system_prompt.push_str("\n\nOutput language: write the result in the same language as the transcript. Do not translate it."),
+        }
+    }
     let system_prompt = system_prompt.as_str();
 
-    // Small models weight recency heavily: repeat the style demand right
-    // after the transcript, the last thing before generation.
+    // Small models weight recency heavily: repeat the key demands right after
+    // the transcript, the last thing before generation.
     let mut final_user = String::new();
     if let Some(style) = style {
         final_user.push_str(&format!(
@@ -188,6 +208,14 @@ pub fn cleanup_text(
         let notes = style.notes.trim();
         if !notes.is_empty() {
             final_user.push_str(&format!(" Rules: {notes}"));
+        }
+    }
+    if transliterate {
+        final_user.push_str("\nReply in the same language, romanized into the Latin alphabet (transliterate, do not translate).");
+    } else {
+        match target_lang {
+            Some(lang) => final_user.push_str(&format!("\nReply in {lang} (translate).")),
+            None => final_user.push_str("\nReply in the same language as the transcript."),
         }
     }
 
