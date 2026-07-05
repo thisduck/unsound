@@ -57,7 +57,7 @@ export function Onboarding({ models, onChanged, onDone }: Props) {
         A <b>voice model</b> (Whisper) turns speech into words — most understand ~99 languages,
         and there are English-only versions that are a touch sharper if that's all you speak. A{" "}
         <b>text model</b> cleans the transcript — language coverage varies by model, so if you
-        dictate in other languages, pick one that speaks them (Qwen covers ~29).
+        dictate in other languages, pick one that speaks them (Qwen covers ~29, Gemma 3 covers 140+).
       </p>
       {!ready && (
         <div className="ob-recommended">
