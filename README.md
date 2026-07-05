@@ -1,12 +1,40 @@
 # unsound
 
-Local dictation and cleanup. Record your voice, get a transcript from a local
-Whisper model, then have a local LLM tidy it up — punctuation, filler words,
-paragraphs. **Nothing ever leaves your machine.** The only network access in
-the entire app is the model downloader; every other feature works with the
-network cable unplugged.
+**Talk, and unsound turns it into clean writing — entirely on your own Mac.**
 
-## How it works
+Speak into unsound and it writes down what you said, then quietly tidies it
+up: fixes punctuation, drops the "um"s and false starts, breaks it into
+paragraphs. Nothing you say ever leaves your computer — no cloud, no account,
+no internet. The only time it touches the network is the one-time download of
+the models that do the work.
+
+[**Download the latest release →**](https://github.com/thisduck/unsound/releases)
+(macOS, Apple Silicon)
+
+### What you can do with it
+
+- **🎙 Dictate anywhere.** Press a keyboard shortcut in any app — Mail, Slack,
+  Notes, your browser — speak, and the cleaned-up text is typed right where
+  your cursor is. Two modes: press once to start and stop, or hold-to-talk.
+- **✍️ Write in your own voice.** Teach unsound your writing styles by pasting
+  a few samples ("casual", "professional", …). It matches your tone,
+  punctuation, even lowercase habits — and you can switch styles with a click.
+- **📁 Transcribe audio files.** Drop in a voice memo, a meeting recording, or
+  a WhatsApp voice note (even ones that downloaded with the wrong name) and get
+  a clean transcript.
+- **🧠 It learns your words.** Click any word it misheard to correct it — names,
+  jargon, and your corrections are remembered so it gets them right next time.
+- **📝 A tidy history.** Every take is kept — raw and cleaned — ready to copy,
+  reopen, or re-style.
+- **🔒 Completely private.** Everything runs on your machine. Works with the
+  Wi-Fi off.
+
+Pick the models you like from a built-in library (smaller and faster, or
+larger and sharper) — they download once and you can swap them anytime.
+
+---
+
+## How it works (for the technically curious)
 
 ```
 microphone ──cpal──▶ 16kHz mono PCM ──whisper.cpp──▶ raw transcript
@@ -69,6 +97,11 @@ terminal. The bundled app has its own `NSMicrophoneUsageDescription`
 - [x] History of past takes (raw + refined, local only)
 - [x] Menu bar tray, microphone switching, onboarding
 - [x] Signed + notarized releases from CI
+- [x] Writing styles from your own samples; quick style switching
+- [x] Personal dictionary — click-to-correct that biases recognition + cleanup
+- [x] Audio file upload (drag-drop or picker): wav/mp3/m4a/flac/ogg, Ogg-Opus
+      and fragmented-MP4 WhatsApp voice notes, content-sniffed by bytes
+- [ ] Per-app automatic styles (informal in Slack, professional in Mail)
 - [ ] Windows build (same codebase; CPU inference by default, Vulkan optional)
 - [ ] iOS / Android — whisper.cpp and llama.cpp both run on mobile; the plan
       is to reuse the pipeline design and model registry, with a native or
