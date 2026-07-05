@@ -22,10 +22,15 @@ the models that do the work.
 - **📁 Transcribe audio files.** Drop in a voice memo, a meeting recording, or
   a WhatsApp voice note (even ones that downloaded with the wrong name) and get
   a clean transcript.
+- **🌍 Speak any language, get any language.** Transcribe ~99 languages, then
+  keep the original, transliterate it to the Latin alphabet, or translate it to
+  another language — all at the click of a dropdown.
 - **🧠 It learns your words.** Click any word it misheard to correct it — names,
   jargon, and your corrections are remembered so it gets them right next time.
 - **📝 A tidy history.** Every take is kept — raw and cleaned — ready to copy,
   reopen, or re-style.
+- **🔎 Comfortable to read.** Adjustable text size for the transcript and
+  refined output.
 - **🔒 Completely private.** Everything runs on your machine. Works with the
   Wi-Fi off.
 
@@ -58,12 +63,19 @@ Models are downloaded on demand from Hugging Face into the app data directory
 fully swappable per run — record once, then re-run transcription or cleanup
 with different models to compare.
 
-Curated registry: Whisper tiny / base / small / medium / large-v3-turbo, plus
-Qwen 2.5 (1.5B, 3B) and Llama 3.2 (1B, 3B) instruct models at Q4_K_M. Any
-other model works via **models → add a custom model by URL** — whisper.cpp
+Curated registry:
+
+- **Speech-to-text (Whisper):** tiny / base / small / medium / large-v3-turbo /
+  large-v3, English-only base & small variants, plus fine-tunes for South Asian
+  languages — IndicWhisper Medium (AI4Bharat) and Whisper Hindi→Hinglish.
+- **Cleanup (llama.cpp GGUF):** Qwen3 4B (default), Gemma 3 4B, Qwen 2.5
+  (1.5B/3B/7B), Llama 3.1 8B, Llama 3.2 (1B/3B).
+
+Any other model works via **models → add a custom model by URL** — whisper.cpp
 GGML files for speech, llama.cpp GGUF files for cleanup.
 
-The cleanup system prompt is editable in the app (panel 03 → edit prompt).
+The cleanup system prompt is read-only in the app, with a box for your own
+additions on top of it (settings → prompt).
 
 ## Installing a release
 
@@ -101,7 +113,12 @@ terminal. The bundled app has its own `NSMicrophoneUsageDescription`
 - [x] Personal dictionary — click-to-correct that biases recognition + cleanup
 - [x] Audio file upload (drag-drop or picker): wav/mp3/m4a/flac/ogg, Ogg-Opus
       and fragmented-MP4 WhatsApp voice notes, content-sniffed by bytes
+- [x] Per-take output language: keep, transliterate to Latin script, or
+      translate to another language (at the cleanup stage)
+- [x] Adjustable text size (accessibility)
 - [ ] Per-app automatic styles (informal in Slack, professional in Mail)
+- [ ] A second STT engine (sherpa-onnx) for Parakeet/Moonshine and better
+      Urdu/Punjabi coverage
 - [ ] Windows build (same codebase; CPU inference by default, Vulkan optional)
 - [ ] iOS / Android — whisper.cpp and llama.cpp both run on mobile; the plan
       is to reuse the pipeline design and model registry, with a native or
