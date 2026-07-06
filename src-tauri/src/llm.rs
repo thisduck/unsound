@@ -237,6 +237,7 @@ fn render_prompt(model: &LlamaModel, messages: &[(&str, String)]) -> Result<Stri
     } else {
         "chatml" // qwen, granite, and anything else ChatML-compatible
     };
+    eprintln!("[llm] embedded chat template unusable; arch='{arch}', falling back to '{family}'");
     for name in [family, "chatml"] {
         if let Ok(t) = LlamaChatTemplate::new(name) {
             if let Some(p) = try_template(model, &t, &msgs) {
