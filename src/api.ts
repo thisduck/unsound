@@ -4,7 +4,7 @@ import type { Take } from "./HistoryDrawer";
 
 export type OverlayState = "recording" | "processing" | "hidden";
 
-export type ModelKind = "stt" | "llm" | "diarize";
+export type ModelKind = "stt" | "llm" | "diarize" | "vad";
 
 export interface ModelInfo {
   id: string;

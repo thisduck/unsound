@@ -10,6 +10,8 @@ pub enum ModelKind {
     Llm,
     /// Speaker-diarization models (sherpa-onnx): segmentation + embedding.
     Diarize,
+    /// Voice-activity detection (Silero) — chunks meeting audio on silence.
+    Vad,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -294,6 +296,17 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "Larger, English-tuned. Often separates similar voices better.",
             "English",
             false,
+        ),
+        // --- Voice-activity detection (meeting streaming) ---
+        m(
+            "vad-silero",
+            "Voice activity detection (Silero)",
+            ModelKind::Vad,
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+            1 * MB,
+            "Chunks meeting audio on natural pauses so words aren't cut mid-sentence.",
+            "Language-independent",
+            true,
         ),
     ]
 }

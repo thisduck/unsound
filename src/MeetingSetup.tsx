@@ -58,6 +58,7 @@ export function MeetingSetup({ models, onModelsChanged }: Props) {
     models.find((m) => m.kind === "llm");
   const sttModel = models.find((m) => m.kind === "stt" && m.downloaded) ?? recStt;
   const llmModel = models.find((m) => m.kind === "llm" && m.downloaded) ?? recLlm;
+  const vad = models.find((m) => m.id === "vad-silero");
   const seg = models.find((m) => m.id === "diarize-segmentation");
   const embs = models.filter((m) => m.kind === "diarize" && m.id !== "diarize-segmentation");
 
@@ -71,6 +72,7 @@ export function MeetingSetup({ models, onModelsChanged }: Props) {
 
       <div className="setup-group-label">Required</div>
       {sttModel && <ModelRow model={sttModel} onDone={onModelsChanged} />}
+      {vad && <ModelRow model={vad} onDone={onModelsChanged} />}
       {seg && <ModelRow model={seg} onDone={onModelsChanged} />}
 
       <div className="setup-group-label">

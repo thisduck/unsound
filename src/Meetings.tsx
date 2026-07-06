@@ -112,12 +112,13 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const meetEmbId = (embModels.find((m) => m.id === meetingEmbId) ?? embModels[0])?.id;
   const numSpeakers = meetingSpeakers ? parseInt(meetingSpeakers, 10) : undefined;
 
-  // Setup gate: meetings need a speech model, the segmentation model, and at
-  // least one speaker-embedding model.
+  // Setup gate: meetings need a speech model, the VAD model, the segmentation
+  // model, and at least one speaker-embedding model.
   const sttReady = sttModels.length > 0;
+  const vadReady = !!models.find((m) => m.id === "vad-silero")?.downloaded;
   const segReady = !!models.find((m) => m.id === "diarize-segmentation")?.downloaded;
   const diarizeReady = segReady && embModels.length > 0;
-  const setupNeeded = !sttReady || !diarizeReady;
+  const setupNeeded = !sttReady || !vadReady || !diarizeReady;
 
   const refresh = async () => {
     try {
