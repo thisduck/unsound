@@ -17,16 +17,19 @@ pub struct Span {
     pub speaker: i32,
 }
 
-/// Cluster 16 kHz mono `samples` into per-speaker spans. The speaker count is
-/// auto-detected (`num_clusters` <= 0 → cluster by `threshold`).
+/// Cluster 16 kHz mono `samples` into per-speaker spans. When `num_speakers` is
+/// `Some(n)` the count is forced (far more reliable when the user knows it);
+/// otherwise it's auto-detected by `threshold` (larger → fewer speakers).
 pub fn diarize(
     segmentation: &Path,
     embedding: &Path,
     samples: Vec<f32>,
     threshold: f32,
+    num_speakers: Option<i32>,
 ) -> Result<Vec<Span>, String> {
     let config = DiarizeConfig {
-        num_clusters: Some(-1),
+        // sherpa uses num_clusters when > 0, else falls back to threshold.
+        num_clusters: Some(num_speakers.filter(|&n| n > 0).unwrap_or(-1)),
         threshold: Some(threshold),
         min_duration_on: Some(0.2),
         min_duration_off: Some(0.3),

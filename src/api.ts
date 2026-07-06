@@ -174,7 +174,12 @@ export const api = {
   meetingStart: (meetingId: string, modelId: string, language?: string) =>
     invoke<void>("meeting_start", { meetingId, modelId, language: language ?? null }),
   meetingStop: () => invoke<void>("meeting_stop"),
-  diarizeMeeting: (meetingId: string) => invoke<Meeting>("diarize_meeting", { meetingId }),
+  diarizeMeeting: (meetingId: string, embeddingModelId?: string, numSpeakers?: number) =>
+    invoke<Meeting>("diarize_meeting", {
+      meetingId,
+      embeddingModelId: embeddingModelId ?? null,
+      numSpeakers: numSpeakers ?? null,
+    }),
 
   // System-audio capture (ScreenCaptureKit; macOS 13+).
   systemAudioSupported: () => invoke<boolean>("system_audio_supported"),

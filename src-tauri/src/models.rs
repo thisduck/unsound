@@ -281,9 +281,19 @@ fn builtin_registry() -> Vec<ModelInfo> {
             ModelKind::Diarize,
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
             28 * MB,
-            "Tells voices apart to label Speaker 1, Speaker 2, …",
+            "Tells voices apart to label Speaker 1, Speaker 2, … Good all-round default.",
             "Language-independent",
             true,
+        ),
+        m(
+            "diarize-embedding-titanet",
+            "Speaker embeddings (NeMo TitaNet)",
+            ModelKind::Diarize,
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
+            40 * MB,
+            "Larger, English-tuned. Often separates similar voices better.",
+            "English",
+            false,
         ),
     ]
 }

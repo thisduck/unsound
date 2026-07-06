@@ -75,6 +75,23 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const [asking, setAsking] = useState(false);
   const [testing, setTesting] = useState(false);
   const [liveSegments, setLiveSegments] = useState<Segment[]>([]);
+  // Meeting-specific model choices (persisted, independent of the dictate tab).
+  const [meetingSttId, setMeetingSttId] = useState(
+    () => localStorage.getItem("unsound.meeting.stt") ?? "",
+  );
+  const [meetingEmbId, setMeetingEmbId] = useState(
+    () => localStorage.getItem("unsound.meeting.emb") ?? "diarize-embedding",
+  );
+  const [meetingLlmId, setMeetingLlmId] = useState(
+    () => localStorage.getItem("unsound.meeting.llm") ?? "",
+  );
+  const [meetingSpeakers, setMeetingSpeakers] = useState(
+    () => localStorage.getItem("unsound.meeting.speakers") ?? "",
+  );
+  const persist = (key: string, value: string, set: (v: string) => void) => {
+    localStorage.setItem(key, value);
+    set(value);
+  };
   const activeIdRef = useRef<string | null>(null);
   const summaryRef = useRef(false);
   const answerRef = useRef(false);
@@ -84,11 +101,22 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   // always sees the current phase and handlers.
   const toggleRef = useRef<() => void>(() => {});
 
-  // Setup gate: meetings need a speech model and the two diarization models.
-  const sttReady = models.some((m) => m.kind === "stt" && m.downloaded);
-  const diarizeReady = ["diarize-segmentation", "diarize-embedding"].every(
-    (id) => models.find((m) => m.id === id)?.downloaded,
+  // Downloaded models available to meetings, and the resolved choices.
+  const sttModels = models.filter((m) => m.kind === "stt" && m.downloaded);
+  const llmModels = models.filter((m) => m.kind === "llm" && m.downloaded);
+  const embModels = models.filter(
+    (m) => m.kind === "diarize" && m.id !== "diarize-segmentation" && m.downloaded,
   );
+  const meetStt = sttModels.find((m) => m.id === meetingSttId) ?? stt ?? sttModels[0];
+  const meetLlm = llmModels.find((m) => m.id === meetingLlmId) ?? llm ?? llmModels[0];
+  const meetEmbId = (embModels.find((m) => m.id === meetingEmbId) ?? embModels[0])?.id;
+  const numSpeakers = meetingSpeakers ? parseInt(meetingSpeakers, 10) : undefined;
+
+  // Setup gate: meetings need a speech model, the segmentation model, and at
+  // least one speaker-embedding model.
+  const sttReady = sttModels.length > 0;
+  const segReady = !!models.find((m) => m.id === "diarize-segmentation")?.downloaded;
+  const diarizeReady = segReady && embModels.length > 0;
   const setupNeeded = !sttReady || !diarizeReady;
 
   const refresh = async () => {
@@ -153,12 +181,12 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   };
 
   const ask = async () => {
-    if (!selected || !llm || !question.trim() || asking) return;
+    if (!selected || !meetLlm || !question.trim() || asking) return;
     setAnswer("");
     setAsking(true);
     answerRef.current = true;
     try {
-      const a = await api.askMeeting(selected.id, llm.id, question.trim());
+      const a = await api.askMeeting(selected.id, meetLlm.id, question.trim());
       setAnswer(a);
     } catch (e) {
       setAnswer(String(e));
@@ -169,7 +197,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   };
 
   const startMeeting = async () => {
-    if (!stt) {
+    if (!meetStt) {
       setError("download a speech model first (settings → models)");
       return;
     }
@@ -195,15 +223,15 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         endedAt: null,
         summary: "",
         notes: "",
-        sttModel: stt.name,
-        llmModel: llm?.name ?? "",
+        sttModel: meetStt.name,
+        llmModel: meetLlm?.name ?? "",
         lang: language,
         segments: [],
         segmentCount: 0,
       });
       // The backend now owns capture + rolling transcription; it emits
       // `meeting-segments` as they finalize.
-      await api.meetingStart(id, stt.id, language || undefined);
+      await api.meetingStart(id, meetStt.id, language || undefined);
     } catch (e) {
       setError(String(e));
       setPhase("idle");
@@ -230,19 +258,19 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         setPhase("diarizing");
         setStatus("detecting speakers…");
         try {
-          m = await api.diarizeMeeting(id);
+          m = await api.diarizeMeeting(id, meetEmbId, numSpeakers);
           setSelected(m);
           setNotes(m.notes);
         } catch (e) {
           console.error("diarization failed", e);
         }
       }
-      if (llm && m && m.segments.length > 0) {
+      if (meetLlm && m && m.segments.length > 0) {
         setPhase("summarizing");
         setStatus("summarizing…");
         setLiveSummary("");
         summaryRef.current = true;
-        const summary = await api.summarizeMeeting(id, llm.id);
+        const summary = await api.summarizeMeeting(id, meetLlm.id);
         summaryRef.current = false;
         setSelected((cur) => (cur ? { ...cur, summary } : cur));
       }
@@ -440,7 +468,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
             </section>
           )}
 
-          {llm && selected.segments.length > 0 && (
+          {meetLlm && selected.segments.length > 0 && (
             <section className="meet-section">
               <h3>ask about this meeting</h3>
               <div className="meet-ask">
@@ -501,6 +529,72 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         </div>
       ) : (
         <div className="meet-list">
+          <details className="meet-options">
+            <summary>meeting options</summary>
+            <div className="meet-options-body">
+              <label>
+                <span>Speech model</span>
+                <select
+                  value={meetStt?.id ?? ""}
+                  onChange={(e) => persist("unsound.meeting.stt", e.target.value, setMeetingSttId)}
+                >
+                  {sttModels.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Speaker detection</span>
+                <select
+                  value={meetEmbId ?? ""}
+                  onChange={(e) => persist("unsound.meeting.emb", e.target.value, setMeetingEmbId)}
+                >
+                  {embModels.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>People on the call (besides you)</span>
+                <select
+                  value={meetingSpeakers}
+                  onChange={(e) =>
+                    persist("unsound.meeting.speakers", e.target.value, setMeetingSpeakers)
+                  }
+                >
+                  <option value="">Auto-detect</option>
+                  {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                    <option key={n} value={String(n)}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Summary model</span>
+                <select
+                  value={meetLlm?.id ?? ""}
+                  onChange={(e) => persist("unsound.meeting.llm", e.target.value, setMeetingLlmId)}
+                >
+                  {llmModels.length === 0 && <option value="">none downloaded</option>}
+                  {llmModels.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="meet-options-note">
+                Getting too many speakers? Auto-detect tends to over-split — set the exact number of
+                people on the call, or try the TitaNet speaker model (download it in setup).
+              </p>
+            </div>
+          </details>
+
           {meetings.length > 0 && (
             <input
               className="meet-search"

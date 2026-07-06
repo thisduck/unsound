@@ -59,7 +59,7 @@ export function MeetingSetup({ models, onModelsChanged }: Props) {
   const sttModel = models.find((m) => m.kind === "stt" && m.downloaded) ?? recStt;
   const llmModel = models.find((m) => m.kind === "llm" && m.downloaded) ?? recLlm;
   const seg = models.find((m) => m.id === "diarize-segmentation");
-  const emb = models.find((m) => m.id === "diarize-embedding");
+  const embs = models.filter((m) => m.kind === "diarize" && m.id !== "diarize-segmentation");
 
   return (
     <div className="meet-setup">
@@ -72,7 +72,13 @@ export function MeetingSetup({ models, onModelsChanged }: Props) {
       <div className="setup-group-label">Required</div>
       {sttModel && <ModelRow model={sttModel} onDone={onModelsChanged} />}
       {seg && <ModelRow model={seg} onDone={onModelsChanged} />}
-      {emb && <ModelRow model={emb} onDone={onModelsChanged} />}
+
+      <div className="setup-group-label">
+        Speaker detection — get at least one (you can switch in meeting options)
+      </div>
+      {embs.map((m) => (
+        <ModelRow key={m.id} model={m} onDone={onModelsChanged} />
+      ))}
 
       <div className="setup-group-label">Recommended — for summaries &amp; Q&amp;A</div>
       {llmModel && <ModelRow model={llmModel} onDone={onModelsChanged} />}

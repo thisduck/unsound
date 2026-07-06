@@ -1595,3 +1595,57 @@ textarea.meet-notes:focus {
 .seg-spk3 .seg-who { color: #e0b877; }
 .seg-spk4 .seg-who { color: #71c7bf; }
 .seg-spk5 .seg-who { color: #d98a80; }
+
+/* ---- meeting options (model + speaker choices) ---- */
+.meet-options {
+  margin-bottom: 12px;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.meet-options > summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  color: var(--dim);
+  font-size: 13px;
+  list-style: none;
+}
+.meet-options > summary::-webkit-details-marker {
+  display: none;
+}
+.meet-options > summary::before {
+  content: "⚙ ";
+}
+.meet-options[open] > summary {
+  border-bottom: 1px solid var(--edge);
+}
+.meet-options-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.meet-options-body label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--soft);
+}
+.meet-options-body select {
+  background: var(--bg);
+  border: 1px solid var(--edge);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 13px;
+  max-width: 60%;
+}
+.meet-options-note {
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 4px 0 0;
+}

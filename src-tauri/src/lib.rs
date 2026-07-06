@@ -617,9 +617,12 @@ async fn diarize_meeting(
     state: State<'_, AppState>,
     db: State<'_, Db>,
     meeting_id: String,
+    embedding_model_id: Option<String>,
+    num_speakers: Option<i32>,
 ) -> Result<Meeting, String> {
     let seg_model = models::downloaded_model_path(&app, "diarize-segmentation")?;
-    let emb_model = models::downloaded_model_path(&app, "diarize-embedding")?;
+    let emb_id = embedding_model_id.unwrap_or_else(|| "diarize-embedding".to_string());
+    let emb_model = models::downloaded_model_path(&app, &emb_id)?;
     let samples = state.sys.last.lock().unwrap().clone();
     // Nothing meaningful to cluster in under a second of audio.
     if samples.len() < 16_000 {
@@ -627,7 +630,9 @@ async fn diarize_meeting(
             .ok_or_else(|| "meeting not found".to_string());
     }
     let spans = tauri::async_runtime::spawn_blocking(move || {
-        diarize::diarize(&seg_model, &emb_model, samples, 0.5)
+        // Higher default threshold than sherpa's 0.5 to curb over-splitting;
+        // an explicit speaker count (when the user sets one) overrides it.
+        diarize::diarize(&seg_model, &emb_model, samples, 0.7, num_speakers)
     })
     .await
     .map_err(|e| e.to_string())??;
