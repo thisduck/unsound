@@ -35,6 +35,11 @@ pub struct ModelInfo {
     pub custom: bool,
     #[serde(default)]
     pub downloaded: bool,
+    /// Multi-file models (e.g. sherpa-onnx Moonshine) list their file URLs here;
+    /// they download into a per-id directory instead of a single file. Empty for
+    /// ordinary single-file models.
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -76,6 +81,28 @@ fn builtin_registry() -> Vec<ModelInfo> {
         recommended,
         custom: false,
         downloaded: false,
+        files: vec![],
+    };
+    // A multi-file (bundle) model — downloads its files into a per-id directory.
+    let mb = |id: &str,
+              name: &str,
+              kind: ModelKind,
+              files: &[&str],
+              size: u64,
+              desc: &str,
+              languages: &str| ModelInfo {
+        id: id.into(),
+        name: name.into(),
+        kind,
+        url: String::new(),
+        filename: String::new(),
+        size_bytes: size,
+        description: desc.into(),
+        languages: languages.into(),
+        recommended: false,
+        custom: false,
+        downloaded: false,
+        files: files.iter().map(|s| s.to_string()).collect(),
     };
     const WHISPER_LANGS: &str = "Multilingual · ~99 languages";
     const EN_ONLY: &str = "English only";
@@ -318,6 +345,24 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "Language-independent",
             true,
         ),
+        // Alternative meeting speech model: fast on-device English ASR via
+        // sherpa-onnx. Picked in meeting options; keeps whisper as the default
+        // (and the only choice for non-English).
+        mb(
+            "moonshine-base-en",
+            "Moonshine Base (English, fast)",
+            ModelKind::Stt,
+            &[
+                "https://huggingface.co/csukuangfj/sherpa-onnx-moonshine-base-en-int8/resolve/main/preprocess.onnx",
+                "https://huggingface.co/csukuangfj/sherpa-onnx-moonshine-base-en-int8/resolve/main/encode.int8.onnx",
+                "https://huggingface.co/csukuangfj/sherpa-onnx-moonshine-base-en-int8/resolve/main/uncached_decode.int8.onnx",
+                "https://huggingface.co/csukuangfj/sherpa-onnx-moonshine-base-en-int8/resolve/main/cached_decode.int8.onnx",
+                "https://huggingface.co/csukuangfj/sherpa-onnx-moonshine-base-en-int8/resolve/main/tokens.txt",
+            ],
+            210 * MB,
+            "Low-latency English transcription for live meetings. English only.",
+            "English",
+        ),
     ]
 }
 
@@ -349,15 +394,49 @@ fn save_custom_models(app: &AppHandle, models: &[ModelInfo]) -> Result<(), Strin
     fs::write(custom_models_path(app)?, data).map_err(|e| e.to_string())
 }
 
+/// The base filenames a bundle model expects on disk (derived from its URLs).
+fn bundle_filenames(info: &ModelInfo) -> Vec<String> {
+    info.files
+        .iter()
+        .map(|u| {
+            u.split('?')
+                .next()
+                .unwrap_or(u)
+                .rsplit('/')
+                .next()
+                .unwrap_or("file")
+                .to_string()
+        })
+        .collect()
+}
+
+/// On-disk location: a single file for normal models, a per-id directory for
+/// multi-file bundles.
 pub fn model_path(app: &AppHandle, info: &ModelInfo) -> Result<PathBuf, String> {
-    Ok(models_dir(app)?.join(&info.filename))
+    let dir = models_dir(app)?;
+    if info.files.is_empty() {
+        Ok(dir.join(&info.filename))
+    } else {
+        Ok(dir.join(&info.id))
+    }
+}
+
+fn is_downloaded(app: &AppHandle, info: &ModelInfo) -> bool {
+    let Ok(base) = model_path(app, info) else {
+        return false;
+    };
+    if info.files.is_empty() {
+        base.exists()
+    } else {
+        bundle_filenames(info).iter().all(|f| base.join(f).exists())
+    }
 }
 
 pub fn all_models(app: &AppHandle) -> Result<Vec<ModelInfo>, String> {
     let mut models = builtin_registry();
     models.extend(load_custom_models(app)?);
     for m in &mut models {
-        m.downloaded = model_path(app, m)?.exists();
+        m.downloaded = is_downloaded(app, m);
     }
     Ok(models)
 }
@@ -372,11 +451,10 @@ pub fn find_model(app: &AppHandle, id: &str) -> Result<ModelInfo, String> {
 /// Resolve the on-disk path of a downloaded model, erroring if it is missing.
 pub fn downloaded_model_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
     let info = find_model(app, id)?;
-    let path = model_path(app, &info)?;
-    if !path.exists() {
+    if !is_downloaded(app, &info) {
         return Err(format!("model '{}' is not downloaded yet", info.name));
     }
-    Ok(path)
+    model_path(app, &info)
 }
 
 pub fn add_custom(app: &AppHandle, name: String, kind: ModelKind, url: String) -> Result<ModelInfo, String> {
@@ -406,6 +484,7 @@ pub fn add_custom(app: &AppHandle, name: String, kind: ModelKind, url: String) -
         recommended: false,
         custom: true,
         downloaded: false,
+        files: vec![],
     };
     customs.push(info.clone());
     save_custom_models(app, &customs)?;
@@ -416,7 +495,12 @@ pub fn delete_model_file(app: &AppHandle, id: &str) -> Result<(), String> {
     let info = find_model(app, id)?;
     let path = model_path(app, &info)?;
     if path.exists() {
-        fs::remove_file(&path).map_err(|e| e.to_string())?;
+        // Bundle models are a directory; single-file models are a file.
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
+        } else {
+            fs::remove_file(&path).map_err(|e| e.to_string())?;
+        }
     }
     if info.custom {
         let customs: Vec<ModelInfo> = load_custom_models(app)?
@@ -446,6 +530,47 @@ async fn download_inner(app: &AppHandle, id: &str) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
 
     let info = find_model(app, id)?;
+
+    // Multi-file bundle (e.g. Moonshine): download each file into the per-id
+    // directory, reporting cumulative progress against the model's total size.
+    if !info.files.is_empty() {
+        let dir = model_path(app, &info)?;
+        tokio::fs::create_dir_all(&dir).await.map_err(|e| e.to_string())?;
+        let total = info.size_bytes.max(1);
+        let mut downloaded: u64 = 0;
+        let mut last_emit: u64 = 0;
+        for (url, name) in info.files.iter().zip(bundle_filenames(&info)) {
+            let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
+            if !resp.status().is_success() {
+                return Err(format!("download failed: HTTP {}", resp.status()));
+            }
+            let dest = dir.join(&name);
+            let part = dest.with_extension("part");
+            let mut file = tokio::fs::File::create(&part).await.map_err(|e| e.to_string())?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| e.to_string())?;
+                file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+                downloaded += chunk.len() as u64;
+                if downloaded - last_emit > 2 * MB {
+                    last_emit = downloaded;
+                    let _ = app.emit(
+                        "model-download-progress",
+                        DownloadProgress {
+                            id: id.to_string(),
+                            downloaded,
+                            total,
+                        },
+                    );
+                }
+            }
+            file.flush().await.map_err(|e| e.to_string())?;
+            drop(file);
+            tokio::fs::rename(&part, &dest).await.map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+
     let final_path = model_path(app, &info)?;
     let part_path = final_path.with_extension("part");
 

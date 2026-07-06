@@ -1,3 +1,4 @@
+mod asr;
 pub mod audio;
 pub mod audiofile;
 mod deliver;

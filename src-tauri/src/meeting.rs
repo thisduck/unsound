@@ -6,9 +6,12 @@
 //! Chunking is driven by voice-activity detection (Silero VAD), not a fixed
 //! clock: each channel's audio is cut on natural pauses, so words are never
 //! split at an arbitrary window boundary and silence is skipped for free.
+//!
+//! Transcription uses whisper by default, or Moonshine (sherpa-onnx) when the
+//! chosen speech model is that bundle — see `AsrChoice`.
 
 use crate::store::{self, Db, Segment};
-use crate::{audio, models, settings, stt, AppState};
+use crate::{asr, audio, models, settings, stt, AppState};
 use sherpa_rs::silero_vad::{SileroVad, SileroVadConfig};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +23,23 @@ use tauri::{AppHandle, Emitter, Manager};
 /// How often the loop pulls new audio and lets the VADs emit finished speech
 /// segments. Shorter than the old fixed window → more responsive live captions.
 const POLL_MS: u64 = 1000;
+
+/// Which speech model a meeting uses, resolved from the chosen model id.
+pub enum AsrChoice {
+    /// whisper.cpp model file.
+    Whisper(PathBuf),
+    /// Moonshine (sherpa-onnx) bundle directory.
+    Moonshine(PathBuf),
+}
+
+/// The live transcription engine, constructed on the meeting worker thread
+/// (Moonshine's recognizer is !Send, so it can't be built ahead of time).
+enum Engine {
+    Whisper(PathBuf),
+    Moonshine(asr::Moonshine),
+    /// Engine failed to initialize — record audio but produce no transcript.
+    None,
+}
 
 #[derive(Default)]
 pub struct MeetingState {
@@ -37,7 +57,7 @@ struct Handle {
 pub fn start(
     app: &AppHandle,
     meeting_id: String,
-    stt_path: PathBuf,
+    asr_choice: AsrChoice,
     vad_path: PathBuf,
     language: Option<String>,
 ) -> Result<(), String> {
@@ -72,7 +92,7 @@ pub fn start(
         run_loop(
             app_thread,
             meeting_id,
-            stt_path,
+            asr_choice,
             vad_path,
             language,
             initial_prompt,
@@ -117,7 +137,7 @@ fn make_vad(vad_path: &PathBuf) -> Option<SileroVad> {
     let config = SileroVadConfig {
         model: vad_path.to_string_lossy().to_string(),
         // End a segment after 0.5s of silence; ignore <0.25s blips; cap a single
-        // segment at 20s so a long monologue is still fed to Whisper in pieces.
+        // segment at 20s so a long monologue is still fed to the model in pieces.
         min_silence_duration: 0.5,
         min_speech_duration: 0.25,
         max_speech_duration: 20.0,
@@ -137,15 +157,29 @@ fn make_vad(vad_path: &PathBuf) -> Option<SileroVad> {
     }
 }
 
+fn make_engine(choice: AsrChoice) -> Engine {
+    match choice {
+        AsrChoice::Whisper(p) => Engine::Whisper(p),
+        AsrChoice::Moonshine(dir) => match asr::Moonshine::new(&dir) {
+            Ok(m) => Engine::Moonshine(m),
+            Err(e) => {
+                eprintln!("[meeting] Moonshine init failed: {e}");
+                Engine::None
+            }
+        },
+    }
+}
+
 fn run_loop(
     app: AppHandle,
     meeting_id: String,
-    stt_path: PathBuf,
+    asr_choice: AsrChoice,
     vad_path: PathBuf,
     language: Option<String>,
     initial_prompt: Option<String>,
     stop: Arc<AtomicBool>,
 ) {
+    let mut engine = make_engine(asr_choice);
     let mut mic_vad = make_vad(&vad_path);
     #[cfg(target_os = "macos")]
     let mut sys_vad = make_vad(&vad_path);
@@ -191,10 +225,10 @@ fn run_loop(
             drain_vad(
                 &app,
                 &meeting_id,
-                &stt_path,
                 language.as_deref(),
                 initial_prompt.as_deref(),
                 v,
+                &mut engine,
                 "me",
                 "mic",
             );
@@ -204,10 +238,10 @@ fn run_loop(
             drain_vad(
                 &app,
                 &meeting_id,
-                &stt_path,
                 language.as_deref(),
                 initial_prompt.as_deref(),
                 v,
+                &mut engine,
                 "them",
                 "system",
             );
@@ -224,33 +258,43 @@ fn run_loop(
 fn drain_vad(
     app: &AppHandle,
     meeting_id: &str,
-    stt_path: &PathBuf,
     language: Option<&str>,
     initial_prompt: Option<&str>,
     vad: &mut SileroVad,
+    engine: &mut Engine,
     speaker: &str,
     source: &str,
 ) {
+    let sr = audio::WHISPER_SAMPLE_RATE as i64;
     while !vad.is_empty() {
         let seg = vad.front();
         vad.pop();
         // seg.start is the sample index into everything fed to this VAD, i.e.
         // the position on the meeting timeline; convert to milliseconds.
-        let base_ms = seg.start as i64 * 1000 / audio::WHISPER_SAMPLE_RATE as i64;
+        let base_ms = seg.start as i64 * 1000 / sr;
+        let dur_ms = seg.samples.len() as i64 * 1000 / sr;
 
-        let st = app.state::<AppState>();
-        let parts = match stt::transcribe_segments(
-            &st.stt,
-            stt_path,
-            &seg.samples,
-            language,
-            initial_prompt,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[meeting] segment transcription failed: {e}");
-                continue;
+        let parts: Vec<(i64, i64, String)> = match engine {
+            Engine::Whisper(path) => {
+                let st = app.state::<AppState>();
+                match stt::transcribe_segments(&st.stt, path, &seg.samples, language, initial_prompt)
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("[meeting] segment transcription failed: {e}");
+                        continue;
+                    }
+                }
             }
+            Engine::Moonshine(m) => {
+                let text = m.transcribe(&seg.samples);
+                if text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![(0, dur_ms, text)]
+                }
+            }
+            Engine::None => Vec::new(),
         };
         if parts.is_empty() {
             continue;
@@ -281,7 +325,14 @@ pub fn start_with_model(
     model_id: String,
     language: Option<String>,
 ) -> Result<(), String> {
-    let stt_path = models::downloaded_model_path(app, &model_id)?;
     let vad_path = models::downloaded_model_path(app, "vad-silero")?;
-    start(app, meeting_id, stt_path, vad_path, language)
+    let info = models::find_model(app, &model_id)?;
+    let path = models::downloaded_model_path(app, &model_id)?;
+    // A multi-file (bundle) speech model is Moonshine; otherwise whisper.
+    let asr_choice = if info.files.is_empty() {
+        AsrChoice::Whisper(path)
+    } else {
+        AsrChoice::Moonshine(path)
+    };
+    start(app, meeting_id, asr_choice, vad_path, language)
 }

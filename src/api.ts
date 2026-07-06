@@ -18,6 +18,9 @@ export interface ModelInfo {
   recommended: boolean;
   custom: boolean;
   downloaded: boolean;
+  /// Multi-file bundle models (e.g. Moonshine) list their file URLs; empty for
+  /// ordinary single-file models.
+  files?: string[];
 }
 
 export interface PermissionStatus {
