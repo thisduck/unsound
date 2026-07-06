@@ -157,6 +157,10 @@ export const api = {
   deleteMeeting: (id: string) => invoke<void>("delete_meeting", { id }),
   listMeetings: () => invoke<Meeting[]>("list_meetings"),
   getMeeting: (id: string) => invoke<Meeting | null>("get_meeting", { id }),
+  transcribeMeeting: (meetingId: string, modelId: string, language?: string) =>
+    invoke<Meeting>("transcribe_meeting", { meetingId, modelId, language: language ?? null }),
+  summarizeMeeting: (meetingId: string, modelId: string) =>
+    invoke<string>("summarize_meeting", { meetingId, modelId }),
 
   // System-audio capture (ScreenCaptureKit; macOS 13+).
   systemAudioSupported: () => invoke<boolean>("system_audio_supported"),
@@ -175,6 +179,8 @@ export const on = {
     listen<DownloadDone>("model-download-done", (e) => cb(e.payload)),
   llmToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
     listen<string>("llm-token", (e) => cb(e.payload)),
+  meetingSummaryToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
+    listen<string>("meeting-summary-token", (e) => cb(e.payload)),
   hotkeyToggle: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("hotkey-toggle", () => cb()),
   pttDown: (cb: () => void): Promise<UnlistenFn> => listen<void>("ptt-down", () => cb()),

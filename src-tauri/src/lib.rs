@@ -415,6 +415,115 @@ fn get_meeting(db: State<Db>, id: String) -> Result<Option<Meeting>, String> {
     store::get_meeting(&db, &id)
 }
 
+/// Transcribe a finished meeting's two channels — mic ("me") and system audio
+/// ("them") — into timestamped segments, persist them, and return the meeting.
+#[tauri::command]
+async fn transcribe_meeting(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    db: State<'_, Db>,
+    meeting_id: String,
+    model_id: String,
+    language: Option<String>,
+) -> Result<Meeting, String> {
+    let model_path = models::downloaded_model_path(&app, &model_id)?;
+    let vocab: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        settings::load(&app)
+            .dictionary
+            .iter()
+            .map(|e| e.to.trim().to_string())
+            .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
+            .collect()
+    };
+    let initial_prompt = (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
+
+    let mic_samples = state.audio.last_recording.lock().unwrap().clone();
+    #[cfg(target_os = "macos")]
+    let sys_samples = state.sys.last.lock().unwrap().clone();
+    #[cfg(not(target_os = "macos"))]
+    let sys_samples: Vec<f32> = Vec::new();
+
+    let worker_app = app.clone();
+    let (mic_segs, sys_segs) = tauri::async_runtime::spawn_blocking(
+        move || -> Result<(Vec<(i64, i64, String)>, Vec<(i64, i64, String)>), String> {
+            let s = worker_app.state::<AppState>();
+            let mic = stt::transcribe_segments(
+                &s.stt,
+                &model_path,
+                &mic_samples,
+                language.as_deref(),
+                initial_prompt.as_deref(),
+            )?;
+            let sys = stt::transcribe_segments(
+                &s.stt,
+                &model_path,
+                &sys_samples,
+                language.as_deref(),
+                initial_prompt.as_deref(),
+            )?;
+            Ok((mic, sys))
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let mut segs: Vec<Segment> = Vec::new();
+    for (start_ms, end_ms, text) in mic_segs {
+        segs.push(Segment {
+            id: 0,
+            speaker: "me".into(),
+            source: "mic".into(),
+            start_ms,
+            end_ms,
+            text,
+        });
+    }
+    for (start_ms, end_ms, text) in sys_segs {
+        segs.push(Segment {
+            id: 0,
+            speaker: "them".into(),
+            source: "system".into(),
+            start_ms,
+            end_ms,
+            text,
+        });
+    }
+    store::add_segments(&db, &meeting_id, &segs)?;
+    store::get_meeting(&db, &meeting_id)?.ok_or_else(|| "meeting not found".to_string())
+}
+
+/// Summarize a meeting's stored transcript with the cleanup LLM; persist and
+/// return the summary. Tokens stream to the UI on `meeting-summary-token`.
+#[tauri::command]
+async fn summarize_meeting(
+    app: AppHandle,
+    db: State<'_, Db>,
+    meeting_id: String,
+    model_id: String,
+) -> Result<String, String> {
+    let model_path = models::downloaded_model_path(&app, &model_id)?;
+    let meeting =
+        store::get_meeting(&db, &meeting_id)?.ok_or_else(|| "meeting not found".to_string())?;
+    let mut transcript = String::new();
+    for s in &meeting.segments {
+        let who = if s.speaker == "me" { "Me" } else { "Them" };
+        transcript.push_str(&format!("{who}: {}\n", s.text));
+    }
+    if transcript.trim().is_empty() {
+        return Ok(String::new());
+    }
+    let worker_app = app.clone();
+    let summary = tauri::async_runtime::spawn_blocking(move || {
+        let s = worker_app.state::<AppState>();
+        llm::summarize_meeting(&worker_app, &s.llm, &model_path, &transcript)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    store::set_meeting_summary(&db, &meeting_id, &summary)?;
+    Ok(summary)
+}
+
 // ---- system-audio capture (ScreenCaptureKit spike) -------------------------
 
 #[tauri::command]
@@ -695,6 +804,8 @@ pub fn run() {
             delete_meeting,
             list_meetings,
             get_meeting,
+            transcribe_meeting,
+            summarize_meeting,
             system_audio_supported,
             #[cfg(target_os = "macos")]
             start_system_capture,

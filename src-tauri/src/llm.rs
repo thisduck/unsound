@@ -245,10 +245,30 @@ pub fn cleanup_text(
         .apply_chat_template(&template, &messages, true)
         .map_err(|e| format!("failed to apply chat template: {e}"))?;
 
-    let tokens = model
-        .str_to_token(&prompt, AddBos::Always)
-        .map_err(|e| format!("tokenization failed: {e}"))?;
+    let force_lowercase = style.map(|s| s.lowercase).unwrap_or(false);
+    let output = generate(app, backend, &model, &prompt, force_lowercase, "llm-token")?;
 
+    // Small models occasionally echo the wrapper tags; strip them.
+    let mut out = output.as_str();
+    out = out.strip_prefix("<transcript>").unwrap_or(out);
+    out = out.strip_suffix("</transcript>").unwrap_or(out);
+    Ok(out.trim().to_string())
+}
+
+/// Shared llama.cpp generation: tokenize `prompt`, ingest it in batch-sized
+/// chunks, then sample to end-of-generation, streaming decoded UTF-8 to the
+/// frontend on `stream_event`. Returns the full generated text, trimmed.
+fn generate(
+    app: &AppHandle,
+    backend: &LlamaBackend,
+    model: &LlamaModel,
+    prompt: &str,
+    force_lowercase: bool,
+    stream_event: &str,
+) -> Result<String, String> {
+    let tokens = model
+        .str_to_token(prompt, AddBos::Always)
+        .map_err(|e| format!("tokenization failed: {e}"))?;
     if tokens.is_empty() {
         return Ok(String::new());
     }
@@ -259,7 +279,7 @@ pub fn cleanup_text(
         .map_err(|e| format!("failed to create LLM context: {e}"))?;
 
     // Ingest the prompt in chunks that fit llama.cpp's batch limit; a single
-    // batch of thousands of tokens (long files) otherwise aborts in ggml.
+    // batch of thousands of tokens (long meetings/files) otherwise aborts in ggml.
     const CHUNK: usize = 512;
     let last = tokens.len() - 1;
     let mut batch = LlamaBatch::new(CHUNK, 1);
@@ -284,7 +304,6 @@ pub fn cleanup_text(
         LlamaSampler::dist(42),
     ]);
 
-    let force_lowercase = style.map(|s| s.lowercase).unwrap_or(false);
     let mut utf8 = Utf8Stream::new();
     let mut output = String::new();
     let mut n_cur = tokens.len() as i32;
@@ -308,7 +327,7 @@ pub fn cleanup_text(
         }
         if !chunk.is_empty() {
             output.push_str(&chunk);
-            let _ = app.emit("llm-token", &chunk);
+            let _ = app.emit(stream_event, &chunk);
         }
         generated += 1;
         if generated >= MAX_NEW_TOKENS {
@@ -321,9 +340,44 @@ pub fn cleanup_text(
             .map_err(|e| format!("decode failed: {e}"))?;
     }
 
-    // Small models occasionally echo the wrapper tags; strip them.
-    let mut out = output.trim();
-    out = out.strip_prefix("<transcript>").unwrap_or(out);
-    out = out.strip_suffix("</transcript>").unwrap_or(out);
-    Ok(out.trim().to_string())
+    Ok(output.trim().to_string())
+}
+
+/// Meeting summary prompt: sectioned, speaker-aware, grounded in the transcript.
+pub const MEETING_SUMMARY_PROMPT: &str = r#"You summarize meeting transcripts into concise, useful notes.
+The transcript is labeled by speaker: "Me" is the user of this app; "Them" is everyone else on the call.
+Write Markdown with these sections, omitting any that don't apply:
+## Summary
+2-4 sentences on what the meeting was about and what was decided.
+## Key points
+The main topics and decisions, as bullets.
+## Action items
+Concrete follow-ups as a checklist ("- [ ] ..."), naming the owner ("Me" or "Them") when it's clear.
+## Open questions
+Anything left unresolved.
+Base everything only on the transcript. Do not invent names, numbers, dates, or commitments that aren't there. Keep it tight and skimmable."#;
+
+/// Summarize a meeting transcript into structured notes. Tokens stream to the
+/// frontend on `meeting-summary-token`; the full text is also returned.
+pub fn summarize_meeting(
+    app: &AppHandle,
+    state: &LlmState,
+    model_path: &Path,
+    transcript: &str,
+) -> Result<String, String> {
+    let backend = backend()?;
+    let model = state.model_for(model_path)?;
+    let messages = vec![
+        LlamaChatMessage::new("system".into(), MEETING_SUMMARY_PROMPT.into())
+            .map_err(|e| e.to_string())?,
+        LlamaChatMessage::new("user".into(), format!("Transcript:\n\n{transcript}"))
+            .map_err(|e| e.to_string())?,
+    ];
+    let template = model
+        .chat_template(None)
+        .map_err(|e| format!("model has no usable chat template: {e}"))?;
+    let prompt = model
+        .apply_chat_template(&template, &messages, true)
+        .map_err(|e| format!("failed to apply chat template: {e}"))?;
+    generate(app, backend, &model, &prompt, false, "meeting-summary-token")
 }

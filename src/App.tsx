@@ -6,6 +6,7 @@ import { MicPicker } from "./sections";
 import { SettingsSheet } from "./SettingsSheet";
 import { Onboarding } from "./Onboarding";
 import { HistoryDrawer, Take } from "./HistoryDrawer";
+import { Meetings } from "./Meetings";
 import "./App.css";
 
 type Phase = "idle" | "recording" | "transcribing" | "cleaning";
@@ -62,6 +63,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [view, setView] = useState<"dictate" | "meetings">("dictate");
   const [rawOpen, setRawOpen] = useState(false);
   const [onboarding, setOnboarding] = useState(() => !localStorage.getItem("unsound.onboarded"));
   const [prompt, setPrompt] = useLocalStorage("unsound.prompt", "");
@@ -527,14 +529,36 @@ export default function App() {
       <header className="head">
         <img src="/unsound.svg" alt="" className="mark-logo" />
         <span className="mark">unsound</span>
+        <nav className="nav">
+          <button
+            className={"nav-tab" + (view === "dictate" ? " on" : "")}
+            onClick={() => setView("dictate")}
+          >
+            dictate
+          </button>
+          <button
+            className={"nav-tab" + (view === "meetings" ? " on" : "")}
+            onClick={() => setView("meetings")}
+          >
+            meetings
+          </button>
+        </nav>
         <span className="spacer" />
-        <button className="quiet" onClick={() => setHistoryOpen(true)}>
-          history
-        </button>
+        {view === "dictate" && (
+          <button className="quiet" onClick={() => setHistoryOpen(true)}>
+            history
+          </button>
+        )}
         <button className="quiet" onClick={() => setSettingsOpen(true)}>
           settings
         </button>
       </header>
+
+      {view === "meetings" ? (
+        <Meetings stt={stt} llm={llm} language={language} />
+      ) : (
+        <>
+          {/* dictation view below */}
 
       <div className="stage">
         <button
@@ -678,6 +702,8 @@ export default function App() {
         )}
         <MicPicker className="chip-select mic-chip" />
       </footer>
+        </>
+      )}
 
       {settingsOpen && (
         <SettingsSheet
