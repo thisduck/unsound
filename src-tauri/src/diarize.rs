@@ -31,8 +31,11 @@ pub fn diarize(
         // sherpa uses num_clusters when > 0, else falls back to threshold.
         num_clusters: Some(num_speakers.filter(|&n| n > 0).unwrap_or(-1)),
         threshold: Some(threshold),
-        min_duration_on: Some(0.2),
-        min_duration_off: Some(0.3),
+        // Over-splitting (many phantom speakers) comes from short, unstable
+        // segments. Drop sub-0.5s blips and bridge sub-0.5s gaps so a single
+        // speaker's turn stays one segment instead of fragmenting into many.
+        min_duration_on: Some(0.5),
+        min_duration_off: Some(0.5),
         provider: None,
         debug: false,
     };
