@@ -14,6 +14,7 @@ const OLD_DEFAULT_PROMPT =
   "You clean up raw speech-to-text transcripts. Fix punctuation, capitalization and obvious transcription errors, remove filler words (um, uh, you know), and break the text into paragraphs where natural. Preserve the speaker's wording and meaning; do not summarize or add anything. Output only the cleaned text.";
 
 const HISTORY_KEY = "unsound.history";
+const MIGRATED_KEY = "unsound.history.migrated";
 const HISTORY_CAP = 200;
 
 function useLocalStorage(key: string, initial: string) {
@@ -72,7 +73,7 @@ export default function App() {
   const [language, setLanguage] = useLocalStorage("unsound.lang", "");
   const [outLang, setOutLang] = useLocalStorage("unsound.outlang", "");
   const [textScale, setTextScale] = useLocalStorage("unsound.textscale", "1");
-  const [history, setHistory] = useState<Take[]>(loadHistory);
+  const [history, setHistory] = useState<Take[]>([]);
   const [stylesList, setStylesList] = useState<Style[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [styleId, setStyleId] = useState("");
@@ -92,9 +93,27 @@ export default function App() {
     setPhase(p);
   };
 
+  // Keep a ref to the latest history so upsertTake can merge + persist a full
+  // record without a stale closure.
+  const historyRef = useRef<Take[]>([]);
+  historyRef.current = history;
+
+  // History now lives in SQLite. Migrate the old localStorage copy once, then
+  // hydrate from the database.
   useEffect(() => {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-  }, [history]);
+    (async () => {
+      try {
+        if (!localStorage.getItem(MIGRATED_KEY)) {
+          const old = loadHistory();
+          if (old.length) await api.importTakes(old);
+          localStorage.setItem(MIGRATED_KEY, "1");
+        }
+        setHistory(await api.listTakes());
+      } catch (e) {
+        console.error("failed to load history from database", e);
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--text-scale", textScale);
@@ -170,24 +189,29 @@ export default function App() {
   const upsertTake = (patch: Partial<Omit<Take, "id" | "at">>) => {
     const id = takeRef.current;
     if (!id) return;
-    setHistory((h) => {
-      const i = h.findIndex((t) => t.id === id);
+    const existing = historyRef.current.find((t) => t.id === id);
+    const take: Take = existing
+      ? { ...existing, ...patch }
+      : {
+          id,
+          at: new Date().toISOString(),
+          raw: "",
+          refined: "",
+          sttModel: "",
+          llmModel: "",
+          ...patch,
+        };
+    setHistory((prev) => {
+      const i = prev.findIndex((t) => t.id === id);
       if (i >= 0) {
-        const copy = [...h];
+        const copy = [...prev];
         copy[i] = { ...copy[i], ...patch };
         return copy;
       }
-      const take: Take = {
-        id,
-        at: new Date().toISOString(),
-        raw: "",
-        refined: "",
-        sttModel: "",
-        llmModel: "",
-        ...patch,
-      };
-      return [take, ...h].slice(0, HISTORY_CAP);
+      return [take, ...prev].slice(0, HISTORY_CAP);
     });
+    // Persist the full merged record to SQLite (fire-and-forget).
+    api.saveTake(take).catch((e) => console.error("failed to save take", e));
   };
 
   const fail = (e: unknown) => {
@@ -691,8 +715,14 @@ export default function App() {
           takes={history}
           onClose={() => setHistoryOpen(false)}
           onLoad={loadTake}
-          onDelete={(id) => setHistory((h) => h.filter((t) => t.id !== id))}
-          onClear={() => setHistory([])}
+          onDelete={(id) => {
+            setHistory((h) => h.filter((t) => t.id !== id));
+            api.deleteTake(id).catch((e) => console.error("failed to delete take", e));
+          }}
+          onClear={() => {
+            setHistory([]);
+            api.clearTakes().catch((e) => console.error("failed to clear history", e));
+          }}
           onCopy={copy}
         />
       )}

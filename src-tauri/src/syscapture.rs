@@ -1,0 +1,345 @@
+//! System-audio capture via ScreenCaptureKit (macOS 13+).
+//!
+//! This is the "them" half of a meeting: whatever is coming out of the
+//! speakers — the remote participants in Meet/Zoom/etc. The microphone ("me")
+//! stays on the existing `cpal` path in `audio.rs`. Keeping the two channels
+//! separate is what lets us label who-said-what without a diarization model,
+//! and leaves room to cluster the system channel into multiple speakers later.
+//!
+//! ScreenCaptureKit's audio capture (`SCStreamConfiguration.capturesAudio`)
+//! needs macOS 13, so everything here is runtime-gated by `is_supported()` and
+//! the feature is simply hidden on older systems. It also requires the Screen
+//! Recording permission — the OS prompts on first use.
+//!
+//! We ask SCK for 16 kHz mono float PCM directly (a rate it supports), which is
+//! exactly what Whisper wants, so there is no resampling on this path.
+
+#![cfg(target_os = "macos")]
+
+use std::ffi::c_void;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use block2::RcBlock;
+use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
+use objc2::rc::Retained;
+use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{available, define_class, msg_send, AnyThread, DefinedClass};
+use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
+use objc2_core_media::{CMBlockBuffer, CMSampleBuffer};
+use objc2_foundation::{NSArray, NSError};
+use objc2_screen_capture_kit::{
+    SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamOutput,
+    SCStreamOutputType, SCWindow,
+};
+
+/// SCK delivers this rate/layout to us, which is what Whisper consumes.
+pub const CAPTURE_SAMPLE_RATE: u32 = 16_000;
+
+extern "C" {
+    /// Release the +1 CMBlockBuffer handed back by the audio-buffer-list call.
+    fn CFRelease(cf: *const c_void);
+}
+
+/// Whether system-audio capture is possible here. SCStream audio is macOS 13+.
+pub fn is_supported() -> bool {
+    available!(macos = 13.0)
+}
+
+fn err_msg(err: *mut NSError) -> String {
+    if err.is_null() {
+        return "unknown error".into();
+    }
+    // Safe: non-null NSError from a completion handler.
+    let err = unsafe { &*err };
+    err.localizedDescription().to_string()
+}
+
+// ---- the SCStreamOutput delegate -------------------------------------------
+
+/// Instance state for the delegate: the shared sink captured samples land in.
+struct Ivars {
+    sink: Arc<Mutex<Vec<f32>>>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements and we don't impl Drop.
+    #[unsafe(super(NSObject))]
+    #[name = "UnsoundSysAudioOutput"]
+    #[ivars = Ivars]
+    struct AudioOutput;
+
+    unsafe impl NSObjectProtocol for AudioOutput {}
+
+    unsafe impl SCStreamOutput for AudioOutput {
+        #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
+        fn did_output(
+            &self,
+            _stream: &SCStream,
+            sample_buffer: &CMSampleBuffer,
+            kind: SCStreamOutputType,
+        ) {
+            // We only added an audio output, but guard anyway.
+            if kind.0 != SCStreamOutputType::Audio.0 {
+                return;
+            }
+            let samples = extract_mono(sample_buffer);
+            if !samples.is_empty() {
+                self.ivars().sink.lock().unwrap().extend_from_slice(&samples);
+            }
+        }
+    }
+);
+
+impl AudioOutput {
+    fn new(sink: Arc<Mutex<Vec<f32>>>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(Ivars { sink });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Copy the sample buffer's PCM out as mono f32. We requested one 16 kHz mono
+/// channel, so the common case is a single planar float buffer; we also fold
+/// interleaved stereo down defensively in case a host ignores the request.
+fn extract_mono(sbuf: &CMSampleBuffer) -> Vec<f32> {
+    let mut abl = AudioBufferList {
+        mNumberBuffers: 0,
+        mBuffers: [AudioBuffer {
+            mNumberChannels: 0,
+            mDataByteSize: 0,
+            mData: std::ptr::null_mut(),
+        }; 1],
+    };
+    let mut block_buffer: *mut CMBlockBuffer = std::ptr::null_mut();
+    let mut size_needed: usize = 0;
+
+    // SAFETY: pointers are valid for the duration of the call; the returned
+    // block buffer owns the memory `abl.mBuffers[..].mData` points at, so we
+    // copy before releasing it below.
+    let status = unsafe {
+        sbuf.audio_buffer_list_with_retained_block_buffer(
+            &mut size_needed,
+            &mut abl,
+            std::mem::size_of::<AudioBufferList>(),
+            None,
+            None,
+            0,
+            &mut block_buffer,
+        )
+    };
+    if status != 0 || abl.mNumberBuffers == 0 {
+        if !block_buffer.is_null() {
+            unsafe { CFRelease(block_buffer as *const c_void) };
+        }
+        return Vec::new();
+    }
+
+    let buf = abl.mBuffers[0];
+    let channels = buf.mNumberChannels.max(1) as usize;
+    let n_floats = buf.mDataByteSize as usize / std::mem::size_of::<f32>();
+    let mut out = Vec::new();
+    if !buf.mData.is_null() && n_floats > 0 {
+        // SAFETY: mData points at n_floats contiguous f32 samples.
+        let slice = unsafe { std::slice::from_raw_parts(buf.mData as *const f32, n_floats) };
+        if channels <= 1 {
+            out.extend_from_slice(slice);
+        } else {
+            out.reserve(n_floats / channels);
+            for frame in slice.chunks_exact(channels) {
+                out.push(frame.iter().copied().sum::<f32>() / channels as f32);
+            }
+        }
+    }
+
+    if !block_buffer.is_null() {
+        unsafe { CFRelease(block_buffer as *const c_void) };
+    }
+    out
+}
+
+// ---- capture lifecycle -----------------------------------------------------
+
+struct Active {
+    stop_tx: mpsc::Sender<()>,
+    done_rx: mpsc::Receiver<()>,
+    buffer: Arc<Mutex<Vec<f32>>>,
+}
+
+/// Mirrors `AudioState`: one capture at a time, plus the finished samples.
+#[derive(Default)]
+pub struct SysCaptureState {
+    active: Mutex<Option<Active>>,
+    /// The last finished capture, 16 kHz mono, ready for Whisper.
+    pub last: Mutex<Vec<f32>>,
+}
+
+/// Result of a finished system-audio capture, parallel to `RecordingResult`.
+pub struct CaptureResult {
+    pub duration_secs: f32,
+    pub sample_count: usize,
+}
+
+pub fn start(state: &SysCaptureState) -> Result<(), String> {
+    if !is_supported() {
+        return Err("system-audio capture needs macOS 13 or newer".into());
+    }
+    let mut active = state.active.lock().unwrap();
+    if active.is_some() {
+        return Err("already capturing system audio".into());
+    }
+
+    let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    // The SCStream and its Objective-C friends are !Send, so like the cpal
+    // stream they live entirely on their own thread; this channel reports the
+    // start result (or an error) back to us.
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+
+    let thread_buffer = buffer.clone();
+    std::thread::spawn(move || {
+        // Build the whole pipeline. Anything that fails reports Err and bails.
+        let build = || -> Result<(Retained<SCStream>, Retained<AudioOutput>, DispatchRetained<DispatchQueue>), String> {
+            // 1. Fetch the shareable content (displays). This is async; block
+            // the worker thread until the completion handler answers.
+            let (content_tx, content_rx) =
+                mpsc::channel::<Result<Retained<SCShareableContent>, String>>();
+            let content_handler = RcBlock::new(
+                move |content: *mut SCShareableContent, err: *mut NSError| {
+                    if content.is_null() {
+                        let _ = content_tx.send(Err(err_msg(err)));
+                    } else {
+                        // Retain: the pointer is borrowed for the callback only.
+                        match unsafe { Retained::retain(content) } {
+                            Some(c) => {
+                                let _ = content_tx.send(Ok(c));
+                            }
+                            None => {
+                                let _ = content_tx.send(Err("no shareable content".into()));
+                            }
+                        }
+                    }
+                },
+            );
+            unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&content_handler) };
+            let content = content_rx
+                .recv()
+                .map_err(|_| "screen-recording permission was denied, or capture is unavailable".to_string())??;
+
+            // 2. A content filter over the first display (audio ignores the
+            // visual content, but SCK requires a display-backed filter).
+            let displays = unsafe { content.displays() };
+            let display = displays
+                .firstObject()
+                .ok_or("no display is available to capture from")?;
+            let no_windows = NSArray::<SCWindow>::new();
+            let filter = unsafe {
+                SCContentFilter::initWithDisplay_excludingWindows(
+                    SCContentFilter::alloc(),
+                    &display,
+                    &no_windows,
+                )
+            };
+
+            // 3. Configuration: 16 kHz mono audio, our own app excluded, and a
+            // tiny video frame we never read (SCK still captures video).
+            let config = unsafe { SCStreamConfiguration::new() };
+            unsafe {
+                config.setCapturesAudio(true);
+                config.setSampleRate(CAPTURE_SAMPLE_RATE as isize);
+                config.setChannelCount(1);
+                config.setExcludesCurrentProcessAudio(true);
+                config.setWidth(2);
+                config.setHeight(2);
+            }
+
+            // 4. The stream, our delegate, and a serial delivery queue.
+            let output = AudioOutput::new(thread_buffer.clone());
+            let stream = unsafe {
+                SCStream::initWithFilter_configuration_delegate(
+                    SCStream::alloc(),
+                    &filter,
+                    &config,
+                    None,
+                )
+            };
+            let queue = DispatchQueue::new("com.unsound.sysaudio", DispatchQueueAttr::SERIAL);
+            let proto = ProtocolObject::from_ref(&*output);
+            unsafe {
+                stream.addStreamOutput_type_sampleHandlerQueue_error(
+                    proto,
+                    SCStreamOutputType::Audio,
+                    Some(&queue),
+                )
+            }
+            .map_err(|e| err_msg(Retained::as_ptr(&e) as *mut NSError))?;
+
+            // 5. Start, waiting for the completion handler's verdict.
+            let (start_tx, start_rx) = mpsc::channel::<Result<(), String>>();
+            let start_handler = RcBlock::new(move |err: *mut NSError| {
+                if err.is_null() {
+                    let _ = start_tx.send(Ok(()));
+                } else {
+                    let _ = start_tx.send(Err(err_msg(err)));
+                }
+            });
+            unsafe { stream.startCaptureWithCompletionHandler(Some(&start_handler)) };
+            start_rx
+                .recv()
+                .map_err(|_| "system-audio capture failed to start".to_string())??;
+
+            Ok((stream, output, queue))
+        };
+
+        match build() {
+            Ok((stream, _output, _queue)) => {
+                let _ = ready_tx.send(Ok(()));
+                // Hold the stream (and its delegate/queue) alive until stop.
+                let _ = stop_rx.recv();
+                let (fin_tx, fin_rx) = mpsc::channel::<()>();
+                let stop_handler = RcBlock::new(move |_err: *mut NSError| {
+                    let _ = fin_tx.send(());
+                });
+                unsafe { stream.stopCaptureWithCompletionHandler(Some(&stop_handler)) };
+                let _ = fin_rx.recv_timeout(Duration::from_secs(3));
+                drop(stream);
+                let _ = done_tx.send(());
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+            }
+        }
+    });
+
+    ready_rx
+        .recv()
+        .map_err(|_| "system-audio thread died before reporting readiness".to_string())??;
+
+    *active = Some(Active {
+        stop_tx,
+        done_rx,
+        buffer,
+    });
+    Ok(())
+}
+
+pub fn stop(state: &SysCaptureState) -> Result<CaptureResult, String> {
+    let cap = state
+        .active
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or("not capturing system audio")?;
+
+    let _ = cap.stop_tx.send(());
+    let _ = cap.done_rx.recv_timeout(Duration::from_secs(5));
+
+    let samples = std::mem::take(&mut *cap.buffer.lock().unwrap());
+    let result = CaptureResult {
+        duration_secs: samples.len() as f32 / CAPTURE_SAMPLE_RATE as f32,
+        sample_count: samples.len(),
+    };
+    *state.last.lock().unwrap() = samples;
+    Ok(result)
+}

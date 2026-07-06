@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, UnlistenFn } from "@tauri-apps/api/event";
+import type { Take } from "./HistoryDrawer";
 
 export type OverlayState = "recording" | "processing" | "hidden";
 
@@ -62,6 +63,32 @@ export interface Settings {
   dictionary: DictEntry[];
 }
 
+/// One utterance in a meeting transcript. `speaker` is free-form so "me"/"them"
+/// extends to named or numbered participants later; `source` is the channel it
+/// came from (mic vs. system audio).
+export interface Segment {
+  id?: number;
+  speaker: string;
+  source: string;
+  startMs: number;
+  endMs: number;
+  text: string;
+}
+
+export interface Meeting {
+  id: string;
+  title: string;
+  startedAt: string;
+  endedAt?: string | null;
+  summary: string;
+  notes: string;
+  sttModel: string;
+  llmModel: string;
+  lang?: string | null;
+  segments: Segment[];
+  segmentCount: number;
+}
+
 export const api = {
   listModels: () => invoke<ModelInfo[]>("list_models"),
   downloadModel: (id: string) => invoke<void>("download_model", { id }),
@@ -108,6 +135,35 @@ export const api = {
   setMicrophone: (device: string) => invoke<void>("set_microphone", { device }),
   setOverlay: (visible: boolean) => invoke<void>("set_overlay", { visible }),
   emitOverlayState: (state: OverlayState) => emit("overlay-state", state),
+
+  // History — now stored in SQLite (was localStorage).
+  listTakes: () => invoke<Take[]>("list_takes"),
+  saveTake: (take: Take) => invoke<void>("save_take", { take }),
+  deleteTake: (id: string) => invoke<void>("delete_take", { id }),
+  clearTakes: () => invoke<void>("clear_takes"),
+  importTakes: (takes: Take[]) => invoke<number>("import_takes", { takes }),
+
+  // Meetings.
+  createMeeting: (meeting: Meeting) => invoke<void>("create_meeting", { meeting }),
+  addMeetingSegments: (meetingId: string, segments: Segment[]) =>
+    invoke<void>("add_meeting_segments", { meetingId, segments }),
+  endMeeting: (id: string, endedAt: string, summary: string, title?: string) =>
+    invoke<void>("end_meeting", { id, endedAt, summary, title: title ?? null }),
+  updateMeetingNotes: (id: string, notes: string) =>
+    invoke<void>("update_meeting_notes", { id, notes }),
+  setMeetingSummary: (id: string, summary: string) =>
+    invoke<void>("set_meeting_summary", { id, summary }),
+  renameMeeting: (id: string, title: string) => invoke<void>("rename_meeting", { id, title }),
+  deleteMeeting: (id: string) => invoke<void>("delete_meeting", { id }),
+  listMeetings: () => invoke<Meeting[]>("list_meetings"),
+  getMeeting: (id: string) => invoke<Meeting | null>("get_meeting", { id }),
+
+  // System-audio capture (ScreenCaptureKit; macOS 13+).
+  systemAudioSupported: () => invoke<boolean>("system_audio_supported"),
+  startSystemCapture: () => invoke<void>("start_system_capture"),
+  stopSystemCapture: () => invoke<RecordingResult>("stop_system_capture"),
+  transcribeSystemCapture: (modelId: string, language?: string) =>
+    invoke<string>("transcribe_system_capture", { modelId, language: language ?? null }),
 };
 
 export const on = {

@@ -7,13 +7,17 @@ mod llm;
 mod models;
 mod permissions;
 mod settings;
+mod store;
 mod stt;
+#[cfg(target_os = "macos")]
+mod syscapture;
 mod tray;
 
 use audio::{AudioState, RecordingResult};
 use llm::LlmState;
 use models::{ModelInfo, ModelKind};
 use settings::Settings;
+use store::{Db, Meeting, Segment, Take};
 use stt::SttState;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -31,6 +35,10 @@ pub struct AppState {
     audio: AudioState,
     stt: SttState,
     llm: LlmState,
+    /// System-audio (ScreenCaptureKit) capture — the "them" channel in a
+    /// meeting. Separate from the mic so who-said-what stays attributable.
+    #[cfg(target_os = "macos")]
+    sys: syscapture::SysCaptureState,
     /// Most recent pipeline output, for the tray's "paste last take".
     pub last_output: Mutex<String>,
     /// Registered shortcut id → which mode it drives.
@@ -322,6 +330,159 @@ fn set_dictionary(app: AppHandle, entries: Vec<settings::DictEntry>) -> Result<(
     Ok(())
 }
 
+// ---- history (takes) — now backed by SQLite instead of localStorage --------
+
+#[tauri::command]
+fn list_takes(db: State<Db>) -> Result<Vec<Take>, String> {
+    store::list_takes(&db, 500)
+}
+
+#[tauri::command]
+fn save_take(db: State<Db>, take: Take) -> Result<(), String> {
+    store::save_take(&db, &take)
+}
+
+#[tauri::command]
+fn delete_take(db: State<Db>, id: String) -> Result<(), String> {
+    store::delete_take(&db, &id)
+}
+
+#[tauri::command]
+fn clear_takes(db: State<Db>) -> Result<(), String> {
+    store::clear_takes(&db)
+}
+
+/// One-time import of the frontend's old localStorage history; safe to re-run.
+#[tauri::command]
+fn import_takes(db: State<Db>, takes: Vec<Take>) -> Result<usize, String> {
+    store::import_takes(&db, &takes)
+}
+
+// ---- meetings --------------------------------------------------------------
+
+#[tauri::command]
+fn create_meeting(db: State<Db>, meeting: Meeting) -> Result<(), String> {
+    store::create_meeting(&db, &meeting)
+}
+
+#[tauri::command]
+fn add_meeting_segments(
+    db: State<Db>,
+    meeting_id: String,
+    segments: Vec<Segment>,
+) -> Result<(), String> {
+    store::add_segments(&db, &meeting_id, &segments)
+}
+
+#[tauri::command]
+fn end_meeting(
+    db: State<Db>,
+    id: String,
+    ended_at: String,
+    summary: String,
+    title: Option<String>,
+) -> Result<(), String> {
+    store::end_meeting(&db, &id, &ended_at, &summary, title.as_deref())
+}
+
+#[tauri::command]
+fn update_meeting_notes(db: State<Db>, id: String, notes: String) -> Result<(), String> {
+    store::update_meeting_notes(&db, &id, &notes)
+}
+
+#[tauri::command]
+fn set_meeting_summary(db: State<Db>, id: String, summary: String) -> Result<(), String> {
+    store::set_meeting_summary(&db, &id, &summary)
+}
+
+#[tauri::command]
+fn rename_meeting(db: State<Db>, id: String, title: String) -> Result<(), String> {
+    store::rename_meeting(&db, &id, &title)
+}
+
+#[tauri::command]
+fn delete_meeting(db: State<Db>, id: String) -> Result<(), String> {
+    store::delete_meeting(&db, &id)
+}
+
+#[tauri::command]
+fn list_meetings(db: State<Db>) -> Result<Vec<Meeting>, String> {
+    store::list_meetings(&db)
+}
+
+#[tauri::command]
+fn get_meeting(db: State<Db>, id: String) -> Result<Option<Meeting>, String> {
+    store::get_meeting(&db, &id)
+}
+
+// ---- system-audio capture (ScreenCaptureKit spike) -------------------------
+
+#[tauri::command]
+fn system_audio_supported() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        syscapture::is_supported()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn start_system_capture(state: State<AppState>) -> Result<(), String> {
+    syscapture::start(&state.sys)
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn stop_system_capture(state: State<AppState>) -> Result<RecordingResult, String> {
+    let r = syscapture::stop(&state.sys)?;
+    Ok(RecordingResult {
+        duration_secs: r.duration_secs,
+        sample_count: r.sample_count,
+    })
+}
+
+/// Spike helper: transcribe the just-captured system audio with a Whisper
+/// model, reusing the same recognition-biasing vocabulary as the mic path.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn transcribe_system_capture(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: String,
+    language: Option<String>,
+) -> Result<String, String> {
+    let model_path = models::downloaded_model_path(&app, &model_id)?;
+    let samples = state.sys.last.lock().unwrap().clone();
+    let vocab: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        settings::load(&app)
+            .dictionary
+            .iter()
+            .map(|e| e.to.trim().to_string())
+            .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
+            .collect()
+    };
+    let initial_prompt = (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
+    let worker_app = app.clone();
+    let text = tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app.state::<AppState>();
+        stt::transcribe(
+            &state.stt,
+            &model_path,
+            &samples,
+            language.as_deref(),
+            initial_prompt.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(text)
+}
+
 /// (Re)register all global shortcuts. Combos involving the fn key go to the
 /// low-level event-tap listener; everything else uses the OS hotkey API.
 fn apply_shortcuts(app: &AppHandle, s: &Settings) -> Result<(), String> {
@@ -477,6 +638,8 @@ pub fn run() {
         )
         .manage(AppState::default())
         .setup(|app| {
+            // Open the local SQLite store (history + meetings) and manage it.
+            app.manage(store::open(app.handle())?);
             let s = settings::load(app.handle());
             if let Err(e) = apply_shortcuts(app.handle(), &s) {
                 eprintln!("global shortcuts unavailable: {e}");
@@ -517,7 +680,28 @@ pub fn run() {
             request_accessibility,
             request_microphone,
             list_microphones,
-            set_microphone
+            set_microphone,
+            list_takes,
+            save_take,
+            delete_take,
+            clear_takes,
+            import_takes,
+            create_meeting,
+            add_meeting_segments,
+            end_meeting,
+            update_meeting_notes,
+            set_meeting_summary,
+            rename_meeting,
+            delete_meeting,
+            list_meetings,
+            get_meeting,
+            system_audio_supported,
+            #[cfg(target_os = "macos")]
+            start_system_capture,
+            #[cfg(target_os = "macos")]
+            stop_system_capture,
+            #[cfg(target_os = "macos")]
+            transcribe_system_capture
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
