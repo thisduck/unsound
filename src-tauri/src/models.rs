@@ -297,6 +297,16 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "English",
             false,
         ),
+        m(
+            "diarize-embedding-eres2netv2",
+            "Speaker embeddings (3D-Speaker ERes2NetV2)",
+            ModelKind::Diarize,
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx",
+            72 * MB,
+            "Most accurate; built for short utterances, so it over-splits less.",
+            "Language-independent",
+            false,
+        ),
         // --- Voice-activity detection (meeting streaming) ---
         m(
             "vad-silero",
