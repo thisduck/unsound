@@ -17,6 +17,7 @@
 #![cfg(target_os = "macos")]
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,6 +42,9 @@ extern "C" {
     /// Release the +1 CMBlockBuffer handed back by the audio-buffer-list call.
     fn CFRelease(cf: *const c_void);
 }
+
+/// Log the first audio buffer's shape once, to confirm what SCK delivers.
+static LOGGED_FORMAT: AtomicBool = AtomicBool::new(false);
 
 /// Whether system-audio capture is possible here. SCStream audio is macOS 13+.
 pub fn is_supported() -> bool {
@@ -135,21 +139,59 @@ fn extract_mono(sbuf: &CMSampleBuffer) -> Vec<f32> {
         return Vec::new();
     }
 
+    // Frame count, so we can infer the sample format from the byte size rather
+    // than assume it. SCK delivers either 32-bit float or 16-bit int PCM, and
+    // reading one as the other collapses speech to near-silence.
+    let num_samples = unsafe { sbuf.num_samples() }.max(0) as usize;
     let buf = abl.mBuffers[0];
     let channels = buf.mNumberChannels.max(1) as usize;
-    let n_floats = buf.mDataByteSize as usize / std::mem::size_of::<f32>();
-    let mut out = Vec::new();
-    if !buf.mData.is_null() && n_floats > 0 {
-        // SAFETY: mData points at n_floats contiguous f32 samples.
-        let slice = unsafe { std::slice::from_raw_parts(buf.mData as *const f32, n_floats) };
-        if channels <= 1 {
-            out.extend_from_slice(slice);
+    let byte_size = buf.mDataByteSize as usize;
+    let bytes_per_sample = if num_samples > 0 {
+        (byte_size / (num_samples * channels).max(1)).max(1)
+    } else {
+        4
+    };
+
+    let mut out: Vec<f32> = Vec::new();
+    if !buf.mData.is_null() && byte_size > 0 {
+        if bytes_per_sample == 2 {
+            // Int16 PCM → normalize to [-1, 1].
+            let n = byte_size / 2;
+            // SAFETY: mData points at n contiguous i16 samples.
+            let slice = unsafe { std::slice::from_raw_parts(buf.mData as *const i16, n) };
+            if channels <= 1 {
+                out.extend(slice.iter().map(|&s| s as f32 / 32768.0));
+            } else {
+                out.reserve(n / channels);
+                for frame in slice.chunks_exact(channels) {
+                    out.push(
+                        frame.iter().map(|&s| s as f32 / 32768.0).sum::<f32>() / channels as f32,
+                    );
+                }
+            }
         } else {
-            out.reserve(n_floats / channels);
-            for frame in slice.chunks_exact(channels) {
-                out.push(frame.iter().copied().sum::<f32>() / channels as f32);
+            // Float32 PCM.
+            let n = byte_size / 4;
+            // SAFETY: mData points at n contiguous f32 samples.
+            let slice = unsafe { std::slice::from_raw_parts(buf.mData as *const f32, n) };
+            if channels <= 1 {
+                out.extend_from_slice(slice);
+            } else {
+                out.reserve(n / channels);
+                for frame in slice.chunks_exact(channels) {
+                    out.push(frame.iter().copied().sum::<f32>() / channels as f32);
+                }
             }
         }
+    }
+
+    // One-shot diagnostics: confirms what SCK actually hands us.
+    if !LOGGED_FORMAT.swap(true, Ordering::Relaxed) {
+        let peak = out.iter().fold(0f32, |m, &s| m.max(s.abs()));
+        eprintln!(
+            "[syscapture] first audio buffer: buffers={}, channels={}, bytes={}, numSamples={}, inferred bytes/sample={}, mono peak={:.4}",
+            abl.mNumberBuffers, channels, byte_size, num_samples, bytes_per_sample, peak
+        );
     }
 
     if !block_buffer.is_null() {

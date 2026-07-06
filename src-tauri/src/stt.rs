@@ -95,6 +95,16 @@ pub fn transcribe_segments(
     if samples.len() < 1600 {
         return Ok(Vec::new());
     }
+    // Whisper hallucinates a repeated phrase (often in a wrong auto-detected
+    // language) when fed near-silence. Skip a channel that carries no real
+    // signal — e.g. a system-audio capture that didn't actually receive the
+    // call — rather than emit that garbage. Real speech peaks well above this.
+    let peak = samples.iter().fold(0f32, |m, &s| m.max(s.abs()));
+    eprintln!("[stt] segments: {} samples, peak {peak:.4}", samples.len());
+    if peak < 0.005 {
+        eprintln!("[stt] channel is effectively silent — skipping to avoid hallucination");
+        return Ok(Vec::new());
+    }
     let ctx = state.context_for(model_path)?;
     let mut ws = ctx
         .create_state()
