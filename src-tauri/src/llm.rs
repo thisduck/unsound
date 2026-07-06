@@ -246,7 +246,7 @@ pub fn cleanup_text(
         .map_err(|e| format!("failed to apply chat template: {e}"))?;
 
     let force_lowercase = style.map(|s| s.lowercase).unwrap_or(false);
-    let output = generate(app, backend, &model, &prompt, force_lowercase, "llm-token")?;
+    let output = generate(app, backend, &model, &prompt, force_lowercase, "llm-token", 0.2)?;
 
     // Small models occasionally echo the wrapper tags; strip them.
     let mut out = output.as_str();
@@ -265,6 +265,7 @@ fn generate(
     prompt: &str,
     force_lowercase: bool,
     stream_event: &str,
+    temperature: f32,
 ) -> Result<String, String> {
     let tokens = model
         .str_to_token(prompt, AddBos::Always)
@@ -299,7 +300,7 @@ fn generate(
     }
 
     let mut sampler = LlamaSampler::chain_simple([
-        LlamaSampler::temp(0.2),
+        LlamaSampler::temp(temperature),
         LlamaSampler::min_p(0.05, 1),
         LlamaSampler::dist(42),
     ]);
@@ -343,22 +344,36 @@ fn generate(
     Ok(output.trim().to_string())
 }
 
-/// Meeting summary prompt: sectioned, speaker-aware, grounded in the transcript.
-pub const MEETING_SUMMARY_PROMPT: &str = r#"You summarize meeting transcripts into concise, useful notes.
-The transcript is labeled by speaker: "Me" is the user of this app; the other participants are "Speaker 1", "Speaker 2", … (or "Them" when they weren't separated). Attribute points and action items to the right speaker when it's clear.
+/// Stage 1 of summarization: pull grounded facts out of the transcript before
+/// writing anything. Summarizing from an extracted fact list (rather than
+/// compressing the raw transcript in one shot) markedly reduces hallucination
+/// on small local models.
+pub const MEETING_EXTRACT_PROMPT: &str = r#"You extract the important content from a meeting transcript. Speakers are labeled "Me" (the user), and "Speaker 1", "Speaker 2", … (or "Them").
+Go through the transcript and list, as terse bullet points grounded ONLY in what was actually said:
+- Decisions that were made
+- Action items / commitments (note who owns each when stated)
+- Key topics and points discussed
+- Questions raised or left open
+Attribute to the speaker when clear. Do NOT invent names, numbers, dates, or commitments. If the transcript is thin, produce fewer bullets. Output only the bullet list, nothing else."#;
+
+/// Stage 2: compose the final notes from the extracted facts — a broad summary
+/// plus skimmable point-form sections.
+pub const MEETING_SUMMARY_PROMPT: &str = r#"You write up meeting notes from a set of extracted points. "Me" is the user; the others are "Speaker 1", "Speaker 2", … (or "Them").
 Write Markdown with these sections, omitting any that don't apply:
 ## Summary
-2-4 sentences on what the meeting was about and what was decided.
+A 2-4 sentence plain-language overview of what the meeting was about and what was decided.
 ## Key points
-The main topics and decisions, as bullets.
+The main topics and points, as bullets.
+## Decisions
+What was decided, as bullets.
 ## Action items
-Concrete follow-ups as a checklist ("- [ ] ..."), naming the owner ("Me" or "Them") when it's clear.
+Concrete follow-ups as a checklist ("- [ ] ..."), naming the owner when it's clear.
 ## Open questions
 Anything left unresolved.
-Base everything only on the transcript. Do not invent names, numbers, dates, or commitments that aren't there. Keep it tight and skimmable."#;
+Base everything ONLY on the provided points — do not add anything new. Keep it tight and skimmable."#;
 
-/// Summarize a meeting transcript into structured notes. Tokens stream to the
-/// frontend on `meeting-summary-token`; the full text is also returned.
+/// Summarize a meeting: extract grounded facts, then compose the notes from
+/// them. The final compose stage streams to `meeting-summary-token`.
 pub fn summarize_meeting(
     app: &AppHandle,
     state: &LlmState,
@@ -367,19 +382,61 @@ pub fn summarize_meeting(
 ) -> Result<String, String> {
     let backend = backend()?;
     let model = state.model_for(model_path)?;
-    let messages = vec![
-        LlamaChatMessage::new("system".into(), MEETING_SUMMARY_PROMPT.into())
-            .map_err(|e| e.to_string())?,
-        LlamaChatMessage::new("user".into(), format!("Transcript:\n\n{transcript}"))
-            .map_err(|e| e.to_string())?,
-    ];
-    let template = model
-        .chat_template(None)
-        .map_err(|e| format!("model has no usable chat template: {e}"))?;
-    let prompt = model
-        .apply_chat_template(&template, &messages, true)
-        .map_err(|e| format!("failed to apply chat template: {e}"))?;
-    generate(app, backend, &model, &prompt, false, "meeting-summary-token")
+
+    // Stage 1 — extract (not streamed to the summary view).
+    let extract_prompt = {
+        let messages = vec![
+            LlamaChatMessage::new("system".into(), MEETING_EXTRACT_PROMPT.into())
+                .map_err(|e| e.to_string())?,
+            LlamaChatMessage::new("user".into(), format!("Transcript:\n\n{transcript}"))
+                .map_err(|e| e.to_string())?,
+        ];
+        let template = model
+            .chat_template(None)
+            .map_err(|e| format!("model has no usable chat template: {e}"))?;
+        model
+            .apply_chat_template(&template, &messages, true)
+            .map_err(|e| format!("failed to apply chat template: {e}"))?
+    };
+    let facts = generate(
+        app,
+        backend,
+        &model,
+        &extract_prompt,
+        false,
+        "meeting-extract-token",
+        0.1,
+    )?;
+    let facts = if facts.trim().is_empty() {
+        transcript.to_string() // fall back to the transcript if extraction was empty
+    } else {
+        facts
+    };
+
+    // Stage 2 — compose the final notes from the extracted points, streamed.
+    let compose_prompt = {
+        let messages = vec![
+            LlamaChatMessage::new("system".into(), MEETING_SUMMARY_PROMPT.into())
+                .map_err(|e| e.to_string())?,
+            LlamaChatMessage::new("user".into(), format!("Extracted points:\n\n{facts}"))
+                .map_err(|e| e.to_string())?,
+        ];
+        let template = model
+            .chat_template(None)
+            .map_err(|e| format!("model has no usable chat template: {e}"))?;
+        model
+            .apply_chat_template(&template, &messages, true)
+            .map_err(|e| format!("failed to apply chat template: {e}"))?
+    };
+    generate(
+        app,
+        backend,
+        &model,
+        &compose_prompt,
+        false,
+        "meeting-summary-token",
+        0.1,
+    )
 }
 
 /// Q&A prompt for a single meeting — grounded, refuses to invent.
@@ -410,5 +467,5 @@ pub fn answer_meeting_question(
     let prompt = model
         .apply_chat_template(&template, &messages, true)
         .map_err(|e| format!("failed to apply chat template: {e}"))?;
-    generate(app, backend, &model, &prompt, false, "meeting-answer-token")
+    generate(app, backend, &model, &prompt, false, "meeting-answer-token", 0.1)
 }
