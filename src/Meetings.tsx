@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, on, formatDuration, Meeting, ModelInfo } from "./api";
+import { api, on, formatDuration, Meeting, ModelInfo, SearchHit } from "./api";
 
 type Phase = "idle" | "recording" | "transcribing" | "summarizing";
 
@@ -45,9 +45,15 @@ export function Meetings({ stt, llm, language }: Props) {
   const [sysSupported, setSysSupported] = useState(true);
   const [liveSummary, setLiveSummary] = useState("");
   const [notes, setNotes] = useState("");
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchHit[] | null>(null);
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [asking, setAsking] = useState(false);
   const activeIdRef = useRef<string | null>(null);
   const sysStartedRef = useRef(false);
   const summaryRef = useRef(false);
+  const answerRef = useRef(false);
 
   const refresh = async () => {
     try {
@@ -63,10 +69,31 @@ export function Meetings({ stt, llm, language }: Props) {
     const sub = on.meetingSummaryToken((chunk) => {
       if (summaryRef.current) setLiveSummary((s) => s + chunk);
     });
+    const sub2 = on.meetingAnswerToken((chunk) => {
+      if (answerRef.current) setAnswer((a) => a + chunk);
+    });
     return () => {
       sub.then((un) => un());
+      sub2.then((un) => un());
     };
   }, []);
+
+  // Cross-meeting search (debounced). Empty query → show the full list.
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      setResults(null);
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        setResults(await api.searchMeetings(q));
+      } catch (e) {
+        console.error("search failed", e);
+      }
+    }, 200);
+    return () => clearTimeout(t);
+  }, [query]);
 
   const openMeeting = async (id: string) => {
     try {
@@ -75,9 +102,27 @@ export function Meetings({ stt, llm, language }: Props) {
         setSelected(m);
         setNotes(m.notes);
         setLiveSummary("");
+        setQuestion("");
+        setAnswer("");
       }
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const ask = async () => {
+    if (!selected || !llm || !question.trim() || asking) return;
+    setAnswer("");
+    setAsking(true);
+    answerRef.current = true;
+    try {
+      const a = await api.askMeeting(selected.id, llm.id, question.trim());
+      setAnswer(a);
+    } catch (e) {
+      setAnswer(String(e));
+    } finally {
+      answerRef.current = false;
+      setAsking(false);
     }
   };
 
@@ -256,6 +301,37 @@ export function Meetings({ stt, llm, language }: Props) {
             </section>
           )}
 
+          {llm && selected.segments.length > 0 && (
+            <section className="meet-section">
+              <h3>ask about this meeting</h3>
+              <div className="meet-ask">
+                <input
+                  className="meet-ask-input"
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") ask();
+                  }}
+                  placeholder="e.g. what did I agree to? what are the action items?"
+                  disabled={asking}
+                />
+                <button
+                  className="quiet accent"
+                  onClick={ask}
+                  disabled={asking || !question.trim()}
+                >
+                  {asking ? "…" : "ask"}
+                </button>
+              </div>
+              {(answer || asking) && (
+                <div className="prose meet-prose meet-answer">
+                  {answer}
+                  {asking && <span className="caret" />}
+                </div>
+              )}
+            </section>
+          )}
+
           <section className="meet-section">
             <h3>my notes</h3>
             <textarea
@@ -289,25 +365,50 @@ export function Meetings({ stt, llm, language }: Props) {
         </div>
       ) : (
         <div className="meet-list">
-          {meetings.length === 0 && phase === "idle" && (
-            <div className="empty">
-              <p>
-                your meetings land here. Start one above, open Meet or Zoom, and unsound listens
-                to both you and the call — then writes up who said what and a summary. All on this
-                machine.
-              </p>
-            </div>
+          {meetings.length > 0 && (
+            <input
+              className="meet-search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="search across all meetings…"
+            />
           )}
-          {meetings.map((m) => (
-            <div className="meet-row" key={m.id} onClick={() => openMeeting(m.id)}>
-              <div className="meet-row-title">{m.title || "Untitled meeting"}</div>
-              <div className="meet-row-meta">
-                {new Date(m.startedAt).toLocaleString()} · {elapsed(m.startedAt, m.endedAt)} ·{" "}
-                {m.segmentCount} line{m.segmentCount === 1 ? "" : "s"}
-              </div>
-              {m.summary && <div className="meet-row-snippet">{m.summary.slice(0, 160)}</div>}
-            </div>
-          ))}
+
+          {results !== null ? (
+            results.length === 0 ? (
+              <p className="dim meet-empty-line">no meetings match “{query.trim()}”</p>
+            ) : (
+              results.map((h) => (
+                <div className="meet-row" key={h.meetingId} onClick={() => openMeeting(h.meetingId)}>
+                  <div className="meet-row-title">{h.title || "Untitled meeting"}</div>
+                  <div className="meet-row-meta">{new Date(h.startedAt).toLocaleString()}</div>
+                  {h.snippet && <div className="meet-row-snippet">…{h.snippet}…</div>}
+                </div>
+              ))
+            )
+          ) : (
+            <>
+              {meetings.length === 0 && phase === "idle" && (
+                <div className="empty">
+                  <p>
+                    your meetings land here. Start one above, open Meet or Zoom, and unsound
+                    listens to both you and the call — then writes up who said what and a summary.
+                    All on this machine.
+                  </p>
+                </div>
+              )}
+              {meetings.map((m) => (
+                <div className="meet-row" key={m.id} onClick={() => openMeeting(m.id)}>
+                  <div className="meet-row-title">{m.title || "Untitled meeting"}</div>
+                  <div className="meet-row-meta">
+                    {new Date(m.startedAt).toLocaleString()} · {elapsed(m.startedAt, m.endedAt)} ·{" "}
+                    {m.segmentCount} line{m.segmentCount === 1 ? "" : "s"}
+                  </div>
+                  {m.summary && <div className="meet-row-snippet">{m.summary.slice(0, 160)}</div>}
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
     </div>

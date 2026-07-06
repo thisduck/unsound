@@ -409,3 +409,56 @@ pub fn get_meeting(db: &Db, id: &str) -> Result<Option<Meeting>, String> {
     }
     Ok(meeting)
 }
+
+/// A cross-meeting search result: the meeting it matched, plus a snippet of
+/// where the match was (a matching transcript line, else a summary excerpt).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub meeting_id: String,
+    pub title: String,
+    pub started_at: String,
+    pub snippet: String,
+}
+
+/// Search across all meetings by title, summary, notes, and transcript text.
+/// Uses SQLite `LIKE` (no FTS dependency); fine at personal-archive scale.
+pub fn search_meetings(db: &Db, query: &str) -> Result<Vec<SearchHit>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Escape LIKE wildcards in the user's text so they're matched literally.
+    let like = format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+    let conn = db.0.lock().unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.id, m.title, m.started_at,
+                COALESCE(
+                  (SELECT s.text FROM segments s
+                   WHERE s.meeting_id = m.id AND s.text LIKE ?1 ESCAPE '\\'
+                   ORDER BY s.start_ms LIMIT 1),
+                  NULLIF(substr(m.summary, 1, 160), '')
+                )
+             FROM meetings m
+             WHERE m.title LIKE ?1 ESCAPE '\\'
+                OR m.summary LIKE ?1 ESCAPE '\\'
+                OR m.notes LIKE ?1 ESCAPE '\\'
+                OR EXISTS (SELECT 1 FROM segments s
+                           WHERE s.meeting_id = m.id AND s.text LIKE ?1 ESCAPE '\\')
+             ORDER BY m.started_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&like], |r| {
+            Ok(SearchHit {
+                meeting_id: r.get(0)?,
+                title: r.get(1)?,
+                started_at: r.get(2)?,
+                snippet: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
+}

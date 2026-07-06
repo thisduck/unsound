@@ -524,6 +524,47 @@ async fn summarize_meeting(
     Ok(summary)
 }
 
+/// Answer a question about one meeting from its transcript + summary + notes.
+/// The answer streams to the UI on `meeting-answer-token`.
+#[tauri::command]
+async fn ask_meeting(
+    app: AppHandle,
+    db: State<'_, Db>,
+    meeting_id: String,
+    model_id: String,
+    question: String,
+) -> Result<String, String> {
+    let model_path = models::downloaded_model_path(&app, &model_id)?;
+    let meeting =
+        store::get_meeting(&db, &meeting_id)?.ok_or_else(|| "meeting not found".to_string())?;
+    let mut context = String::new();
+    if !meeting.summary.trim().is_empty() {
+        context.push_str(&format!("Summary:\n{}\n\n", meeting.summary));
+    }
+    if !meeting.notes.trim().is_empty() {
+        context.push_str(&format!("My notes:\n{}\n\n", meeting.notes));
+    }
+    context.push_str("Transcript:\n");
+    for s in &meeting.segments {
+        let who = if s.speaker == "me" { "Me" } else { "Them" };
+        context.push_str(&format!("{who}: {}\n", s.text));
+    }
+    let worker_app = app.clone();
+    let answer = tauri::async_runtime::spawn_blocking(move || {
+        let s = worker_app.state::<AppState>();
+        llm::answer_meeting_question(&worker_app, &s.llm, &model_path, &context, &question)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(answer)
+}
+
+/// Search across every meeting by title, summary, notes, and transcript text.
+#[tauri::command]
+fn search_meetings(db: State<Db>, query: String) -> Result<Vec<store::SearchHit>, String> {
+    store::search_meetings(&db, &query)
+}
+
 // ---- system-audio capture (ScreenCaptureKit spike) -------------------------
 
 #[tauri::command]
@@ -806,6 +847,8 @@ pub fn run() {
             get_meeting,
             transcribe_meeting,
             summarize_meeting,
+            ask_meeting,
+            search_meetings,
             system_audio_supported,
             #[cfg(target_os = "macos")]
             start_system_capture,

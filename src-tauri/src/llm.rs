@@ -381,3 +381,33 @@ pub fn summarize_meeting(
         .map_err(|e| format!("failed to apply chat template: {e}"))?;
     generate(app, backend, &model, &prompt, false, "meeting-summary-token")
 }
+
+/// Q&A prompt for a single meeting — grounded, refuses to invent.
+pub const MEETING_QA_PROMPT: &str = r#"You answer questions about a single meeting, using only the material provided: its transcript, summary, and the user's own notes. "Me" is the user of this app; "Them" is everyone else on the call.
+Answer concisely and directly, referencing what was actually said when it helps. If the answer isn't in the material, say you don't see it in this meeting rather than guessing or inventing details."#;
+
+/// Answer a question about one meeting from its transcript/summary/notes.
+/// Tokens stream to the frontend on `meeting-answer-token`.
+pub fn answer_meeting_question(
+    app: &AppHandle,
+    state: &LlmState,
+    model_path: &Path,
+    context: &str,
+    question: &str,
+) -> Result<String, String> {
+    let backend = backend()?;
+    let model = state.model_for(model_path)?;
+    let messages = vec![
+        LlamaChatMessage::new("system".into(), MEETING_QA_PROMPT.into())
+            .map_err(|e| e.to_string())?,
+        LlamaChatMessage::new("user".into(), format!("{context}\n\nQuestion: {question}"))
+            .map_err(|e| e.to_string())?,
+    ];
+    let template = model
+        .chat_template(None)
+        .map_err(|e| format!("model has no usable chat template: {e}"))?;
+    let prompt = model
+        .apply_chat_template(&template, &messages, true)
+        .map_err(|e| format!("failed to apply chat template: {e}"))?;
+    generate(app, backend, &model, &prompt, false, "meeting-answer-token")
+}

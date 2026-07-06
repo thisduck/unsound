@@ -1464,3 +1464,50 @@ textarea.meet-notes:focus {
 .seg-text {
   color: var(--soft);
 }
+
+/* search across meetings */
+.meet-search {
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  padding: 9px 12px;
+  margin-bottom: 12px;
+}
+.meet-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.meet-empty-line {
+  padding: 12px 4px;
+}
+
+/* ask about a meeting */
+.meet-ask {
+  display: flex;
+  gap: 8px;
+}
+.meet-ask-input {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  padding: 9px 12px;
+}
+.meet-ask-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.meet-answer {
+  margin-top: 10px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+}
