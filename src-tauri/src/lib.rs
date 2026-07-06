@@ -595,6 +595,33 @@ fn stop_system_capture(state: State<AppState>) -> Result<RecordingResult, String
     })
 }
 
+/// Diagnostic: dump the just-captured system audio to a WAV and report its
+/// level, so capture can be verified by ear — no transcription involved.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn save_system_capture_wav(
+    app: AppHandle,
+    state: State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let samples = state.sys.last.lock().unwrap().clone();
+    let peak = samples.iter().fold(0f32, |m, &s| m.max(s.abs()));
+    let rms = if samples.is_empty() {
+        0.0
+    } else {
+        (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+    };
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let path = dir.join("system-audio-test.wav");
+    syscapture::write_wav_16(&path, &samples, syscapture::CAPTURE_SAMPLE_RATE)?;
+    Ok(serde_json::json!({
+        "path": path.to_string_lossy(),
+        "sampleCount": samples.len(),
+        "durationSecs": samples.len() as f32 / syscapture::CAPTURE_SAMPLE_RATE as f32,
+        "peak": peak,
+        "rms": rms,
+    }))
+}
+
 /// Spike helper: transcribe the just-captured system audio with a Whisper
 /// model, reusing the same recognition-biasing vocabulary as the mic path.
 #[cfg(target_os = "macos")]
@@ -854,6 +881,8 @@ pub fn run() {
             start_system_capture,
             #[cfg(target_os = "macos")]
             stop_system_capture,
+            #[cfg(target_os = "macos")]
+            save_system_capture_wav,
             #[cfg(target_os = "macos")]
             transcribe_system_capture
         ])

@@ -17,6 +17,7 @@
 #![cfg(target_os = "macos")]
 
 use std::ffi::c_void;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -384,4 +385,30 @@ pub fn stop(state: &SysCaptureState) -> Result<CaptureResult, String> {
     };
     *state.last.lock().unwrap() = samples;
     Ok(result)
+}
+
+/// Write mono f32 samples to a 16-bit PCM WAV — a listenable artifact for
+/// verifying capture independently of transcription.
+pub fn write_wav_16(path: &Path, samples: &[f32], sample_rate: u32) -> Result<(), String> {
+    let data_size = (samples.len() * 2) as u32;
+    let byte_rate = sample_rate * 2; // mono, 16-bit
+    let mut buf = Vec::with_capacity(44 + data_size as usize);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&(36 + data_size).to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    buf.extend_from_slice(&1u16.to_le_bytes()); // format = PCM
+    buf.extend_from_slice(&1u16.to_le_bytes()); // channels = mono
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&2u16.to_le_bytes()); // block align
+    buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+    for &s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path, buf).map_err(|e| e.to_string())
 }

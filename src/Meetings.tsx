@@ -50,6 +50,7 @@ export function Meetings({ stt, llm, language }: Props) {
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
   const [asking, setAsking] = useState(false);
+  const [testing, setTesting] = useState(false);
   const activeIdRef = useRef<string | null>(null);
   const sysStartedRef = useRef(false);
   const summaryRef = useRef(false);
@@ -211,6 +212,41 @@ export function Meetings({ stt, llm, language }: Props) {
     }
   };
 
+  // Diagnostic: capture 8s of system audio to a WAV and open it, so capture can
+  // be verified by ear — completely independent of Whisper.
+  const runTest = async () => {
+    if (testing || phase !== "idle") return;
+    setTesting(true);
+    setError(null);
+    try {
+      await api.startSystemCapture();
+      setStatus("capturing system audio for 8s — play a YouTube video or your call now…");
+      await new Promise((r) => setTimeout(r, 8000));
+      await api.stopSystemCapture();
+      const r = await api.saveSystemCaptureWav();
+      if (r.peak < 0.01) {
+        setStatus(
+          `no sound captured (peak ${r.peak.toFixed(4)}) — the system channel isn't receiving audio. file: ${r.path}`,
+        );
+      } else {
+        setStatus(
+          `captured ${r.durationSecs.toFixed(1)}s · peak ${r.peak.toFixed(3)} · rms ${r.rms.toFixed(3)} — opening it so you can listen`,
+        );
+        try {
+          const { openPath } = await import("@tauri-apps/plugin-opener");
+          await openPath(r.path);
+        } catch (e) {
+          console.error("could not open the wav", e);
+          setStatus((s) => s + ` (open it yourself: ${r.path})`);
+        }
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setTesting(false);
+    }
+  };
+
   const remove = async (id: string) => {
     try {
       await api.deleteMeeting(id);
@@ -250,7 +286,16 @@ export function Meetings({ stt, llm, language }: Props) {
           system audio needs macOS 13+ — meetings will capture your mic only
         </div>
       )}
-      {status && phase !== "idle" && <div className="meet-hint">{status}</div>}
+      {sysSupported && phase === "idle" && !selected && (
+        <div className="meet-hint">
+          <button className="quiet" onClick={runTest} disabled={testing}>
+            {testing ? "capturing 8s…" : "🔧 test system audio (saves a WAV to listen to)"}
+          </button>
+        </div>
+      )}
+      {status && (phase !== "idle" || testing || !selected) && (
+        <div className="meet-hint">{status}</div>
+      )}
       {error && (
         <div className="meet-hint meet-error">
           {error}

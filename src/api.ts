@@ -176,6 +176,10 @@ export const api = {
   systemAudioSupported: () => invoke<boolean>("system_audio_supported"),
   startSystemCapture: () => invoke<void>("start_system_capture"),
   stopSystemCapture: () => invoke<RecordingResult>("stop_system_capture"),
+  saveSystemCaptureWav: () =>
+    invoke<{ path: string; sampleCount: number; durationSecs: number; peak: number; rms: number }>(
+      "save_system_capture_wav",
+    ),
   transcribeSystemCapture: (modelId: string, language?: string) =>
     invoke<string>("transcribe_system_capture", { modelId, language: language ?? null }),
 };
