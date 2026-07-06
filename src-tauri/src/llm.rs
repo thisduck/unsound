@@ -2,7 +2,7 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::TokenToStringError;
 use llama_cpp_2::sampling::LlamaSampler;
 use std::num::NonZeroU32;
@@ -157,55 +157,95 @@ fn style_addendum(style: &crate::settings::Style) -> String {
     s
 }
 
-/// Apply the model's chat template to `(role, content)` messages. Some
-/// templates (notably Gemma) reject a "system" role and make llama.cpp return
-/// an FFI error; on any failure we fold the system message into the first user
-/// turn and retry, which every template accepts.
-fn render_prompt(model: &LlamaModel, messages: &[(&str, String)]) -> Result<String, String> {
-    let template = model
-        .chat_template(None)
-        .map_err(|e| format!("model has no usable chat template: {e}"))?;
-    let build = |list: &[(String, String)]| -> Result<Vec<LlamaChatMessage>, String> {
-        list.iter()
-            .map(|(r, c)| LlamaChatMessage::new(r.clone(), c.clone()).map_err(|e| e.to_string()))
-            .collect()
-    };
-
-    // Try the messages as given.
-    let direct: Vec<(String, String)> = messages
-        .iter()
-        .map(|(r, c)| (r.to_string(), c.clone()))
-        .collect();
-    if let Ok(msgs) = build(&direct) {
-        if let Ok(prompt) = model.apply_chat_template(&template, &msgs, true) {
-            return Ok(prompt);
-        }
-    }
-
-    // Fallback: merge any system message(s) into the first user turn.
+/// Fold any system message(s) into the first user turn — needed for templates
+/// (e.g. Gemma) that reject a "system" role.
+fn fold_system(messages: &[(String, String)]) -> Vec<(String, String)> {
     let mut sys = String::new();
-    let mut merged: Vec<(String, String)> = Vec::new();
+    let mut out: Vec<(String, String)> = Vec::new();
     let mut folded = false;
     for (role, content) in messages {
-        if *role == "system" {
+        if role == "system" {
             if !sys.is_empty() {
                 sys.push_str("\n\n");
             }
             sys.push_str(content);
-        } else if *role == "user" && !sys.is_empty() && !folded {
-            merged.push(("user".into(), format!("{sys}\n\n{content}")));
+        } else if role == "user" && !sys.is_empty() && !folded {
+            out.push(("user".into(), format!("{sys}\n\n{content}")));
             folded = true;
         } else {
-            merged.push((role.to_string(), content.clone()));
+            out.push((role.clone(), content.clone()));
         }
     }
     if !sys.is_empty() && !folded {
-        merged.insert(0, ("user".into(), sys));
+        out.insert(0, ("user".into(), sys));
     }
-    let msgs = build(&merged)?;
-    model
-        .apply_chat_template(&template, &msgs, true)
-        .map_err(|e| format!("failed to apply chat template: {e}"))
+    out
+}
+
+/// Try to apply one template, first with the messages as given, then with the
+/// system message folded into the first user turn (for system-averse templates).
+fn try_template(
+    model: &LlamaModel,
+    template: &LlamaChatTemplate,
+    messages: &[(String, String)],
+) -> Option<String> {
+    let build = |list: &[(String, String)]| -> Option<Vec<LlamaChatMessage>> {
+        list.iter()
+            .map(|(r, c)| LlamaChatMessage::new(r.clone(), c.clone()).ok())
+            .collect()
+    };
+    for variant in [messages.to_vec(), fold_system(messages)] {
+        if let Some(msgs) = build(&variant) {
+            if let Ok(prompt) = model.apply_chat_template(template, &msgs, true) {
+                return Some(prompt);
+            }
+        }
+    }
+    None
+}
+
+/// Turn `(role, content)` messages into a prompt. The bundled llama.cpp only
+/// recognizes a fixed set of chat templates and returns an FFI error for ones
+/// it doesn't know (newer models: Gemma 4, Granite, Qwen3, Phi-4…). So we try
+/// the model's own template first, then fall back to the right built-in family
+/// name (by architecture), and finally to ChatML — bypassing the broken
+/// auto-detection.
+fn render_prompt(model: &LlamaModel, messages: &[(&str, String)]) -> Result<String, String> {
+    let msgs: Vec<(String, String)> = messages
+        .iter()
+        .map(|(r, c)| (r.to_string(), c.clone()))
+        .collect();
+
+    // 1. The model's embedded template (works for models llama.cpp knows).
+    if let Ok(t) = model.chat_template(None) {
+        if let Some(p) = try_template(model, &t, &msgs) {
+            return Ok(p);
+        }
+    }
+
+    // 2. A built-in family template chosen from the model architecture.
+    let arch = model
+        .meta_val_str("general.architecture")
+        .unwrap_or_default()
+        .to_lowercase();
+    let family = if arch.contains("gemma") {
+        "gemma"
+    } else if arch.contains("llama") {
+        "llama3"
+    } else if arch.contains("phi") {
+        "phi3"
+    } else {
+        "chatml" // qwen, granite, and anything else ChatML-compatible
+    };
+    for name in [family, "chatml"] {
+        if let Ok(t) = LlamaChatTemplate::new(name) {
+            if let Some(p) = try_template(model, &t, &msgs) {
+                return Ok(p);
+            }
+        }
+    }
+
+    Err("failed to apply chat template: no compatible template for this model".into())
 }
 
 pub fn cleanup_text(
