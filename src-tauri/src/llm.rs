@@ -345,7 +345,7 @@ fn generate(
 
 /// Meeting summary prompt: sectioned, speaker-aware, grounded in the transcript.
 pub const MEETING_SUMMARY_PROMPT: &str = r#"You summarize meeting transcripts into concise, useful notes.
-The transcript is labeled by speaker: "Me" is the user of this app; "Them" is everyone else on the call.
+The transcript is labeled by speaker: "Me" is the user of this app; the other participants are "Speaker 1", "Speaker 2", … (or "Them" when they weren't separated). Attribute points and action items to the right speaker when it's clear.
 Write Markdown with these sections, omitting any that don't apply:
 ## Summary
 2-4 sentences on what the meeting was about and what was decided.
@@ -383,8 +383,9 @@ pub fn summarize_meeting(
 }
 
 /// Q&A prompt for a single meeting — grounded, refuses to invent.
-pub const MEETING_QA_PROMPT: &str = r#"You answer questions about a single meeting, using only the material provided: its transcript, summary, and the user's own notes. "Me" is the user of this app; "Them" is everyone else on the call.
-Answer concisely and directly, referencing what was actually said when it helps. If the answer isn't in the material, say you don't see it in this meeting rather than guessing or inventing details."#;
+pub const MEETING_QA_PROMPT: &str = r#"You answer questions about a single meeting, using only the material provided: its transcript, summary, and the user's own notes.
+"Me" is the user; the other participants are "Speaker 1", "Speaker 2", … (or "Them" when not separated).
+Answer concisely and directly, referencing what was actually said (and who said it) when it helps. If the answer isn't in the material, say you don't see it in this meeting rather than guessing or inventing details."#;
 
 /// Answer a question about one meeting from its transcript/summary/notes.
 /// Tokens stream to the frontend on `meeting-answer-token`.

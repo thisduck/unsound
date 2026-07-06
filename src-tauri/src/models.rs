@@ -8,6 +8,8 @@ use tauri::{AppHandle, Emitter, Manager};
 pub enum ModelKind {
     Stt,
     Llm,
+    /// Speaker-diarization models (sherpa-onnx): segmentation + embedding.
+    Diarize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -259,6 +261,29 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "Strong quality for its size.",
             LLAMA_LANGS,
             false,
+        ),
+        // --- Speaker diarization (sherpa-onnx) — meetings "who said what" ---
+        // Both are required together; the ids are referenced by name in the
+        // diarization command, so keep them stable.
+        m(
+            "diarize-segmentation",
+            "Speaker segmentation (pyannote)",
+            ModelKind::Diarize,
+            "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+            6 * MB,
+            "Finds speech and speaker-change points in a meeting.",
+            "Language-independent",
+            true,
+        ),
+        m(
+            "diarize-embedding",
+            "Speaker embeddings (3D-Speaker CAM++)",
+            ModelKind::Diarize,
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+            28 * MB,
+            "Tells voices apart to label Speaker 1, Speaker 2, …",
+            "Language-independent",
+            true,
         ),
     ]
 }

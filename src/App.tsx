@@ -561,6 +561,8 @@ export default function App() {
           stt={stt}
           llm={llm}
           language={language}
+          models={models}
+          onModelsChanged={refreshModels}
           onActivate={() => setView("meetings")}
         />
       </div>

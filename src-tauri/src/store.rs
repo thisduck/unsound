@@ -410,6 +410,21 @@ pub fn get_meeting(db: &Db, id: &str) -> Result<Option<Meeting>, String> {
     Ok(meeting)
 }
 
+/// Relabel segments' speakers by id (used after diarization assigns Speaker N).
+pub fn update_segment_speakers(db: &Db, updates: &[(i64, String)]) -> Result<(), String> {
+    let mut conn = db.0.lock().unwrap();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for (id, speaker) in updates {
+        tx.execute(
+            "UPDATE segments SET speaker = ?2 WHERE id = ?1",
+            params![id, speaker],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// A cross-meeting search result: the meeting it matched, plus a snippet of
 /// where the match was (a matching transcript line, else a summary excerpt).
 #[derive(Clone, Serialize)]

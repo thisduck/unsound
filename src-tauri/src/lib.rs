@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod audiofile;
 mod deliver;
+mod diarize;
 mod frontapp;
 mod hotkeys;
 mod llm;
@@ -510,8 +511,7 @@ async fn summarize_meeting(
         store::get_meeting(&db, &meeting_id)?.ok_or_else(|| "meeting not found".to_string())?;
     let mut transcript = String::new();
     for s in &meeting.segments {
-        let who = if s.speaker == "me" { "Me" } else { "Them" };
-        transcript.push_str(&format!("{who}: {}\n", s.text));
+        transcript.push_str(&format!("{}: {}\n", speaker_label(&s.speaker), s.text));
     }
     if transcript.trim().is_empty() {
         return Ok(String::new());
@@ -549,8 +549,7 @@ async fn ask_meeting(
     }
     context.push_str("Transcript:\n");
     for s in &meeting.segments {
-        let who = if s.speaker == "me" { "Me" } else { "Them" };
-        context.push_str(&format!("{who}: {}\n", s.text));
+        context.push_str(&format!("{}: {}\n", speaker_label(&s.speaker), s.text));
     }
     let worker_app = app.clone();
     let answer = tauri::async_runtime::spawn_blocking(move || {
@@ -566,6 +565,20 @@ async fn ask_meeting(
 #[tauri::command]
 fn search_meetings(db: State<Db>, query: String) -> Result<Vec<store::SearchHit>, String> {
     store::search_meetings(&db, &query)
+}
+
+/// Render a segment's speaker for the LLM: "Me" for the user, "Speaker N" for a
+/// diarized remote participant (`them:0` → Speaker 1), else "Them".
+fn speaker_label(speaker: &str) -> String {
+    if speaker == "me" {
+        return "Me".into();
+    }
+    if let Some(n) = speaker.strip_prefix("them:") {
+        if let Ok(idx) = n.parse::<i32>() {
+            return format!("Speaker {}", idx + 1);
+        }
+    }
+    "Them".into()
 }
 
 /// Start a live meeting: capture mic + system audio and transcribe in rolling
@@ -592,6 +605,57 @@ async fn meeting_stop(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || meeting::stop(&app))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Diarize the just-finished meeting's system-audio channel into speakers and
+/// relabel its "them" segments as `them:0`, `them:1`, … (shown as Speaker 1/2).
+/// Requires the two diarization models to be downloaded.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn diarize_meeting(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    db: State<'_, Db>,
+    meeting_id: String,
+) -> Result<Meeting, String> {
+    let seg_model = models::downloaded_model_path(&app, "diarize-segmentation")?;
+    let emb_model = models::downloaded_model_path(&app, "diarize-embedding")?;
+    let samples = state.sys.last.lock().unwrap().clone();
+    // Nothing meaningful to cluster in under a second of audio.
+    if samples.len() < 16_000 {
+        return store::get_meeting(&db, &meeting_id)?
+            .ok_or_else(|| "meeting not found".to_string());
+    }
+    let spans = tauri::async_runtime::spawn_blocking(move || {
+        diarize::diarize(&seg_model, &emb_model, samples, 0.5)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // Assign each system-channel segment to the speaker span it overlaps most.
+    let meeting =
+        store::get_meeting(&db, &meeting_id)?.ok_or_else(|| "meeting not found".to_string())?;
+    let mut updates: Vec<(i64, String)> = Vec::new();
+    for seg in &meeting.segments {
+        if seg.source != "system" {
+            continue;
+        }
+        let (s0, s1) = (seg.start_ms as f32 / 1000.0, seg.end_ms as f32 / 1000.0);
+        let mut best: Option<(f32, i32)> = None;
+        for sp in &spans {
+            let overlap = (s1.min(sp.end) - s0.max(sp.start)).max(0.0);
+            if overlap > 0.0 && best.map_or(true, |(b, _)| overlap > b) {
+                best = Some((overlap, sp.speaker));
+            }
+        }
+        if let Some((_, speaker)) = best {
+            updates.push((seg.id, format!("them:{speaker}")));
+        }
+    }
+    if !updates.is_empty() {
+        store::update_segment_speakers(&db, &updates)?;
+    }
+    store::get_meeting(&db, &meeting_id)?.ok_or_else(|| "meeting not found".to_string())
 }
 
 // ---- system-audio capture (ScreenCaptureKit spike) -------------------------
@@ -907,6 +971,8 @@ pub fn run() {
             search_meetings,
             meeting_start,
             meeting_stop,
+            #[cfg(target_os = "macos")]
+            diarize_meeting,
             system_audio_supported,
             #[cfg(target_os = "macos")]
             start_system_capture,

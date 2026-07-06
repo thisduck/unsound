@@ -1,7 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import { api, on, formatDuration, Meeting, ModelInfo, SearchHit, Segment } from "./api";
+import { MeetingSetup } from "./MeetingSetup";
 
-type Phase = "idle" | "recording" | "transcribing" | "summarizing";
+type Phase = "idle" | "recording" | "transcribing" | "summarizing" | "diarizing";
+
+/// How a segment's speaker is shown: "You" for the mic, "Speaker N" for a
+/// diarized participant (`them:0` → Speaker 1), else "Them".
+function speakerLabel(speaker: string): string {
+  if (speaker === "me") return "You";
+  const m = speaker.match(/^them:(\d+)$/);
+  if (m) return `Speaker ${Number(m[1]) + 1}`;
+  return "Them";
+}
+
+/// Stable-ish color class per speaker so the transcript is easy to scan.
+function speakerClass(speaker: string): string {
+  if (speaker === "me") return "seg-me";
+  const m = speaker.match(/^them:(\d+)$/);
+  if (m) return `seg-spk${Number(m[1]) % 6}`;
+  return "seg-them";
+}
 
 function elapsed(startedAt: string, endedAt?: string | null): string {
   const start = new Date(startedAt).getTime();
@@ -34,12 +52,14 @@ interface Props {
   stt?: ModelInfo;
   llm?: ModelInfo;
   language: string;
+  models: ModelInfo[];
+  onModelsChanged: () => void;
   /// Called when a meeting starts so the app can bring the Meetings view forward
   /// (e.g. when started from the tray while another tab is showing).
   onActivate?: () => void;
 }
 
-export function Meetings({ stt, llm, language, onActivate }: Props) {
+export function Meetings({ stt, llm, language, models, onModelsChanged, onActivate }: Props) {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [selected, setSelected] = useState<Meeting | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -63,6 +83,13 @@ export function Meetings({ stt, llm, language, onActivate }: Props) {
   // The tray-toggle listener is registered once; route it through a ref so it
   // always sees the current phase and handlers.
   const toggleRef = useRef<() => void>(() => {});
+
+  // Setup gate: meetings need a speech model and the two diarization models.
+  const sttReady = models.some((m) => m.kind === "stt" && m.downloaded);
+  const diarizeReady = ["diarize-segmentation", "diarize-embedding"].every(
+    (id) => models.find((m) => m.id === id)?.downloaded,
+  );
+  const setupNeeded = !sttReady || !diarizeReady;
 
   const refresh = async () => {
     try {
@@ -191,10 +218,24 @@ export function Meetings({ stt, llm, language, onActivate }: Props) {
       setStatus("wrapping up…");
       // Transcription already happened live; this just flushes the tail.
       await api.meetingStop();
-      const m = await api.getMeeting(id);
+      let m = await api.getMeeting(id);
       if (m) {
         setSelected(m);
         setNotes(m.notes);
+      }
+      // Tell the remote speakers apart (Speaker 1/2/…) before summarizing, so
+      // the summary can attribute points to the right person.
+      const hasThem = !!m && m.segments.some((s) => s.source === "system");
+      if (diarizeReady && hasThem) {
+        setPhase("diarizing");
+        setStatus("detecting speakers…");
+        try {
+          m = await api.diarizeMeeting(id);
+          setSelected(m);
+          setNotes(m.notes);
+        } catch (e) {
+          console.error("diarization failed", e);
+        }
       }
       if (llm && m && m.segments.length > 0) {
         setPhase("summarizing");
@@ -278,15 +319,25 @@ export function Meetings({ stt, llm, language, onActivate }: Props) {
     }
   };
 
-  const busy = phase === "transcribing" || phase === "summarizing";
+  const busy = phase === "transcribing" || phase === "summarizing" || phase === "diarizing";
   const pillLabel =
     phase === "recording"
       ? "end meeting"
       : phase === "transcribing"
-        ? "transcribing…"
-        : phase === "summarizing"
-          ? "summarizing…"
-          : "start a meeting";
+        ? "wrapping up…"
+        : phase === "diarizing"
+          ? "detecting speakers…"
+          : phase === "summarizing"
+            ? "summarizing…"
+            : "start a meeting";
+
+  if (setupNeeded) {
+    return (
+      <div className="meetings">
+        <MeetingSetup models={models} onModelsChanged={onModelsChanged} />
+      </div>
+    );
+  }
 
   return (
     <div className="meetings">
@@ -339,8 +390,8 @@ export function Meetings({ stt, llm, language, onActivate }: Props) {
               [...liveSegments]
                 .sort((a, b) => a.startMs - b.startMs)
                 .map((s, i) => (
-                  <div className={"seg " + (s.speaker === "me" ? "seg-me" : "seg-them")} key={i}>
-                    <span className="seg-who">{s.speaker === "me" ? "You" : "Them"}</span>
+                  <div className={"seg " + speakerClass(s.speaker)} key={i}>
+                    <span className="seg-who">{speakerLabel(s.speaker)}</span>
                     <span className="seg-time">{mmss(s.startMs)}</span>
                     <span className="seg-text">{s.text}</span>
                   </div>
@@ -439,11 +490,8 @@ export function Meetings({ stt, llm, language, onActivate }: Props) {
               [...selected.segments]
                 .sort((a, b) => a.startMs - b.startMs)
                 .map((s, i) => (
-                  <div
-                    className={"seg " + (s.speaker === "me" ? "seg-me" : "seg-them")}
-                    key={s.id ?? i}
-                  >
-                    <span className="seg-who">{s.speaker === "me" ? "You" : "Them"}</span>
+                  <div className={"seg " + speakerClass(s.speaker)} key={s.id ?? i}>
+                    <span className="seg-who">{speakerLabel(s.speaker)}</span>
                     <span className="seg-time">{mmss(s.startMs)}</span>
                     <span className="seg-text">{s.text}</span>
                   </div>

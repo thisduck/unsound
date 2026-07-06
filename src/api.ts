@@ -4,7 +4,7 @@ import type { Take } from "./HistoryDrawer";
 
 export type OverlayState = "recording" | "processing" | "hidden";
 
-export type ModelKind = "stt" | "llm";
+export type ModelKind = "stt" | "llm" | "diarize";
 
 export interface ModelInfo {
   id: string;
@@ -174,6 +174,7 @@ export const api = {
   meetingStart: (meetingId: string, modelId: string, language?: string) =>
     invoke<void>("meeting_start", { meetingId, modelId, language: language ?? null }),
   meetingStop: () => invoke<void>("meeting_stop"),
+  diarizeMeeting: (meetingId: string) => invoke<Meeting>("diarize_meeting", { meetingId }),
 
   // System-audio capture (ScreenCaptureKit; macOS 13+).
   systemAudioSupported: () => invoke<boolean>("system_audio_supported"),
