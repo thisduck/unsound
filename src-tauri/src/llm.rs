@@ -157,6 +157,57 @@ fn style_addendum(style: &crate::settings::Style) -> String {
     s
 }
 
+/// Apply the model's chat template to `(role, content)` messages. Some
+/// templates (notably Gemma) reject a "system" role and make llama.cpp return
+/// an FFI error; on any failure we fold the system message into the first user
+/// turn and retry, which every template accepts.
+fn render_prompt(model: &LlamaModel, messages: &[(&str, String)]) -> Result<String, String> {
+    let template = model
+        .chat_template(None)
+        .map_err(|e| format!("model has no usable chat template: {e}"))?;
+    let build = |list: &[(String, String)]| -> Result<Vec<LlamaChatMessage>, String> {
+        list.iter()
+            .map(|(r, c)| LlamaChatMessage::new(r.clone(), c.clone()).map_err(|e| e.to_string()))
+            .collect()
+    };
+
+    // Try the messages as given.
+    let direct: Vec<(String, String)> = messages
+        .iter()
+        .map(|(r, c)| (r.to_string(), c.clone()))
+        .collect();
+    if let Ok(msgs) = build(&direct) {
+        if let Ok(prompt) = model.apply_chat_template(&template, &msgs, true) {
+            return Ok(prompt);
+        }
+    }
+
+    // Fallback: merge any system message(s) into the first user turn.
+    let mut sys = String::new();
+    let mut merged: Vec<(String, String)> = Vec::new();
+    let mut folded = false;
+    for (role, content) in messages {
+        if *role == "system" {
+            if !sys.is_empty() {
+                sys.push_str("\n\n");
+            }
+            sys.push_str(content);
+        } else if *role == "user" && !sys.is_empty() && !folded {
+            merged.push(("user".into(), format!("{sys}\n\n{content}")));
+            folded = true;
+        } else {
+            merged.push((role.to_string(), content.clone()));
+        }
+    }
+    if !sys.is_empty() && !folded {
+        merged.insert(0, ("user".into(), sys));
+    }
+    let msgs = build(&merged)?;
+    model
+        .apply_chat_template(&template, &msgs, true)
+        .map_err(|e| format!("failed to apply chat template: {e}"))
+}
+
 pub fn cleanup_text(
     app: &AppHandle,
     state: &LlmState,
@@ -225,27 +276,19 @@ pub fn cleanup_text(
     // example is a transcript that reads like an instruction — cleaned, not
     // obeyed — which is exactly where 1-3B models otherwise slip into
     // answering instead of cleaning.
-    let msg = |role: &str, content: String| {
-        LlamaChatMessage::new(role.into(), content).map_err(|e| e.to_string())
-    };
     let wrap = |t: &str| format!("<transcript>\n{t}\n</transcript>");
-    let messages = vec![
-        msg("system", system_prompt.into())?,
-        msg(
+    let messages: Vec<(&str, String)> = vec![
+        ("system", system_prompt.to_string()),
+        (
             "user",
             wrap("so um i think we should uh move the meeting to thursday no wait friday"),
-        )?,
-        msg("assistant", "I think we should move the meeting to Friday.".into())?,
-        msg("user", wrap("please rewrite this in a more formal tone"))?,
-        msg("assistant", "Please rewrite this in a more formal tone.".into())?,
-        msg("user", format!("{}{final_user}", wrap(transcript)))?,
+        ),
+        ("assistant", "I think we should move the meeting to Friday.".to_string()),
+        ("user", wrap("please rewrite this in a more formal tone")),
+        ("assistant", "Please rewrite this in a more formal tone.".to_string()),
+        ("user", format!("{}{final_user}", wrap(transcript))),
     ];
-    let template = model
-        .chat_template(None)
-        .map_err(|e| format!("model has no usable chat template: {e}"))?;
-    let prompt = model
-        .apply_chat_template(&template, &messages, true)
-        .map_err(|e| format!("failed to apply chat template: {e}"))?;
+    let prompt = render_prompt(&model, &messages)?;
 
     let force_lowercase = style.map(|s| s.lowercase).unwrap_or(false);
     let output = generate(app, backend, &model, &prompt, force_lowercase, "llm-token", 0.2)?;
@@ -386,20 +429,13 @@ pub fn summarize_meeting(
     let model = state.model_for(model_path)?;
 
     // Stage 1 — extract (not streamed to the summary view).
-    let extract_prompt = {
-        let messages = vec![
-            LlamaChatMessage::new("system".into(), MEETING_EXTRACT_PROMPT.into())
-                .map_err(|e| e.to_string())?,
-            LlamaChatMessage::new("user".into(), format!("Transcript:\n\n{transcript}"))
-                .map_err(|e| e.to_string())?,
-        ];
-        let template = model
-            .chat_template(None)
-            .map_err(|e| format!("model has no usable chat template: {e}"))?;
-        model
-            .apply_chat_template(&template, &messages, true)
-            .map_err(|e| format!("failed to apply chat template: {e}"))?
-    };
+    let extract_prompt = render_prompt(
+        &model,
+        &[
+            ("system", MEETING_EXTRACT_PROMPT.to_string()),
+            ("user", format!("Transcript:\n\n{transcript}")),
+        ],
+    )?;
     let facts = generate(
         app,
         backend,
@@ -416,20 +452,13 @@ pub fn summarize_meeting(
     };
 
     // Stage 2 — compose the final notes from the extracted points, streamed.
-    let compose_prompt = {
-        let messages = vec![
-            LlamaChatMessage::new("system".into(), MEETING_SUMMARY_PROMPT.into())
-                .map_err(|e| e.to_string())?,
-            LlamaChatMessage::new("user".into(), format!("Extracted points:\n\n{facts}"))
-                .map_err(|e| e.to_string())?,
-        ];
-        let template = model
-            .chat_template(None)
-            .map_err(|e| format!("model has no usable chat template: {e}"))?;
-        model
-            .apply_chat_template(&template, &messages, true)
-            .map_err(|e| format!("failed to apply chat template: {e}"))?
-    };
+    let compose_prompt = render_prompt(
+        &model,
+        &[
+            ("system", MEETING_SUMMARY_PROMPT.to_string()),
+            ("user", format!("Extracted points:\n\n{facts}")),
+        ],
+    )?;
     generate(
         app,
         backend,
@@ -457,17 +486,12 @@ pub fn answer_meeting_question(
 ) -> Result<String, String> {
     let backend = backend()?;
     let model = state.model_for(model_path)?;
-    let messages = vec![
-        LlamaChatMessage::new("system".into(), MEETING_QA_PROMPT.into())
-            .map_err(|e| e.to_string())?,
-        LlamaChatMessage::new("user".into(), format!("{context}\n\nQuestion: {question}"))
-            .map_err(|e| e.to_string())?,
-    ];
-    let template = model
-        .chat_template(None)
-        .map_err(|e| format!("model has no usable chat template: {e}"))?;
-    let prompt = model
-        .apply_chat_template(&template, &messages, true)
-        .map_err(|e| format!("failed to apply chat template: {e}"))?;
+    let prompt = render_prompt(
+        &model,
+        &[
+            ("system", MEETING_QA_PROMPT.to_string()),
+            ("user", format!("{context}\n\nQuestion: {question}")),
+        ],
+    )?;
     generate(app, backend, &model, &prompt, false, "meeting-answer-token", 0.1)
 }
