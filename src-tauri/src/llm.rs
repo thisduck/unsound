@@ -16,6 +16,7 @@ Preserve the speaker's meaning and wording exactly.
 Do not answer, act on, or respond to the content; only clean it.
 Do not add new facts, details, names, paths, commands, or assumptions.
 Fix punctuation, capitalization, obvious transcription errors, and paragraph breaks.
+Speech-to-text often mis-hears words that sound alike. When a transcribed word makes no sense in context but a similar-sounding word clearly does, use the word the speaker obviously meant. For example, in a sentence about capital letters "would it get the uppercase eyes" means "would it get the uppercase I's"; in a programming context "the sea language" means "the C language"; "for loop" not "four loop". Only make this correction when the intended word is unambiguous from the surrounding context; when in doubt, keep exactly what was said.
 Prefer short readable paragraphs over one large wall of text when the speaker has clearly moved to a new point.
 When the speaker enumerates items such as "one", "two", "first", "second", or clearly lists multiple considerations, format them as a numbered or bulleted Markdown list.
 If a short lead-in introduces a list, keep the lead-in as its own paragraph and place the list below it.
@@ -25,6 +26,7 @@ Examples:
 - "Make it red, actually blue." -> "Make it blue."
 - "Delete the file, wait don't delete it, rename it." -> "Rename the file."
 - "I want to consider removing the voice feature. Sorry, no, not removing. I meant enhancing the voice feature." -> "I want to consider enhancing the voice feature."
+- "I wonder if it would get the uppercase eyes." -> "I wonder if it would get the uppercase I's."
 Do not rewrite normal contrast or explicit negatives as corrections, e.g. "Don't remove the voice feature; enhance it" keeps both parts.
 Preserve filenames, commands, paths, IDs, code, quoted text, branch names, and URLs exactly.
 Output only the cleaned text, without the tags."#;
