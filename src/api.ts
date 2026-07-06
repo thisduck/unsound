@@ -171,6 +171,9 @@ export const api = {
   askMeeting: (meetingId: string, modelId: string, question: string) =>
     invoke<string>("ask_meeting", { meetingId, modelId, question }),
   searchMeetings: (query: string) => invoke<SearchHit[]>("search_meetings", { query }),
+  meetingStart: (meetingId: string, modelId: string, language?: string) =>
+    invoke<void>("meeting_start", { meetingId, modelId, language: language ?? null }),
+  meetingStop: () => invoke<void>("meeting_stop"),
 
   // System-audio capture (ScreenCaptureKit; macOS 13+).
   systemAudioSupported: () => invoke<boolean>("system_audio_supported"),
@@ -197,6 +200,10 @@ export const on = {
     listen<string>("meeting-summary-token", (e) => cb(e.payload)),
   meetingAnswerToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
     listen<string>("meeting-answer-token", (e) => cb(e.payload)),
+  meetingSegments: (cb: (segs: Segment[]) => void): Promise<UnlistenFn> =>
+    listen<Segment[]>("meeting-segments", (e) => cb(e.payload)),
+  meetingToggle: (cb: () => void): Promise<UnlistenFn> =>
+    listen<void>("meeting-toggle", () => cb()),
   hotkeyToggle: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("hotkey-toggle", () => cb()),
   pttDown: (cb: () => void): Promise<UnlistenFn> => listen<void>("ptt-down", () => cb()),

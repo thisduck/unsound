@@ -1511,3 +1511,11 @@ textarea.meet-notes:focus {
   border: 1px solid var(--edge);
   border-radius: 8px;
 }
+
+/* view switching — keep both views mounted, hide the inactive one */
+.view-wrap {
+  display: contents;
+}
+.view-wrap.hidden {
+  display: none;
+}

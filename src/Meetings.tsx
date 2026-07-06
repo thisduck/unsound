@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, on, formatDuration, Meeting, ModelInfo, SearchHit } from "./api";
+import { api, on, formatDuration, Meeting, ModelInfo, SearchHit, Segment } from "./api";
 
 type Phase = "idle" | "recording" | "transcribing" | "summarizing";
 
@@ -34,9 +34,12 @@ interface Props {
   stt?: ModelInfo;
   llm?: ModelInfo;
   language: string;
+  /// Called when a meeting starts so the app can bring the Meetings view forward
+  /// (e.g. when started from the tray while another tab is showing).
+  onActivate?: () => void;
 }
 
-export function Meetings({ stt, llm, language }: Props) {
+export function Meetings({ stt, llm, language, onActivate }: Props) {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [selected, setSelected] = useState<Meeting | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -51,10 +54,15 @@ export function Meetings({ stt, llm, language }: Props) {
   const [answer, setAnswer] = useState("");
   const [asking, setAsking] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [liveSegments, setLiveSegments] = useState<Segment[]>([]);
   const activeIdRef = useRef<string | null>(null);
-  const sysStartedRef = useRef(false);
   const summaryRef = useRef(false);
   const answerRef = useRef(false);
+  const phaseRef = useRef<Phase>("idle");
+  phaseRef.current = phase;
+  // The tray-toggle listener is registered once; route it through a ref so it
+  // always sees the current phase and handlers.
+  const toggleRef = useRef<() => void>(() => {});
 
   const refresh = async () => {
     try {
@@ -73,9 +81,15 @@ export function Meetings({ stt, llm, language }: Props) {
     const sub2 = on.meetingAnswerToken((chunk) => {
       if (answerRef.current) setAnswer((a) => a + chunk);
     });
+    // Live transcript: segments finalized by the backend as the meeting runs.
+    const sub3 = on.meetingSegments((segs) => setLiveSegments((cur) => [...cur, ...segs]));
+    // Tray "Start / stop meeting".
+    const sub4 = on.meetingToggle(() => toggleRef.current());
     return () => {
       sub.then((un) => un());
       sub2.then((un) => un());
+      sub3.then((un) => un());
+      sub4.then((un) => un());
     };
   }, []);
 
@@ -136,6 +150,16 @@ export function Meetings({ stt, llm, language }: Props) {
     const id = crypto.randomUUID();
     const startedAt = new Date().toISOString();
     activeIdRef.current = id;
+    onActivate?.();
+    setSelected(null);
+    setLiveSegments([]);
+    setLiveSummary("");
+    setPhase("recording");
+    setStatus(
+      sysSupported
+        ? "recording you + the meeting — transcribing live…"
+        : "recording your mic — transcribing live…",
+    );
     try {
       await api.createMeeting({
         id,
@@ -150,22 +174,9 @@ export function Meetings({ stt, llm, language }: Props) {
         segments: [],
         segmentCount: 0,
       });
-      await api.startRecording();
-      sysStartedRef.current = false;
-      if (sysSupported) {
-        try {
-          await api.startSystemCapture();
-          sysStartedRef.current = true;
-        } catch (e) {
-          console.error("system capture failed to start", e);
-        }
-      }
-      setSelected(null);
-      setLiveSummary("");
-      setPhase("recording");
-      setStatus(
-        sysStartedRef.current ? "recording you + the meeting…" : "recording your mic…",
-      );
+      // The backend now owns capture + rolling transcription; it emits
+      // `meeting-segments` as they finalize.
+      await api.meetingStart(id, stt.id, language || undefined);
     } catch (e) {
       setError(String(e));
       setPhase("idle");
@@ -174,16 +185,18 @@ export function Meetings({ stt, llm, language }: Props) {
 
   const stopMeeting = async () => {
     const id = activeIdRef.current;
-    if (!id || !stt) return;
+    if (!id) return;
     try {
-      await api.stopRecording().catch(() => {});
-      if (sysStartedRef.current) await api.stopSystemCapture().catch(() => {});
       setPhase("transcribing");
-      setStatus("transcribing the meeting…");
-      const m = await api.transcribeMeeting(id, stt.id, language || undefined);
-      setSelected(m);
-      setNotes(m.notes);
-      if (llm) {
+      setStatus("wrapping up…");
+      // Transcription already happened live; this just flushes the tail.
+      await api.meetingStop();
+      const m = await api.getMeeting(id);
+      if (m) {
+        setSelected(m);
+        setNotes(m.notes);
+      }
+      if (llm && m && m.segments.length > 0) {
         setPhase("summarizing");
         setStatus("summarizing…");
         setLiveSummary("");
@@ -194,12 +207,20 @@ export function Meetings({ stt, llm, language }: Props) {
       }
       setPhase("idle");
       setStatus("meeting saved");
+      setLiveSegments([]);
       refresh();
     } catch (e) {
       summaryRef.current = false;
       setError(String(e));
       setPhase("idle");
     }
+  };
+
+  // Always points at the current handlers so the once-registered tray listener
+  // never sees stale state.
+  toggleRef.current = () => {
+    if (phaseRef.current === "recording") stopMeeting();
+    else if (phaseRef.current === "idle") startMeeting();
   };
 
   const saveNotes = async () => {
@@ -305,7 +326,29 @@ export function Meetings({ stt, llm, language }: Props) {
         </div>
       )}
 
-      {selected ? (
+      {phase === "recording" ? (
+        <div className="meet-detail">
+          <div className="meet-detail-meta">
+            recording · {liveSegments.length} line{liveSegments.length === 1 ? "" : "s"} so far
+          </div>
+          <section className="meet-section">
+            <h3>live transcript</h3>
+            {liveSegments.length === 0 ? (
+              <p className="dim">listening…</p>
+            ) : (
+              [...liveSegments]
+                .sort((a, b) => a.startMs - b.startMs)
+                .map((s, i) => (
+                  <div className={"seg " + (s.speaker === "me" ? "seg-me" : "seg-them")} key={i}>
+                    <span className="seg-who">{s.speaker === "me" ? "You" : "Them"}</span>
+                    <span className="seg-time">{mmss(s.startMs)}</span>
+                    <span className="seg-text">{s.text}</span>
+                  </div>
+                ))
+            )}
+          </section>
+        </div>
+      ) : selected ? (
         <div className="meet-detail">
           <div className="meet-detail-head">
             <button

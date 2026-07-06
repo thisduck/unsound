@@ -20,6 +20,9 @@ struct ActiveRecording {
     buffer: Arc<Mutex<Vec<f32>>>,
     sample_rate: u32,
     channels: u16,
+    /// How many raw samples have already been handed out by `drain_16k`, so
+    /// meeting streaming can pull only the newly-captured audio each cycle.
+    drained: usize,
 }
 
 #[derive(Default)]
@@ -155,8 +158,34 @@ pub fn start_recording(app: AppHandle, state: &AudioState, device_name: String) 
         buffer,
         sample_rate,
         channels,
+        drained: 0,
     });
     Ok(())
+}
+
+/// Pull the audio captured since the last call, as 16 kHz mono ready for
+/// Whisper — the mic side of live meeting transcription. Returns empty when
+/// not recording or nothing new has arrived. Each chunk is resampled
+/// independently; the tiny boundary discontinuity is inaudible for speech.
+pub fn drain_16k(state: &AudioState) -> Vec<f32> {
+    let mut active = state.active.lock().unwrap();
+    let Some(rec) = active.as_mut() else {
+        return Vec::new();
+    };
+    let raw = rec.buffer.lock().unwrap();
+    if raw.len() <= rec.drained {
+        return Vec::new();
+    }
+    // cpal callback buffers are frame-aligned, so `raw.len()` is always a whole
+    // number of frames — no mid-frame split to worry about.
+    let slice = raw[rec.drained..].to_vec();
+    rec.drained = raw.len();
+    let (sample_rate, channels) = (rec.sample_rate, rec.channels);
+    drop(raw);
+    drop(active);
+
+    let mono = downmix(&slice, channels);
+    resample(&mono, sample_rate, WHISPER_SAMPLE_RATE).unwrap_or_default()
 }
 
 pub fn stop_recording(state: &AudioState) -> Result<RecordingResult, String> {

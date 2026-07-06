@@ -554,9 +554,18 @@ export default function App() {
         </button>
       </header>
 
-      {view === "meetings" ? (
-        <Meetings stt={stt} llm={llm} language={language} />
-      ) : (
+      {/* Meetings stays mounted (hidden when inactive) so the tray "Start /
+          stop meeting" toggle works from any tab or with the window hidden. */}
+      <div className={"view-wrap" + (view === "meetings" ? "" : " hidden")}>
+        <Meetings
+          stt={stt}
+          llm={llm}
+          language={language}
+          onActivate={() => setView("meetings")}
+        />
+      </div>
+
+      {view === "dictate" && (
         <>
           {/* dictation view below */}
 

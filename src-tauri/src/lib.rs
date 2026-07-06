@@ -4,6 +4,7 @@ mod deliver;
 mod frontapp;
 mod hotkeys;
 mod llm;
+mod meeting;
 mod models;
 mod permissions;
 mod settings;
@@ -39,6 +40,8 @@ pub struct AppState {
     /// meeting. Separate from the mic so who-said-what stays attributable.
     #[cfg(target_os = "macos")]
     sys: syscapture::SysCaptureState,
+    /// Live meeting recording state (streaming transcription loop).
+    meeting: meeting::MeetingState,
     /// Most recent pipeline output, for the tray's "paste last take".
     pub last_output: Mutex<String>,
     /// Registered shortcut id → which mode it drives.
@@ -565,6 +568,32 @@ fn search_meetings(db: State<Db>, query: String) -> Result<Vec<store::SearchHit>
     store::search_meetings(&db, &query)
 }
 
+/// Start a live meeting: capture mic + system audio and transcribe in rolling
+/// windows, emitting `meeting-segments` as they finalize.
+#[tauri::command]
+async fn meeting_start(
+    app: AppHandle,
+    meeting_id: String,
+    model_id: String,
+    language: Option<String>,
+) -> Result<(), String> {
+    // Capture startup waits on device/stream readiness — keep it off the async runtime.
+    tauri::async_runtime::spawn_blocking(move || {
+        meeting::start_with_model(&app, meeting_id, model_id, language)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Stop the live meeting: flush the tail audio and tear down capture. The
+/// transcript is already complete, so the caller can summarize immediately.
+#[tauri::command]
+async fn meeting_stop(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || meeting::stop(&app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // ---- system-audio capture (ScreenCaptureKit spike) -------------------------
 
 #[tauri::command]
@@ -876,6 +905,8 @@ pub fn run() {
             summarize_meeting,
             ask_meeting,
             search_meetings,
+            meeting_start,
+            meeting_stop,
             system_audio_supported,
             #[cfg(target_os = "macos")]
             start_system_capture,

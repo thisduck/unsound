@@ -207,6 +207,8 @@ struct Active {
     stop_tx: mpsc::Sender<()>,
     done_rx: mpsc::Receiver<()>,
     buffer: Arc<Mutex<Vec<f32>>>,
+    /// Samples already handed out by `drain`, for live meeting streaming.
+    drained: usize,
 }
 
 /// Mirrors `AudioState`: one capture at a time, plus the finished samples.
@@ -363,8 +365,26 @@ pub fn start(state: &SysCaptureState) -> Result<(), String> {
         stop_tx,
         done_rx,
         buffer,
+        drained: 0,
     });
     Ok(())
+}
+
+/// Pull the system audio captured since the last call (already 16 kHz mono) —
+/// the "them" side of live meeting transcription. Empty when not capturing or
+/// nothing new has arrived.
+pub fn drain(state: &SysCaptureState) -> Vec<f32> {
+    let mut active = state.active.lock().unwrap();
+    let Some(a) = active.as_mut() else {
+        return Vec::new();
+    };
+    let buf = a.buffer.lock().unwrap();
+    if buf.len() <= a.drained {
+        return Vec::new();
+    }
+    let out = buf[a.drained..].to_vec();
+    a.drained = buf.len();
+    out
 }
 
 pub fn stop(state: &SysCaptureState) -> Result<CaptureResult, String> {

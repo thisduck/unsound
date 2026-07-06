@@ -11,6 +11,13 @@ pub fn build_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
     let open = MenuItem::with_id(app, "open", "Open unsound", true, None::<&str>)?;
     let paste = MenuItem::with_id(app, "paste-last", "Insert last take", true, None::<&str>)?;
 
+    let meeting_label = if crate::meeting::is_recording(app) {
+        "Stop meeting"
+    } else {
+        "Start meeting"
+    };
+    let meeting = MenuItem::with_id(app, "meeting", meeting_label, true, None::<&str>)?;
+
     let selected = settings::load(app).mic_device;
     let mut mic_items: Vec<CheckMenuItem<Wry>> = vec![CheckMenuItem::with_id(
         app,
@@ -41,6 +48,8 @@ pub fn build_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
         &[
             &open,
             &paste,
+            &PredefinedMenuItem::separator(app)?,
+            &meeting,
             &PredefinedMenuItem::separator(app)?,
             &microphone,
             &PredefinedMenuItem::separator(app)?,
@@ -87,6 +96,16 @@ fn on_menu_event(app: &AppHandle, id: &str) {
                     let _ = deliver::deliver_text(&app, &text);
                 });
             }
+        }
+        "meeting" => {
+            // Bring the window forward so the meeting is visible, then let the
+            // frontend toggle it (it owns the record/transcribe/summarize flow).
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            let _ = app.emit("meeting-toggle", ());
         }
         "quit" => app.exit(0),
         mic if mic.starts_with("mic:") => {
