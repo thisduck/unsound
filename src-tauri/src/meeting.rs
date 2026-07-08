@@ -327,6 +327,13 @@ fn run_transcribe(
     depth: Arc<AtomicI64>,
 ) {
     let mut engine = make_engine(asr_choice);
+    // Warm the model up front so the first segment of the meeting isn't slow.
+    // Moonshine/Parakeet already loaded when constructed above; whisper is lazy.
+    if let Engine::Whisper(path) = &engine {
+        if let Err(e) = app.state::<AppState>().stt.warmup(path) {
+            eprintln!("[meeting] warmup failed: {e}");
+        }
+    }
     let lang = language.as_deref();
     let prompt = initial_prompt.as_deref();
     while let Ok(job) = rx.recv() {

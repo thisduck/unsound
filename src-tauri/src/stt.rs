@@ -30,6 +30,26 @@ impl SttState {
         *loaded = Some((key, ctx.clone()));
         Ok(ctx)
     }
+
+    /// Preload the model and compile its Metal kernels by running one throwaway
+    /// decode, so the first real transcription of a meeting isn't slow.
+    pub fn warmup(&self, model_path: &Path) -> Result<(), String> {
+        let ctx = self.context_for(model_path)?;
+        let mut ws = ctx
+            .create_state()
+            .map_err(|e| format!("failed to create whisper state: {e}"))?;
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_n_threads(1);
+        params.set_language(Some("en"));
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        // ~0.3s of silence is enough to build the graph and compile kernels.
+        let warm = vec![0.0f32; 4800];
+        let _ = ws.full(params, &warm);
+        Ok(())
+    }
 }
 
 pub fn transcribe(
