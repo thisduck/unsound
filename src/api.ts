@@ -111,6 +111,9 @@ export const api = {
     invoke<string>("transcribe", { modelId, language: language ?? null, translate }),
   transcribeFile: (path: string, modelId: string, language?: string, translate = false) =>
     invoke<string>("transcribe_file", { path, modelId, language: language ?? null, translate }),
+  startLiveDictation: (modelId: string, language?: string) =>
+    invoke<void>("start_live_dictation", { modelId, language: language ?? null }),
+  stopLiveDictation: () => invoke<void>("stop_live_dictation"),
   cleanupText: (
     modelId: string,
     text: string,
@@ -232,6 +235,8 @@ export const on = {
     listen<void>("settings-changed", () => cb()),
   fileInfo: (cb: (info: { sizeBytes: number; durationSecs: number }) => void): Promise<UnlistenFn> =>
     listen<{ sizeBytes: number; durationSecs: number }>("file-info", (e) => cb(e.payload)),
+  dictationLive: (cb: (text: string) => void): Promise<UnlistenFn> =>
+    listen<string>("dictation-live", (e) => cb(e.payload)),
 };
 
 export function formatDuration(secs: number): string {

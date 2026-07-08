@@ -3,6 +3,7 @@ pub mod audio;
 pub mod audiofile;
 mod deliver;
 mod diarize;
+mod dictation;
 mod frontapp;
 mod hotkeys;
 mod llm;
@@ -44,6 +45,8 @@ pub struct AppState {
     sys: syscapture::SysCaptureState,
     /// Live meeting recording state (streaming transcription loop).
     meeting: meeting::MeetingState,
+    /// Live dictation captions state (preview transcription loop).
+    live: dictation::LiveState,
     /// Most recent pipeline output, for the tray's "paste last take".
     pub last_output: Mutex<String>,
     /// Registered shortcut id → which mode it drives.
@@ -137,6 +140,33 @@ async fn transcribe(
     .map_err(|e| e.to_string())??;
     *state.last_output.lock().unwrap() = text.clone();
     Ok(text)
+}
+
+/// Start live dictation captions: while recording, the words appear in the
+/// window as you speak. The final cleaned text still lands at stop.
+#[tauri::command]
+fn start_live_dictation(
+    app: AppHandle,
+    model_id: String,
+    language: Option<String>,
+) -> Result<(), String> {
+    let model_path = models::downloaded_model_path(&app, &model_id)?;
+    let vocab: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        settings::load(&app)
+            .dictionary
+            .iter()
+            .map(|e| e.to.trim().to_string())
+            .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
+            .collect()
+    };
+    let initial_prompt = (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
+    dictation::start(&app, model_path, language, initial_prompt)
+}
+
+#[tauri::command]
+fn stop_live_dictation(app: AppHandle) {
+    dictation::stop(&app);
 }
 
 /// Decode an uploaded audio file into the recording buffer, then run the
@@ -941,6 +971,8 @@ pub fn run() {
             stop_recording,
             transcribe,
             transcribe_file,
+            start_live_dictation,
+            stop_live_dictation,
             cleanup_text,
             default_cleanup_prompt,
             get_settings,

@@ -188,6 +188,22 @@ pub fn drain_16k(state: &AudioState) -> Vec<f32> {
     resample(&mono, sample_rate, WHISPER_SAMPLE_RATE).unwrap_or_default()
 }
 
+/// A copy of the *entire* audio captured so far, as 16 kHz mono — for live
+/// dictation captions, which re-transcribe the whole take as it grows. Unlike
+/// `drain_16k` this doesn't advance any cursor, so it never disturbs the final
+/// transcription taken at stop. Empty when not recording.
+pub fn snapshot_16k(state: &AudioState) -> Vec<f32> {
+    let active = state.active.lock().unwrap();
+    let Some(rec) = active.as_ref() else {
+        return Vec::new();
+    };
+    let raw = rec.buffer.lock().unwrap().clone();
+    let (sample_rate, channels) = (rec.sample_rate, rec.channels);
+    drop(active);
+    let mono = downmix(&raw, channels);
+    resample(&mono, sample_rate, WHISPER_SAMPLE_RATE).unwrap_or_default()
+}
+
 pub fn stop_recording(state: &AudioState) -> Result<RecordingResult, String> {
     let rec = state
         .active

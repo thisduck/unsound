@@ -59,6 +59,8 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [transcript, setTranscript] = useState("");
   const [cleaned, setCleaned] = useState("");
+  // Live caption shown while dictating (raw, tentative); cleaned text lands at stop.
+  const [liveText, setLiveText] = useState("");
   const [status, setStatus] = useState("ready — fully offline");
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -162,6 +164,9 @@ export default function App() {
       on.pttDown(() => pttRef.current("down")),
       on.pttUp(() => pttRef.current("up")),
       on.pttCancel(() => pttRef.current("cancel")),
+      on.dictationLive((t) => {
+        if (phaseRef.current === "recording") setLiveText(t);
+      }),
     ];
     // Window drag-and-drop for audio files.
     const dropUnlisten = import("@tauri-apps/api/webview").then(({ getCurrentWebview }) =>
@@ -344,6 +349,7 @@ export default function App() {
     if (phaseRef.current === "recording") {
       try {
         const res = await api.stopRecording();
+        api.stopLiveDictation().catch(() => {});
         if (fromHotkey) api.emitOverlayState("processing");
         if (res.durationSecs < 0.35) {
           changePhase("idle");
@@ -382,8 +388,14 @@ export default function App() {
         await api.startRecording();
         setTranscript("");
         setCleaned("");
+        setLiveText("");
         setRawOpen(false);
         changePhase("recording");
+        // Live captions for in-app takes (window visible); the hotkey flow uses
+        // the overlay and isn't looking at the window, so skip it there.
+        if (!fromHotkey && stt) {
+          api.startLiveDictation(stt.id, language || undefined).catch(() => {});
+        }
         if (fromHotkey) {
           await api.setOverlay(true).catch(() => {});
           api.emitOverlayState("recording");
@@ -427,6 +439,7 @@ export default function App() {
     } else if (what === "cancel" && phaseRef.current === "recording") {
       // The held key turned out to be part of a bigger combo; discard.
       api.stopRecording().catch(() => {});
+      api.stopLiveDictation().catch(() => {});
       overlayOff();
       changePhase("idle");
       setStatus("cancelled");
@@ -623,6 +636,11 @@ export default function App() {
             <button className="quiet accent" onClick={() => setSettingsOpen(true)}>
               download models to get started →
             </button>
+          </div>
+        ) : phase === "recording" ? (
+          <div className="prose dim">
+            {liveText || <span className="placeholder">listening… your words will appear here</span>}
+            <span className="caret" />
           </div>
         ) : (
           <>
