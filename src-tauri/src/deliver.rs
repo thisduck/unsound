@@ -8,7 +8,13 @@ pub fn deliver_text(app: &AppHandle, text: &str) -> Result<(), String> {
     // enigo goes through macOS input APIs that must run on the main thread
     // (they assert otherwise since macOS 26).
     let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
-    let text = text.to_string();
+    // Trail a space so back-to-back dictations don't run their words together
+    // ("hello" + "world" → "hello world"). Skip if empty or already spaced.
+    let text = if text.is_empty() || text.ends_with(char::is_whitespace) {
+        text.to_string()
+    } else {
+        format!("{text} ")
+    };
     app.run_on_main_thread(move || {
         let _ = tx.send(type_text(&text));
     })
