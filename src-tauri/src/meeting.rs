@@ -11,7 +11,7 @@
 //! Decoupling them means a slow transcription never stalls capture/VAD.
 
 use crate::store::{self, Db, Segment};
-use crate::{asr, audio, models, settings, stt, AppState};
+use crate::{asr, audio, models, settings, AppState};
 use sherpa_rs::silero_vad::{SileroVad, SileroVadConfig};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -24,26 +24,6 @@ use tauri::{AppHandle, Emitter, Manager};
 /// How often the capture thread pulls new audio and lets the VADs emit finished
 /// speech segments.
 const POLL_MS: u64 = 1000;
-
-/// Which speech model a meeting uses, resolved from the chosen model id.
-pub enum AsrChoice {
-    /// whisper.cpp model file.
-    Whisper(PathBuf),
-    /// Moonshine (sherpa-onnx) bundle directory.
-    Moonshine(PathBuf),
-    /// Parakeet TDT (sherpa-onnx) bundle directory.
-    Parakeet(PathBuf),
-}
-
-/// The live transcription engine, constructed on the transcription thread
-/// (Moonshine's recognizer is !Send, so it can't be built ahead of time).
-enum Engine {
-    Whisper(PathBuf),
-    Moonshine(asr::Moonshine),
-    Parakeet(asr::Parakeet),
-    /// Engine failed to initialize — record audio but produce no transcript.
-    None,
-}
 
 /// A unit of audio to transcribe: a finalized segment (persisted + shown as a
 /// real line) or an in-progress partial (shown tentatively, not persisted).
@@ -80,7 +60,7 @@ struct Handle {
 pub fn start(
     app: &AppHandle,
     meeting_id: String,
-    asr_choice: AsrChoice,
+    model_id: String,
     vad_path: PathBuf,
     language: Option<String>,
 ) -> Result<(), String> {
@@ -125,7 +105,7 @@ pub fn start(
     let transcribe = {
         let app = app.clone();
         std::thread::spawn(move || {
-            run_transcribe(app, meeting_id, asr_choice, language, initial_prompt, rx, depth)
+            run_transcribe(app, meeting_id, model_id, language, initial_prompt, rx, depth)
         })
     };
 
@@ -190,26 +170,6 @@ fn make_vad(vad_path: &PathBuf) -> Option<SileroVad> {
             eprintln!("[meeting] failed to init VAD: {e}");
             None
         }
-    }
-}
-
-fn make_engine(choice: AsrChoice) -> Engine {
-    match choice {
-        AsrChoice::Whisper(p) => Engine::Whisper(p),
-        AsrChoice::Moonshine(dir) => match asr::Moonshine::new(&dir) {
-            Ok(m) => Engine::Moonshine(m),
-            Err(e) => {
-                eprintln!("[meeting] Moonshine init failed: {e}");
-                Engine::None
-            }
-        },
-        AsrChoice::Parakeet(dir) => match asr::Parakeet::new(&dir) {
-            Ok(p) => Engine::Parakeet(p),
-            Err(e) => {
-                eprintln!("[meeting] Parakeet init failed: {e}");
-                Engine::None
-            }
-        },
     }
 }
 
@@ -320,16 +280,20 @@ fn handle_channel(
 fn run_transcribe(
     app: AppHandle,
     meeting_id: String,
-    asr_choice: AsrChoice,
+    model_id: String,
     language: Option<String>,
     initial_prompt: Option<String>,
     rx: mpsc::Receiver<Job>,
     depth: Arc<AtomicI64>,
 ) {
-    let mut engine = make_engine(asr_choice);
+    // Build the engine on this thread (sherpa recognizers are !Send).
+    let mut engine = asr::resolve(&app, &model_id).unwrap_or_else(|e| {
+        eprintln!("[meeting] speech engine unavailable: {e}");
+        asr::Engine::None
+    });
     // Warm the model up front so the first segment of the meeting isn't slow.
-    // Moonshine/Parakeet already loaded when constructed above; whisper is lazy.
-    if let Engine::Whisper(path) = &engine {
+    // Moonshine/Parakeet already loaded when constructed; whisper is lazy.
+    if let asr::Engine::Whisper(path) = &engine {
         if let Err(e) = app.state::<AppState>().stt.warmup(path) {
             eprintln!("[meeting] warmup failed: {e}");
         }
@@ -344,7 +308,7 @@ fn run_transcribe(
                 speaker,
                 source,
             } => {
-                let parts = transcribe_parts(&app, &mut engine, lang, prompt, &samples);
+                let parts = asr::transcribe_parts(&app, &mut engine, &samples, lang, prompt);
                 if !parts.is_empty() {
                     let segs: Vec<Segment> = parts
                         .into_iter()
@@ -365,7 +329,7 @@ fn run_transcribe(
                 }
             }
             Job::Partial { samples, speaker } => {
-                let text = transcribe_parts(&app, &mut engine, lang, prompt, &samples)
+                let text = asr::transcribe_parts(&app, &mut engine, &samples, lang, prompt)
                     .into_iter()
                     .map(|(_, _, t)| t)
                     .collect::<Vec<_>>()
@@ -382,41 +346,7 @@ fn run_transcribe(
     }
 }
 
-/// Transcribe a chunk to `(start_ms, end_ms, text)` parts using the active engine.
-fn transcribe_parts(
-    app: &AppHandle,
-    engine: &mut Engine,
-    language: Option<&str>,
-    initial_prompt: Option<&str>,
-    samples: &[f32],
-) -> Vec<(i64, i64, String)> {
-    match engine {
-        Engine::Whisper(path) => {
-            let st = app.state::<AppState>();
-            stt::transcribe_segments(&st.stt, path, samples, language, initial_prompt)
-                .unwrap_or_else(|e| {
-                    eprintln!("[meeting] transcription failed: {e}");
-                    Vec::new()
-                })
-        }
-        Engine::Moonshine(m) => text_part(m.transcribe(samples), samples.len()),
-        Engine::Parakeet(p) => text_part(p.transcribe(samples), samples.len()),
-        Engine::None => Vec::new(),
-    }
-}
-
-/// Wrap a whole-chunk transcription (Moonshine/Parakeet return plain text) as a
-/// single timestamped part spanning the chunk.
-fn text_part(text: String, n_samples: usize) -> Vec<(i64, i64, String)> {
-    if text.is_empty() {
-        Vec::new()
-    } else {
-        let dur_ms = n_samples as i64 * 1000 / audio::WHISPER_SAMPLE_RATE as i64;
-        vec![(0, dur_ms, text)]
-    }
-}
-
-/// Resolve model paths and start a meeting (used by the command layer).
+/// Validate models are present and start a meeting (used by the command layer).
 pub fn start_with_model(
     app: &AppHandle,
     meeting_id: String,
@@ -424,15 +354,8 @@ pub fn start_with_model(
     language: Option<String>,
 ) -> Result<(), String> {
     let vad_path = models::downloaded_model_path(app, "vad-silero")?;
-    let info = models::find_model(app, &model_id)?;
-    let path = models::downloaded_model_path(app, &model_id)?;
-    // Bundle (multi-file) speech models are sherpa-onnx; single files are whisper.
-    let asr_choice = if info.files.is_empty() {
-        AsrChoice::Whisper(path)
-    } else if model_id.starts_with("parakeet") {
-        AsrChoice::Parakeet(path)
-    } else {
-        AsrChoice::Moonshine(path)
-    };
-    start(app, meeting_id, asr_choice, vad_path, language)
+    // Surface a missing speech model early; the engine itself is built on the
+    // transcription thread (sherpa recognizers are !Send).
+    models::downloaded_model_path(app, &model_id)?;
+    start(app, meeting_id, model_id, vad_path, language)
 }

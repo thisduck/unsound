@@ -110,27 +110,16 @@ async fn transcribe(
     model_id: String,
     language: Option<String>,
 ) -> Result<String, String> {
-    let model_path = models::downloaded_model_path(&app, &model_id)?;
     let samples = state.audio.last_recording.lock().unwrap().clone();
-    // The user's corrected vocabulary biases recognition.
-    let vocab: Vec<String> = {
-        let mut seen = std::collections::HashSet::new();
-        settings::load(&app)
-            .dictionary
-            .iter()
-            .map(|e| e.to.trim().to_string())
-            .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
-            .collect()
-    };
-    let initial_prompt =
-        (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
-    // Whisper inference is heavy; keep it off the async runtime.
+    let initial_prompt = vocab_prompt(&app);
+    // Inference is heavy; keep it off the async runtime. The engine (whisper or
+    // a sherpa model) is resolved on the blocking thread.
     let worker_app = app.clone();
     let text = tauri::async_runtime::spawn_blocking(move || {
-        let state = worker_app.state::<AppState>();
-        stt::transcribe(
-            &state.stt,
-            &model_path,
+        let mut engine = asr::resolve(&worker_app, &model_id)?;
+        asr::transcribe_text(
+            &worker_app,
+            &mut engine,
             &samples,
             language.as_deref(),
             initial_prompt.as_deref(),
@@ -142,6 +131,19 @@ async fn transcribe(
     Ok(text)
 }
 
+/// The user's corrected vocabulary, as a Whisper `initial_prompt` that biases
+/// recognition toward names/jargon.
+fn vocab_prompt(app: &AppHandle) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    let vocab: Vec<String> = settings::load(app)
+        .dictionary
+        .iter()
+        .map(|e| e.to.trim().to_string())
+        .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
+        .collect();
+    (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")))
+}
+
 /// Start live dictation captions: while recording, the words appear in the
 /// window as you speak. The final cleaned text still lands at stop.
 #[tauri::command]
@@ -150,18 +152,10 @@ fn start_live_dictation(
     model_id: String,
     language: Option<String>,
 ) -> Result<(), String> {
-    let model_path = models::downloaded_model_path(&app, &model_id)?;
-    let vocab: Vec<String> = {
-        let mut seen = std::collections::HashSet::new();
-        settings::load(&app)
-            .dictionary
-            .iter()
-            .map(|e| e.to.trim().to_string())
-            .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
-            .collect()
-    };
-    let initial_prompt = (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
-    dictation::start(&app, model_path, language, initial_prompt)
+    // Validate the model is present; the engine is built on the live thread.
+    models::downloaded_model_path(&app, &model_id)?;
+    let initial_prompt = vocab_prompt(&app);
+    dictation::start(&app, model_id, language, initial_prompt)
 }
 
 #[tauri::command]
@@ -179,7 +173,6 @@ async fn transcribe_file(
     model_id: String,
     language: Option<String>,
 ) -> Result<String, String> {
-    let model_path = models::downloaded_model_path(&app, &model_id)?;
     let file = std::path::PathBuf::from(&path);
     let size_bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
     let decode_file = file.clone();
@@ -199,22 +192,13 @@ async fn transcribe_file(
     );
     *state.audio.last_recording.lock().unwrap() = samples.clone();
 
-    let vocab: Vec<String> = {
-        let mut seen = std::collections::HashSet::new();
-        settings::load(&app)
-            .dictionary
-            .iter()
-            .map(|e| e.to.trim().to_string())
-            .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
-            .collect()
-    };
-    let initial_prompt = (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
+    let initial_prompt = vocab_prompt(&app);
     let worker_app = app.clone();
     let text = tauri::async_runtime::spawn_blocking(move || {
-        let state = worker_app.state::<AppState>();
-        stt::transcribe(
-            &state.stt,
-            &model_path,
+        let mut engine = asr::resolve(&worker_app, &model_id)?;
+        asr::transcribe_text(
+            &worker_app,
+            &mut engine,
             &samples,
             language.as_deref(),
             initial_prompt.as_deref(),

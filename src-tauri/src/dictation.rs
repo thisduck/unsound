@@ -4,8 +4,7 @@
 //! authoritative transcription + cleanup still happens once at stop (this only
 //! drives the live preview and, as a bonus, warms the model).
 
-use crate::{audio, stt, AppState};
-use std::path::PathBuf;
+use crate::{asr, audio, AppState};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -26,7 +25,7 @@ struct Handle {
 
 pub fn start(
     app: &AppHandle,
-    model_path: PathBuf,
+    model_id: String,
     language: Option<String>,
     initial_prompt: Option<String>,
 ) -> Result<(), String> {
@@ -39,7 +38,7 @@ pub fn start(
     let stop_thread = stop.clone();
     let app_thread = app.clone();
     let join = std::thread::spawn(move || {
-        run_live(app_thread, model_path, language, initial_prompt, stop_thread)
+        run_live(app_thread, model_id, language, initial_prompt, stop_thread)
     });
     *active = Some(Handle {
         stop,
@@ -66,11 +65,21 @@ pub fn stop(app: &AppHandle) {
 
 fn run_live(
     app: AppHandle,
-    model_path: PathBuf,
+    model_id: String,
     language: Option<String>,
     initial_prompt: Option<String>,
     stop: Arc<AtomicBool>,
 ) {
+    // Build the engine once on this thread (sherpa recognizers are !Send).
+    let mut engine = match asr::resolve(&app, &model_id) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("[dictation] live captions unavailable: {e}");
+            return;
+        }
+    };
+    let lang = language.as_deref();
+    let prompt = initial_prompt.as_deref();
     loop {
         let mut waited = 0;
         while waited < POLL_MS / 100 && !stop.load(Ordering::Relaxed) {
@@ -80,18 +89,11 @@ fn run_live(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        let st = app.state::<AppState>();
-        let samples = audio::snapshot_16k(&st.audio);
+        let samples = audio::snapshot_16k(&app.state::<AppState>().audio);
         if samples.len() < 1600 {
             continue;
         }
-        if let Ok(text) = stt::transcribe(
-            &st.stt,
-            &model_path,
-            &samples,
-            language.as_deref(),
-            initial_prompt.as_deref(),
-        ) {
+        if let Ok(text) = asr::transcribe_text(&app, &mut engine, &samples, lang, prompt) {
             if !text.is_empty() {
                 let _ = app.emit("dictation-live", text);
             }

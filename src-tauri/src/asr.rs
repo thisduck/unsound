@@ -3,9 +3,11 @@
 //! only option for non-English. The recognizer holds a raw sherpa pointer, so
 //! it is not Send and must live on the thread that uses it (the meeting loop).
 
+use crate::{models, stt, AppState};
 use sherpa_rs::moonshine::{MoonshineConfig, MoonshineRecognizer};
 use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager};
 
 pub struct Moonshine {
     rec: MoonshineRecognizer,
@@ -70,5 +72,82 @@ impl Parakeet {
             .transcribe(crate::audio::WHISPER_SAMPLE_RATE, samples)
             .trim()
             .to_string()
+    }
+}
+
+/// The active speech engine. Whisper uses the shared cached context in
+/// `AppState.stt`; the sherpa recognizers (Moonshine/Parakeet) own their model
+/// and are !Send, so an `Engine` must be built and used on one thread.
+pub enum Engine {
+    Whisper(PathBuf),
+    Moonshine(Moonshine),
+    Parakeet(Parakeet),
+    /// Failed to initialize — callers produce no transcript.
+    None,
+}
+
+/// Resolve the selected STT model id into a ready engine. For sherpa models
+/// this loads the recognizer, so call it on the thread that will use it.
+pub fn resolve(app: &AppHandle, model_id: &str) -> Result<Engine, String> {
+    let info = models::find_model(app, model_id)?;
+    let path = models::downloaded_model_path(app, model_id)?;
+    if info.files.is_empty() {
+        Ok(Engine::Whisper(path))
+    } else if model_id.starts_with("parakeet") {
+        Ok(Engine::Parakeet(Parakeet::new(&path)?))
+    } else {
+        Ok(Engine::Moonshine(Moonshine::new(&path)?))
+    }
+}
+
+fn text_part(text: String, n_samples: usize) -> Vec<(i64, i64, String)> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        let dur_ms = n_samples as i64 * 1000 / crate::audio::WHISPER_SAMPLE_RATE as i64;
+        vec![(0, dur_ms, text)]
+    }
+}
+
+/// Transcribe a chunk to timestamped `(start_ms, end_ms, text)` parts (used by
+/// the meeting pipeline, which needs a timeline).
+pub fn transcribe_parts(
+    app: &AppHandle,
+    engine: &mut Engine,
+    samples: &[f32],
+    language: Option<&str>,
+    initial_prompt: Option<&str>,
+) -> Vec<(i64, i64, String)> {
+    match engine {
+        Engine::Whisper(path) => {
+            let st = app.state::<AppState>();
+            stt::transcribe_segments(&st.stt, path, samples, language, initial_prompt)
+                .unwrap_or_else(|e| {
+                    eprintln!("[asr] transcription failed: {e}");
+                    Vec::new()
+                })
+        }
+        Engine::Moonshine(m) => text_part(m.transcribe(samples), samples.len()),
+        Engine::Parakeet(p) => text_part(p.transcribe(samples), samples.len()),
+        Engine::None => Vec::new(),
+    }
+}
+
+/// Transcribe a chunk to a single plain string (used by dictation).
+pub fn transcribe_text(
+    app: &AppHandle,
+    engine: &mut Engine,
+    samples: &[f32],
+    language: Option<&str>,
+    initial_prompt: Option<&str>,
+) -> Result<String, String> {
+    match engine {
+        Engine::Whisper(path) => {
+            let st = app.state::<AppState>();
+            stt::transcribe(&st.stt, path, samples, language, initial_prompt)
+        }
+        Engine::Moonshine(m) => Ok(m.transcribe(samples)),
+        Engine::Parakeet(p) => Ok(p.transcribe(samples)),
+        Engine::None => Ok(String::new()),
     }
 }
