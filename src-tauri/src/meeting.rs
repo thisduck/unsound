@@ -3,25 +3,26 @@
 //! ends. Segments are persisted and emitted live, so when the meeting stops the
 //! transcript is already complete and only the summary remains.
 //!
-//! Chunking is driven by voice-activity detection (Silero VAD), not a fixed
-//! clock: each channel's audio is cut on natural pauses, so words are never
-//! split at an arbitrary window boundary and silence is skipped for free.
-//!
-//! Transcription uses whisper by default, or Moonshine (sherpa-onnx) when the
-//! chosen speech model is that bundle — see `AsrChoice`.
+//! The pipeline is split across two threads connected by a queue:
+//!   • the **capture** thread drains audio, runs Silero VAD, and pushes each
+//!     finished speech segment onto the queue (cutting on natural pauses so
+//!     words are never split mid-word);
+//!   • the **transcription** thread drains the queue and transcribes.
+//! Decoupling them means a slow transcription never stalls capture/VAD.
 
 use crate::store::{self, Db, Segment};
 use crate::{asr, audio, models, settings, stt, AppState};
 use sherpa_rs::silero_vad::{SileroVad, SileroVadConfig};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// How often the loop pulls new audio and lets the VADs emit finished speech
-/// segments. Shorter than the old fixed window → more responsive live captions.
+/// How often the capture thread pulls new audio and lets the VADs emit finished
+/// speech segments.
 const POLL_MS: u64 = 1000;
 
 /// Which speech model a meeting uses, resolved from the chosen model id.
@@ -32,13 +33,21 @@ pub enum AsrChoice {
     Moonshine(PathBuf),
 }
 
-/// The live transcription engine, constructed on the meeting worker thread
+/// The live transcription engine, constructed on the transcription thread
 /// (Moonshine's recognizer is !Send, so it can't be built ahead of time).
 enum Engine {
     Whisper(PathBuf),
     Moonshine(asr::Moonshine),
     /// Engine failed to initialize — record audio but produce no transcript.
     None,
+}
+
+/// A finished speech segment awaiting transcription.
+struct Job {
+    samples: Vec<f32>,
+    base_ms: i64,
+    speaker: &'static str,
+    source: &'static str,
 }
 
 #[derive(Default)]
@@ -50,7 +59,8 @@ pub struct MeetingState {
 
 struct Handle {
     stop: Arc<AtomicBool>,
-    join: Option<JoinHandle<()>>,
+    capture: Option<JoinHandle<()>>,
+    transcribe: Option<JoinHandle<()>>,
 }
 
 /// Begin recording + live transcription. Returns once capture is running.
@@ -86,36 +96,45 @@ pub fn start(
     }
 
     let stop = Arc::new(AtomicBool::new(false));
-    let stop_thread = stop.clone();
-    let app_thread = app.clone();
-    let join = std::thread::spawn(move || {
-        run_loop(
-            app_thread,
-            meeting_id,
-            asr_choice,
-            vad_path,
-            language,
-            initial_prompt,
-            stop_thread,
-        );
-    });
+    let (tx, rx) = mpsc::channel::<Job>();
+
+    // Capture thread (producer): audio → VAD → queue.
+    let capture = {
+        let app = app.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || run_capture(app, vad_path, stop, tx))
+    };
+    // Transcription thread (consumer): queue → text → persist + emit.
+    let transcribe = {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            run_transcribe(app, meeting_id, asr_choice, language, initial_prompt, rx)
+        })
+    };
 
     *active = Some(Handle {
         stop,
-        join: Some(join),
+        capture: Some(capture),
+        transcribe: Some(transcribe),
     });
     *st.meeting.recording.lock().unwrap() = true;
     crate::tray::refresh_menu(app);
     Ok(())
 }
 
-/// Stop the loop (final VAD flush) then tear down capture.
+/// Stop capture (final VAD flush), then wait for the queue to drain so the
+/// transcript is complete before we return (and summarize).
 pub fn stop(app: &AppHandle) -> Result<(), String> {
     let st = app.state::<AppState>();
     let handle = st.meeting.active.lock().unwrap().take();
     if let Some(mut h) = handle {
         h.stop.store(true, Ordering::Relaxed);
-        if let Some(j) = h.join.take() {
+        // Capture finishes first (final flush + drops the queue sender)…
+        if let Some(j) = h.capture.take() {
+            let _ = j.join();
+        }
+        // …then the transcription thread drains what's left and exits.
+        if let Some(j) = h.transcribe.take() {
             let _ = j.join();
         }
     }
@@ -170,16 +189,9 @@ fn make_engine(choice: AsrChoice) -> Engine {
     }
 }
 
-fn run_loop(
-    app: AppHandle,
-    meeting_id: String,
-    asr_choice: AsrChoice,
-    vad_path: PathBuf,
-    language: Option<String>,
-    initial_prompt: Option<String>,
-    stop: Arc<AtomicBool>,
-) {
-    let mut engine = make_engine(asr_choice);
+// ---- capture thread (producer) ---------------------------------------------
+
+fn run_capture(app: AppHandle, vad_path: PathBuf, stop: Arc<AtomicBool>, tx: mpsc::Sender<Job>) {
     let mut mic_vad = make_vad(&vad_path);
     #[cfg(target_os = "macos")]
     let mut sys_vad = make_vad(&vad_path);
@@ -222,100 +234,111 @@ fn run_loop(
         }
 
         if let Some(v) = mic_vad.as_mut() {
-            drain_vad(
-                &app,
-                &meeting_id,
-                language.as_deref(),
-                initial_prompt.as_deref(),
-                v,
-                &mut engine,
-                "me",
-                "mic",
-            );
+            push_finals(&tx, v, "me", "mic");
         }
         #[cfg(target_os = "macos")]
         if let Some(v) = sys_vad.as_mut() {
-            drain_vad(
-                &app,
-                &meeting_id,
-                language.as_deref(),
-                initial_prompt.as_deref(),
-                v,
-                &mut engine,
-                "them",
-                "system",
-            );
+            push_finals(&tx, v, "them", "system");
         }
 
         if stopping {
             break;
         }
     }
+    // `tx` drops here, signaling the transcription thread to finish.
 }
 
-/// Transcribe every finished speech segment the VAD has queued and emit it.
-#[allow(clippy::too_many_arguments)]
-fn drain_vad(
-    app: &AppHandle,
-    meeting_id: &str,
-    language: Option<&str>,
-    initial_prompt: Option<&str>,
-    vad: &mut SileroVad,
-    engine: &mut Engine,
-    speaker: &str,
-    source: &str,
-) {
-    let sr = audio::WHISPER_SAMPLE_RATE as i64;
+/// Push every finished speech segment the VAD has queued onto the work queue.
+fn push_finals(tx: &mpsc::Sender<Job>, vad: &mut SileroVad, speaker: &'static str, source: &'static str) {
     while !vad.is_empty() {
         let seg = vad.front();
         vad.pop();
         // seg.start is the sample index into everything fed to this VAD, i.e.
         // the position on the meeting timeline; convert to milliseconds.
-        let base_ms = seg.start as i64 * 1000 / sr;
-        let dur_ms = seg.samples.len() as i64 * 1000 / sr;
-
-        let parts: Vec<(i64, i64, String)> = match engine {
-            Engine::Whisper(path) => {
-                let st = app.state::<AppState>();
-                match stt::transcribe_segments(&st.stt, path, &seg.samples, language, initial_prompt)
-                {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("[meeting] segment transcription failed: {e}");
-                        continue;
-                    }
-                }
-            }
-            Engine::Moonshine(m) => {
-                let text = m.transcribe(&seg.samples);
-                if text.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![(0, dur_ms, text)]
-                }
-            }
-            Engine::None => Vec::new(),
-        };
-        if parts.is_empty() {
-            continue;
-        }
-        let segs: Vec<Segment> = parts
-            .into_iter()
-            .map(|(s, e, text)| Segment {
-                id: 0,
-                speaker: speaker.to_string(),
-                source: source.to_string(),
-                start_ms: base_ms + s,
-                end_ms: base_ms + e,
-                text,
-            })
-            .collect();
-        let db = app.state::<Db>();
-        if let Err(e) = store::add_segments(&db, meeting_id, &segs) {
-            eprintln!("[meeting] failed to persist segments: {e}");
-        }
-        let _ = app.emit("meeting-segments", &segs);
+        let base_ms = seg.start as i64 * 1000 / audio::WHISPER_SAMPLE_RATE as i64;
+        let _ = tx.send(Job {
+            samples: seg.samples,
+            base_ms,
+            speaker,
+            source,
+        });
     }
+}
+
+// ---- transcription thread (consumer) ---------------------------------------
+
+fn run_transcribe(
+    app: AppHandle,
+    meeting_id: String,
+    asr_choice: AsrChoice,
+    language: Option<String>,
+    initial_prompt: Option<String>,
+    rx: mpsc::Receiver<Job>,
+) {
+    let mut engine = make_engine(asr_choice);
+    while let Ok(job) = rx.recv() {
+        transcribe_job(
+            &app,
+            &meeting_id,
+            &mut engine,
+            language.as_deref(),
+            initial_prompt.as_deref(),
+            job,
+        );
+    }
+}
+
+fn transcribe_job(
+    app: &AppHandle,
+    meeting_id: &str,
+    engine: &mut Engine,
+    language: Option<&str>,
+    initial_prompt: Option<&str>,
+    job: Job,
+) {
+    let sr = audio::WHISPER_SAMPLE_RATE as i64;
+    let dur_ms = job.samples.len() as i64 * 1000 / sr;
+
+    let parts: Vec<(i64, i64, String)> = match engine {
+        Engine::Whisper(path) => {
+            let st = app.state::<AppState>();
+            match stt::transcribe_segments(&st.stt, path, &job.samples, language, initial_prompt) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[meeting] segment transcription failed: {e}");
+                    return;
+                }
+            }
+        }
+        Engine::Moonshine(m) => {
+            let text = m.transcribe(&job.samples);
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![(0, dur_ms, text)]
+            }
+        }
+        Engine::None => Vec::new(),
+    };
+    if parts.is_empty() {
+        return;
+    }
+    let segs: Vec<Segment> = parts
+        .into_iter()
+        .map(|(s, e, text)| Segment {
+            id: 0,
+            speaker: job.speaker.to_string(),
+            source: job.source.to_string(),
+            start_ms: job.base_ms + s,
+            end_ms: job.base_ms + e,
+            text,
+        })
+        .collect();
+    let db = app.state::<Db>();
+    if let Err(e) = store::add_segments(&db, meeting_id, &segs) {
+        eprintln!("[meeting] failed to persist segments: {e}");
+    }
+    let _ = app.emit("meeting-segments", &segs);
 }
 
 /// Resolve model paths and start a meeting (used by the command layer).
