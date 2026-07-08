@@ -403,6 +403,20 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "Low-latency English transcription for live meetings. English only.",
             "English",
         ),
+        mb(
+            "parakeet-tdt-v3",
+            "Parakeet TDT v3 (multilingual, fast)",
+            ModelKind::Stt,
+            &[
+                "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/encoder.int8.onnx",
+                "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/decoder.int8.onnx",
+                "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/joiner.int8.onnx",
+                "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/tokens.txt",
+            ],
+            680 * MB,
+            "Fast, accurate transcription for live meetings; ~25 European languages.",
+            "Multilingual · ~25 languages",
+        ),
     ]
 }
 

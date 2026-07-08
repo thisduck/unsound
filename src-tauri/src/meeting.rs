@@ -31,6 +31,8 @@ pub enum AsrChoice {
     Whisper(PathBuf),
     /// Moonshine (sherpa-onnx) bundle directory.
     Moonshine(PathBuf),
+    /// Parakeet TDT (sherpa-onnx) bundle directory.
+    Parakeet(PathBuf),
 }
 
 /// The live transcription engine, constructed on the transcription thread
@@ -38,6 +40,7 @@ pub enum AsrChoice {
 enum Engine {
     Whisper(PathBuf),
     Moonshine(asr::Moonshine),
+    Parakeet(asr::Parakeet),
     /// Engine failed to initialize — record audio but produce no transcript.
     None,
 }
@@ -197,6 +200,13 @@ fn make_engine(choice: AsrChoice) -> Engine {
             Ok(m) => Engine::Moonshine(m),
             Err(e) => {
                 eprintln!("[meeting] Moonshine init failed: {e}");
+                Engine::None
+            }
+        },
+        AsrChoice::Parakeet(dir) => match asr::Parakeet::new(&dir) {
+            Ok(p) => Engine::Parakeet(p),
+            Err(e) => {
+                eprintln!("[meeting] Parakeet init failed: {e}");
                 Engine::None
             }
         },
@@ -382,16 +392,20 @@ fn transcribe_parts(
                     Vec::new()
                 })
         }
-        Engine::Moonshine(m) => {
-            let dur_ms = samples.len() as i64 * 1000 / audio::WHISPER_SAMPLE_RATE as i64;
-            let text = m.transcribe(samples);
-            if text.is_empty() {
-                Vec::new()
-            } else {
-                vec![(0, dur_ms, text)]
-            }
-        }
+        Engine::Moonshine(m) => text_part(m.transcribe(samples), samples.len()),
+        Engine::Parakeet(p) => text_part(p.transcribe(samples), samples.len()),
         Engine::None => Vec::new(),
+    }
+}
+
+/// Wrap a whole-chunk transcription (Moonshine/Parakeet return plain text) as a
+/// single timestamped part spanning the chunk.
+fn text_part(text: String, n_samples: usize) -> Vec<(i64, i64, String)> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        let dur_ms = n_samples as i64 * 1000 / audio::WHISPER_SAMPLE_RATE as i64;
+        vec![(0, dur_ms, text)]
     }
 }
 
@@ -405,9 +419,11 @@ pub fn start_with_model(
     let vad_path = models::downloaded_model_path(app, "vad-silero")?;
     let info = models::find_model(app, &model_id)?;
     let path = models::downloaded_model_path(app, &model_id)?;
-    // A multi-file (bundle) speech model is Moonshine; otherwise whisper.
+    // Bundle (multi-file) speech models are sherpa-onnx; single files are whisper.
     let asr_choice = if info.files.is_empty() {
         AsrChoice::Whisper(path)
+    } else if model_id.starts_with("parakeet") {
+        AsrChoice::Parakeet(path)
     } else {
         AsrChoice::Moonshine(path)
     };
