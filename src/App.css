@@ -1649,3 +1649,9 @@ textarea.meet-notes:focus {
   line-height: 1.4;
   margin: 4px 0 0;
 }
+
+/* tentative (in-progress) transcript line */
+.seg-partial {
+  opacity: 0.5;
+  font-style: italic;
+}

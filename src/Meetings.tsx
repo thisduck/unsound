@@ -75,6 +75,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const [asking, setAsking] = useState(false);
   const [testing, setTesting] = useState(false);
   const [liveSegments, setLiveSegments] = useState<Segment[]>([]);
+  // Tentative in-progress transcript per channel ("me"/"them"), shown dimmed.
+  const [partials, setPartials] = useState<Record<string, string>>({});
   // Meeting-specific model choices (persisted, independent of the dictate tab).
   const [meetingSttId, setMeetingSttId] = useState(
     () => localStorage.getItem("unsound.meeting.stt") ?? "",
@@ -138,7 +140,18 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       if (answerRef.current) setAnswer((a) => a + chunk);
     });
     // Live transcript: segments finalized by the backend as the meeting runs.
-    const sub3 = on.meetingSegments((segs) => setLiveSegments((cur) => [...cur, ...segs]));
+    // A finalized segment supersedes that channel's partial.
+    const sub3 = on.meetingSegments((segs) => {
+      setLiveSegments((cur) => [...cur, ...segs]);
+      setPartials((cur) => {
+        const next = { ...cur };
+        for (const s of segs) delete next[s.speaker];
+        return next;
+      });
+    });
+    const sub5 = on.meetingPartial(({ speaker, text }) =>
+      setPartials((cur) => ({ ...cur, [speaker]: text })),
+    );
     // Tray "Start / stop meeting".
     const sub4 = on.meetingToggle(() => toggleRef.current());
     return () => {
@@ -146,6 +159,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       sub2.then((un) => un());
       sub3.then((un) => un());
       sub4.then((un) => un());
+      sub5.then((un) => un());
     };
   }, []);
 
@@ -209,6 +223,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     onActivate?.();
     setSelected(null);
     setLiveSegments([]);
+    setPartials({});
     setLiveSummary("");
     setPhase("recording");
     setStatus(
@@ -278,6 +293,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       setPhase("idle");
       setStatus("meeting saved");
       setLiveSegments([]);
+      setPartials({});
       refresh();
     } catch (e) {
       summaryRef.current = false;
@@ -413,7 +429,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
           </div>
           <section className="meet-section">
             <h3>live transcript</h3>
-            {liveSegments.length === 0 ? (
+            {liveSegments.length === 0 && Object.keys(partials).length === 0 ? (
               <p className="dim">listening…</p>
             ) : (
               [...liveSegments]
@@ -426,6 +442,13 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
                   </div>
                 ))
             )}
+            {Object.entries(partials).map(([speaker, text]) => (
+              <div className={"seg seg-partial " + speakerClass(speaker)} key={"partial-" + speaker}>
+                <span className="seg-who">{speakerLabel(speaker)}</span>
+                <span className="seg-time">…</span>
+                <span className="seg-text">{text}</span>
+              </div>
+            ))}
           </section>
         </div>
       ) : selected ? (

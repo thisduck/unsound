@@ -211,6 +211,8 @@ export const on = {
     listen<string>("meeting-answer-token", (e) => cb(e.payload)),
   meetingSegments: (cb: (segs: Segment[]) => void): Promise<UnlistenFn> =>
     listen<Segment[]>("meeting-segments", (e) => cb(e.payload)),
+  meetingPartial: (cb: (p: { speaker: string; text: string }) => void): Promise<UnlistenFn> =>
+    listen<{ speaker: string; text: string }>("meeting-partial", (e) => cb(e.payload)),
   meetingToggle: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("meeting-toggle", () => cb()),
   hotkeyToggle: (cb: () => void): Promise<UnlistenFn> =>
