@@ -463,6 +463,17 @@ pub fn set_speaker_name(db: &Db, meeting_id: &str, speaker: &str, name: &str) ->
     Ok(())
 }
 
+/// Edit one segment's transcript text.
+pub fn update_segment_text(db: &Db, segment_id: i64, text: &str) -> Result<(), String> {
+    let conn = db.0.lock().unwrap();
+    conn.execute(
+        "UPDATE segments SET text = ?2 WHERE id = ?1",
+        params![segment_id, text],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Relabel segments' speakers by id (used after diarization assigns Speaker N).
 pub fn update_segment_speakers(db: &Db, updates: &[(i64, String)]) -> Result<(), String> {
     let mut conn = db.0.lock().unwrap();

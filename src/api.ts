@@ -170,6 +170,8 @@ export const api = {
     invoke<void>("set_speaker_name", { meetingId, speaker, name }),
   setMeetingSummary: (id: string, summary: string) =>
     invoke<void>("set_meeting_summary", { id, summary }),
+  updateSegmentText: (segmentId: number, text: string) =>
+    invoke<void>("update_segment_text", { segmentId, text }),
   renameMeeting: (id: string, title: string) => invoke<void>("rename_meeting", { id, title }),
   deleteMeeting: (id: string) => invoke<void>("delete_meeting", { id }),
   listMeetings: () => invoke<Meeting[]>("list_meetings"),

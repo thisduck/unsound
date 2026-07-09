@@ -1676,3 +1676,20 @@ textarea.meet-notes:focus {
   outline: none;
   border-color: var(--accent);
 }
+
+/* editable summary + transcript */
+textarea.meet-summary {
+  min-height: 160px;
+}
+.seg-editable {
+  border-radius: 4px;
+  padding: 1px 3px;
+}
+.seg-editable:hover {
+  background: var(--panel);
+}
+.seg-editable:focus {
+  outline: none;
+  background: var(--panel);
+  box-shadow: 0 0 0 1px var(--accent);
+}

@@ -425,6 +425,11 @@ fn set_meeting_summary(db: State<Db>, id: String, summary: String) -> Result<(),
 }
 
 #[tauri::command]
+fn update_segment_text(db: State<Db>, segment_id: i64, text: String) -> Result<(), String> {
+    store::update_segment_text(&db, segment_id, &text)
+}
+
+#[tauri::command]
 fn rename_meeting(db: State<Db>, id: String, title: String) -> Result<(), String> {
     store::rename_meeting(&db, &id, &title)
 }
@@ -994,6 +999,7 @@ pub fn run() {
             update_meeting_notes,
             set_speaker_name,
             set_meeting_summary,
+            update_segment_text,
             rename_meeting,
             delete_meeting,
             list_meetings,

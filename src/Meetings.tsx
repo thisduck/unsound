@@ -366,6 +366,30 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     }
   };
 
+  const saveSummaryEdit = async (text: string) => {
+    if (!selected || text === selected.summary) return;
+    try {
+      await api.setMeetingSummary(selected.id, text);
+      setSelected((cur) => (cur ? { ...cur, summary: text } : cur));
+    } catch (e) {
+      console.error("failed to save summary", e);
+    }
+  };
+
+  const saveSegmentText = async (seg: Segment, text: string) => {
+    if (!seg.id || text === seg.text) return;
+    try {
+      await api.updateSegmentText(seg.id, text);
+      setSelected((cur) =>
+        cur
+          ? { ...cur, segments: cur.segments.map((s) => (s.id === seg.id ? { ...s, text } : s)) }
+          : cur,
+      );
+    } catch (e) {
+      console.error("failed to save segment", e);
+    }
+  };
+
   const saveNotes = async () => {
     if (!selected) return;
     try {
@@ -549,13 +573,22 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
             {elapsed(selected.startedAt, selected.endedAt)}
           </div>
 
-          {(selected.summary || liveSummary) && (
+          {(selected.summary || liveSummary || phase === "summarizing") && (
             <section className="meet-section">
               <h3>summary</h3>
-              <div className="prose meet-prose">
-                {liveSummary || selected.summary}
-                {phase === "summarizing" && <span className="caret" />}
-              </div>
+              {phase === "summarizing" ? (
+                <div className="prose meet-prose">
+                  {liveSummary}
+                  <span className="caret" />
+                </div>
+              ) : (
+                <textarea
+                  className="meet-notes meet-summary"
+                  key={"sum-" + selected.id}
+                  defaultValue={selected.summary}
+                  onBlur={(e) => saveSummaryEdit(e.target.value)}
+                />
+              )}
             </section>
           )}
 
@@ -631,7 +664,14 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
                   <div className={"seg " + speakerClass(s.speaker)} key={s.id ?? i}>
                     <span className="seg-who">{speakerLabel(s.speaker, selected.speakerNames)}</span>
                     <span className="seg-time">{mmss(s.startMs)}</span>
-                    <span className="seg-text">{s.text}</span>
+                    <span
+                      className="seg-text seg-editable"
+                      contentEditable
+                      suppressContentEditableWarning
+                      onBlur={(e) => saveSegmentText(s, e.currentTarget.textContent || "")}
+                    >
+                      {s.text}
+                    </span>
                   </div>
                 ))
             )}
