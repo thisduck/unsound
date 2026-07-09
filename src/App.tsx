@@ -553,7 +553,7 @@ export default function App() {
             className={"nav-tab" + (view === "meetings" ? " on" : "")}
             onClick={() => setView("meetings")}
           >
-            meetings
+            meetings<span className="beta-badge">beta</span>
           </button>
         </nav>
         <span className="spacer" />

@@ -1712,3 +1712,17 @@ textarea.meet-summary {
   font: inherit;
   font-size: 12px;
 }
+
+/* beta badge on the meetings tab */
+.beta-badge {
+  margin-left: 5px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--bg);
+  background: var(--accent);
+  border-radius: 4px;
+  padding: 1px 4px;
+  vertical-align: middle;
+}

@@ -775,7 +775,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
               </label>
               <p className="meet-options-note">
                 Getting too many speakers? Auto-detect tends to over-split — set the exact number of
-                people on the call, or try the TitaNet speaker model (download it in setup).
+                people on the call, or after a meeting use “re-detect speakers”. A stronger speaker
+                model (ERes2NetV2 / TitaNet) from Settings → models can also help.
               </p>
             </div>
           </details>

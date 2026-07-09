@@ -681,6 +681,8 @@ export function ModelLibrary({
     <>
       {section("stt", "voice → text", "whisper.cpp models; pick English-only if that's all you speak")}
       {section("llm", "text cleanup", "any llama.cpp GGUF instruct model")}
+      {!compact && section("diarize", "meeting speakers", "who-said-what models; a stronger embedding separates similar voices better")}
+      {!compact && section("vad", "meeting voice detection", "chunks meeting audio on pauses")}
     </>
   );
 }
