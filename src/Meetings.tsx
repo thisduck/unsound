@@ -46,6 +46,21 @@ function mmss(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/// The whole meeting as shareable Markdown.
+function meetingMarkdown(m: Meeting): string {
+  const out: string[] = [`# ${m.title || "Untitled meeting"}`, ""];
+  out.push(`_${new Date(m.startedAt).toLocaleString()} · ${elapsed(m.startedAt, m.endedAt)}_`, "");
+  if (m.summary.trim()) out.push(m.summary.trim(), "");
+  if (m.notes.trim()) out.push("## My notes", "", m.notes.trim(), "");
+  if (m.segments.length) {
+    out.push("## Transcript", "");
+    for (const s of [...m.segments].sort((a, b) => a.startMs - b.startMs)) {
+      out.push(`**${speakerLabel(s.speaker)}** (${mmss(s.startMs)}): ${s.text}`);
+    }
+  }
+  return out.join("\n");
+}
+
 function RecTimer() {
   const [secs, setSecs] = useState(0);
   useEffect(() => {
@@ -88,6 +103,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const [answer, setAnswer] = useState("");
   const [asking, setAsking] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [liveSegments, setLiveSegments] = useState<Segment[]>([]);
   // Tentative in-progress transcript per channel ("me"/"them"), shown dimmed.
   const [partials, setPartials] = useState<Record<string, string>>({});
@@ -495,6 +511,16 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
               }
             />
             <span className="spacer" />
+            <button
+              className="quiet"
+              onClick={() => {
+                navigator.clipboard.writeText(meetingMarkdown(selected));
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+            >
+              {copied ? "copied ✓" : "copy"}
+            </button>
             <button className="quiet danger" onClick={() => remove(selected.id)}>
               delete
             </button>
