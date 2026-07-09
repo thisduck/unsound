@@ -21,6 +21,20 @@ function speakerClass(speaker: string): string {
   return "seg-them";
 }
 
+/// A concise meeting title derived from the summary's opening sentence.
+function deriveTitle(summary: string): string {
+  const lines = summary.split("\n");
+  const idx = lines.findIndex((l) => /^#+\s*summary/i.test(l.trim()));
+  const start = idx >= 0 ? idx + 1 : 0;
+  const text = lines
+    .slice(start)
+    .map((l) => l.trim())
+    .find((l) => l.length > 0 && !l.startsWith("#"));
+  if (!text) return "";
+  const sentence = (text.split(/(?<=[.!?])\s/)[0] ?? text).replace(/[*_`]/g, "").trim();
+  return sentence.length > 60 ? sentence.slice(0, 57).trimEnd() + "…" : sentence;
+}
+
 function elapsed(startedAt: string, endedAt?: string | null): string {
   const start = new Date(startedAt).getTime();
   const end = endedAt ? new Date(endedAt).getTime() : Date.now();
@@ -289,6 +303,14 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         const summary = await api.summarizeMeeting(id, meetLlm.id);
         summaryRef.current = false;
         setSelected((cur) => (cur ? { ...cur, summary } : cur));
+        // Give an untitled meeting a name from its summary.
+        if (m && !m.title.trim() && summary.trim()) {
+          const title = deriveTitle(summary);
+          if (title) {
+            api.renameMeeting(id, title).catch((e) => console.error(e));
+            setSelected((cur) => (cur ? { ...cur, title } : cur));
+          }
+        }
       }
       setPhase("idle");
       setStatus("meeting saved");
