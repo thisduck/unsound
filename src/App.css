@@ -1693,3 +1693,22 @@ textarea.meet-summary {
   background: var(--panel);
   box-shadow: 0 0 0 1px var(--accent);
 }
+
+/* re-detect speakers control */
+.redetect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.redetect-row select {
+  background: var(--bg);
+  border: 1px solid var(--edge);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+}

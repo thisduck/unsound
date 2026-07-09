@@ -192,6 +192,7 @@ export const api = {
       embeddingModelId: embeddingModelId ?? null,
       numSpeakers: numSpeakers ?? null,
     }),
+  saveMeetingAudio: (meetingId: string) => invoke<void>("save_meeting_audio", { meetingId }),
 
   // System-audio capture (ScreenCaptureKit; macOS 13+).
   systemAudioSupported: () => invoke<boolean>("system_audio_supported"),

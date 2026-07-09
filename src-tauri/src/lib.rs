@@ -435,8 +435,13 @@ fn rename_meeting(db: State<Db>, id: String, title: String) -> Result<(), String
 }
 
 #[tauri::command]
-fn delete_meeting(db: State<Db>, id: String) -> Result<(), String> {
-    store::delete_meeting(&db, &id)
+fn delete_meeting(app: AppHandle, db: State<Db>, id: String) -> Result<(), String> {
+    store::delete_meeting(&db, &id)?;
+    // Best-effort: drop the saved system audio too.
+    if let Ok(p) = meeting_audio_path(&app, &id) {
+        let _ = std::fs::remove_file(p);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -637,9 +642,37 @@ async fn meeting_stop(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Diarize the just-finished meeting's system-audio channel into speakers and
-/// relabel its "them" segments as `them:0`, `them:1`, … (shown as Speaker 1/2).
-/// Requires the two diarization models to be downloaded.
+/// Where a meeting's system audio is stored, so diarization can be re-run later.
+fn meeting_audio_path(app: &AppHandle, id: &str) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("meeting-audio");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join(format!("{id}.wav")))
+}
+
+/// Persist the just-captured system audio for a meeting, so its speakers can be
+/// re-detected later (with a corrected count) without the original session.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn save_meeting_audio(
+    app: AppHandle,
+    state: State<AppState>,
+    meeting_id: String,
+) -> Result<(), String> {
+    let samples = state.sys.last.lock().unwrap().clone();
+    if samples.is_empty() {
+        return Ok(());
+    }
+    let path = meeting_audio_path(&app, &meeting_id)?;
+    syscapture::write_wav_16(&path, &samples, syscapture::CAPTURE_SAMPLE_RATE)
+}
+
+/// Diarize a meeting's system-audio channel into speakers and relabel its "them"
+/// segments as `them:0`, `them:1`, … (shown as Speaker 1/2). Works on the just-
+/// finished meeting or, from the saved audio, any past one.
 #[cfg(target_os = "macos")]
 #[tauri::command]
 async fn diarize_meeting(
@@ -653,23 +686,35 @@ async fn diarize_meeting(
     let seg_model = models::downloaded_model_path(&app, "diarize-segmentation")?;
     let emb_id = embedding_model_id.unwrap_or_else(|| "diarize-embedding".to_string());
     let emb_model = models::downloaded_model_path(&app, &emb_id)?;
-    let samples = state.sys.last.lock().unwrap().clone();
-    // Nothing meaningful to cluster in under a second of audio.
-    if samples.len() < 16_000 {
-        return store::get_meeting(&db, &meeting_id)?
-            .ok_or_else(|| "meeting not found".to_string());
-    }
-    let spans = tauri::async_runtime::spawn_blocking(move || {
-        // Higher default threshold than sherpa's 0.5 to curb over-splitting;
-        // an explicit speaker count (when the user sets one) overrides it.
-        diarize::diarize(&seg_model, &emb_model, samples, 0.7, num_speakers)
-    })
+    // Prefer the meeting's saved system audio (lets past meetings be re-run);
+    // fall back to the just-captured audio for the meeting that just ended.
+    let wav = meeting_audio_path(&app, &meeting_id).ok().filter(|p| p.exists());
+    let sys_last = state.sys.last.lock().unwrap().clone();
+    let spans = tauri::async_runtime::spawn_blocking(
+        move || -> Result<Vec<diarize::Span>, String> {
+            let samples = match wav {
+                Some(p) => audiofile::decode_to_samples(&p).unwrap_or(sys_last),
+                None => sys_last,
+            };
+            // Nothing meaningful to cluster in under a second of audio.
+            if samples.len() < 16_000 {
+                return Ok(Vec::new());
+            }
+            // Higher default threshold than sherpa's 0.5 to curb over-splitting;
+            // an explicit speaker count (when set) overrides it.
+            diarize::diarize(&seg_model, &emb_model, samples, 0.7, num_speakers)
+        },
+    )
     .await
     .map_err(|e| e.to_string())??;
 
-    // Assign each system-channel segment to the speaker span it overlaps most.
     let meeting =
         store::get_meeting(&db, &meeting_id)?.ok_or_else(|| "meeting not found".to_string())?;
+    if spans.is_empty() {
+        return Ok(meeting);
+    }
+
+    // Assign each system-channel segment to the speaker span it overlaps most.
     let mut updates: Vec<(i64, String)> = Vec::new();
     for seg in &meeting.segments {
         if seg.source != "system" {
@@ -1012,6 +1057,8 @@ pub fn run() {
             meeting_stop,
             #[cfg(target_os = "macos")]
             diarize_meeting,
+            #[cfg(target_os = "macos")]
+            save_meeting_audio,
             system_audio_supported,
             #[cfg(target_os = "macos")]
             start_system_capture,

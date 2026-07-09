@@ -107,6 +107,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const [asking, setAsking] = useState(false);
   const [testing, setTesting] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [reDetecting, setReDetecting] = useState(false);
+  const [reCount, setReCount] = useState("");
   const [liveSegments, setLiveSegments] = useState<Segment[]>([]);
   // Tentative in-progress transcript per channel ("me"/"them"), shown dimmed.
   const [partials, setPartials] = useState<Record<string, string>>({});
@@ -295,6 +297,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       setStatus("wrapping up…");
       // Transcription already happened live; this just flushes the tail.
       await api.meetingStop();
+      // Save the system audio so speakers can be re-detected later.
+      api.saveMeetingAudio(id).catch((e) => console.error("save audio failed", e));
       let m = await api.getMeeting(id);
       if (m) {
         setSelected(m);
@@ -348,6 +352,21 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   toggleRef.current = () => {
     if (phaseRef.current === "recording") stopMeeting();
     else if (phaseRef.current === "idle") startMeeting();
+  };
+
+  const reDetectSpeakers = async () => {
+    if (!selected || reDetecting) return;
+    setReDetecting(true);
+    try {
+      const count = reCount ? parseInt(reCount, 10) : undefined;
+      const m = await api.diarizeMeeting(selected.id, meetEmbId, count);
+      setSelected(m);
+      setNotes(m.notes);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setReDetecting(false);
+    }
   };
 
   const renameSpeaker = async (speaker: string, name: string) => {
@@ -650,6 +669,22 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
                     />
                   ))}
               </div>
+              {diarizeReady && selected.segments.some((s) => s.source === "system") && (
+                <div className="redetect-row">
+                  <span>wrong number of speakers?</span>
+                  <select value={reCount} onChange={(e) => setReCount(e.target.value)}>
+                    <option value="">auto</option>
+                    {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                      <option key={n} value={String(n)}>
+                        {n} {n === 1 ? "person" : "people"}
+                      </option>
+                    ))}
+                  </select>
+                  <button className="quiet" disabled={reDetecting} onClick={reDetectSpeakers}>
+                    {reDetecting ? "detecting…" : "re-detect speakers"}
+                  </button>
+                </div>
+              )}
             </section>
           )}
 
