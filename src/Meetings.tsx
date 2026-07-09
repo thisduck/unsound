@@ -4,9 +4,12 @@ import { MeetingSetup } from "./MeetingSetup";
 
 type Phase = "idle" | "recording" | "transcribing" | "summarizing" | "diarizing";
 
-/// How a segment's speaker is shown: "You" for the mic, "Speaker N" for a
-/// diarized participant (`them:0` → Speaker 1), else "Them".
-function speakerLabel(speaker: string): string {
+/// How a segment's speaker is shown. A per-meeting override name wins; otherwise
+/// "You" for the mic, "Speaker N" for a diarized participant (`them:0` → Speaker
+/// 1), else "Them".
+function speakerLabel(speaker: string, names?: Record<string, string>): string {
+  const custom = names?.[speaker];
+  if (custom) return custom;
   if (speaker === "me") return "You";
   const m = speaker.match(/^them:(\d+)$/);
   if (m) return `Speaker ${Number(m[1]) + 1}`;
@@ -55,7 +58,7 @@ function meetingMarkdown(m: Meeting): string {
   if (m.segments.length) {
     out.push("## Transcript", "");
     for (const s of [...m.segments].sort((a, b) => a.startMs - b.startMs)) {
-      out.push(`**${speakerLabel(s.speaker)}** (${mmss(s.startMs)}): ${s.text}`);
+      out.push(`**${speakerLabel(s.speaker, m.speakerNames)}** (${mmss(s.startMs)}): ${s.text}`);
     }
   }
   return out.join("\n");
@@ -347,6 +350,22 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     else if (phaseRef.current === "idle") startMeeting();
   };
 
+  const renameSpeaker = async (speaker: string, name: string) => {
+    if (!selected) return;
+    try {
+      await api.setSpeakerName(selected.id, speaker, name);
+      setSelected((cur) => {
+        if (!cur) return cur;
+        const names = { ...(cur.speakerNames ?? {}) };
+        if (name.trim()) names[speaker] = name.trim();
+        else delete names[speaker];
+        return { ...cur, speakerNames: names };
+      });
+    } catch (e) {
+      console.error("failed to rename speaker", e);
+    }
+  };
+
   const saveNotes = async () => {
     if (!selected) return;
     try {
@@ -582,6 +601,25 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
             />
           </section>
 
+          {selected.segments.length > 0 && (
+            <section className="meet-section">
+              <h3>speakers</h3>
+              <div className="speaker-edit">
+                {Array.from(new Set(selected.segments.map((s) => s.speaker)))
+                  .sort()
+                  .map((sp) => (
+                    <input
+                      key={sp}
+                      className={"speaker-chip " + speakerClass(sp)}
+                      defaultValue={selected.speakerNames?.[sp] ?? ""}
+                      placeholder={speakerLabel(sp)}
+                      onBlur={(e) => renameSpeaker(sp, e.target.value)}
+                    />
+                  ))}
+              </div>
+            </section>
+          )}
+
           <section className="meet-section">
             <h3>transcript</h3>
             {selected.segments.length === 0 ? (
@@ -591,7 +629,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
                 .sort((a, b) => a.startMs - b.startMs)
                 .map((s, i) => (
                   <div className={"seg " + speakerClass(s.speaker)} key={s.id ?? i}>
-                    <span className="seg-who">{speakerLabel(s.speaker)}</span>
+                    <span className="seg-who">{speakerLabel(s.speaker, selected.speakerNames)}</span>
                     <span className="seg-time">{mmss(s.startMs)}</span>
                     <span className="seg-text">{s.text}</span>
                   </div>

@@ -1655,3 +1655,24 @@ textarea.meet-notes:focus {
   opacity: 0.5;
   font-style: italic;
 }
+
+/* per-meeting speaker rename */
+.speaker-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.speaker-chip {
+  width: 150px;
+  background: var(--bg);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 9px;
+}
+.speaker-chip:focus {
+  outline: none;
+  border-color: var(--accent);
+}

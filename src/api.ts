@@ -90,6 +90,8 @@ export interface Meeting {
   lang?: string | null;
   segments: Segment[];
   segmentCount: number;
+  /// Per-meeting speaker display-name overrides (speaker key → name).
+  speakerNames?: Record<string, string>;
 }
 
 export interface SearchHit {
@@ -164,6 +166,8 @@ export const api = {
     invoke<void>("end_meeting", { id, endedAt, summary, title: title ?? null }),
   updateMeetingNotes: (id: string, notes: string) =>
     invoke<void>("update_meeting_notes", { id, notes }),
+  setSpeakerName: (meetingId: string, speaker: string, name: string) =>
+    invoke<void>("set_speaker_name", { meetingId, speaker, name }),
   setMeetingSummary: (id: string, summary: string) =>
     invoke<void>("set_meeting_summary", { id, summary }),
   renameMeeting: (id: string, title: string) => invoke<void>("rename_meeting", { id, title }),

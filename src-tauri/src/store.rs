@@ -92,6 +92,10 @@ pub struct Meeting {
     /// Convenience count for list views (segments stays empty there).
     #[serde(default)]
     pub segment_count: i64,
+    /// Per-meeting speaker label overrides (speaker key → display name), e.g.
+    /// "them:0" → "Priya". Populated by `get_meeting`.
+    #[serde(default)]
+    pub speaker_names: std::collections::HashMap<String, String>,
 }
 
 /// Open (creating if needed) the database and run migrations.
@@ -152,6 +156,19 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "#,
         )?;
         conn.pragma_update(None, "user_version", 1)?;
+    }
+    if version < 2 {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS speaker_names (
+                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                speaker    TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                PRIMARY KEY (meeting_id, speaker)
+            );
+            "#,
+        )?;
+        conn.pragma_update(None, "user_version", 2)?;
     }
     Ok(())
 }
@@ -348,6 +365,7 @@ pub fn list_meetings(db: &Db) -> Result<Vec<Meeting>, String> {
                 lang: r.get(8)?,
                 segments: Vec::new(),
                 segment_count: r.get(9)?,
+                speaker_names: std::collections::HashMap::new(),
             })
         })
         .map_err(|e| e.to_string())?;
@@ -377,6 +395,7 @@ pub fn get_meeting(db: &Db, id: &str) -> Result<Option<Meeting>, String> {
                     lang: r.get(8)?,
                     segments: Vec::new(),
                     segment_count: 0,
+                    speaker_names: std::collections::HashMap::new(),
                 })
             },
         )
@@ -406,8 +425,42 @@ pub fn get_meeting(db: &Db, id: &str) -> Result<Option<Meeting>, String> {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| e.to_string())?;
         m.segment_count = m.segments.len() as i64;
+
+        let mut stmt = conn
+            .prepare("SELECT speaker, name FROM speaker_names WHERE meeting_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (speaker, name) = row.map_err(|e| e.to_string())?;
+            m.speaker_names.insert(speaker, name);
+        }
     }
     Ok(meeting)
+}
+
+/// Set (or clear, when `name` is blank) a per-meeting speaker display name.
+pub fn set_speaker_name(db: &Db, meeting_id: &str, speaker: &str, name: &str) -> Result<(), String> {
+    let conn = db.0.lock().unwrap();
+    let name = name.trim();
+    if name.is_empty() {
+        conn.execute(
+            "DELETE FROM speaker_names WHERE meeting_id = ?1 AND speaker = ?2",
+            params![meeting_id, speaker],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        conn.execute(
+            "INSERT INTO speaker_names (meeting_id, speaker, name) VALUES (?1, ?2, ?3)
+             ON CONFLICT(meeting_id, speaker) DO UPDATE SET name = excluded.name",
+            params![meeting_id, speaker, name],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Relabel segments' speakers by id (used after diarization assigns Speaker N).
