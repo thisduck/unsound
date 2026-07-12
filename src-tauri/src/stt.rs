@@ -5,6 +5,11 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 const SILENCE_PEAK_THRESHOLD: f32 = 0.005;
 const NO_SPEECH_PROBABILITY_THRESHOLD: f32 = 0.6;
 
+/// Whisper is prone to dropping the first word when speech starts at sample
+/// zero. A short quiet lead-in gives its speech detector enough context without
+/// delaying capture or changing the duration reported to the UI.
+const LEADING_SILENCE_SAMPLES: usize = 8_000; // 500 ms at 16 kHz
+
 /// Whisper can emit special markers, or a short stock phrase such as "Thank
 /// you", when it believes the input contains no speech. Keep that model output
 /// from becoming user text while preserving the same words when they were
@@ -34,6 +39,13 @@ fn is_effectively_silent(samples: &[f32]) -> bool {
     samples
         .iter()
         .all(|sample| sample.abs() < SILENCE_PEAK_THRESHOLD)
+}
+
+fn with_leading_silence(samples: &[f32]) -> Vec<f32> {
+    let mut padded = Vec::with_capacity(LEADING_SILENCE_SAMPLES + samples.len());
+    padded.resize(LEADING_SILENCE_SAMPLES, 0.0);
+    padded.extend_from_slice(samples);
+    padded
 }
 
 /// Caches the most recently used whisper model so switching between
@@ -122,7 +134,11 @@ pub fn transcribe(
         params.set_initial_prompt(p);
     }
 
-    ws.full(params, samples)
+    // Dictation often begins immediately after push-to-talk is pressed. Keep
+    // the captured speech intact, but move it away from the decoder's absolute
+    // start boundary so the opening phonemes are not mistaken for noise.
+    let padded = with_leading_silence(samples);
+    ws.full(params, &padded)
         .map_err(|e| format!("transcription failed: {e}"))?;
 
     let n = ws.full_n_segments();
@@ -241,5 +257,17 @@ mod tests {
     fn detects_effectively_silent_audio() {
         assert!(is_effectively_silent(&[0.0, 0.001, -0.0049]));
         assert!(!is_effectively_silent(&[0.0, 0.005, -0.0049]));
+    }
+
+    #[test]
+    fn dictation_padding_preserves_every_captured_sample() {
+        let speech = [0.25, -0.5, 0.75];
+        let padded = with_leading_silence(&speech);
+
+        assert_eq!(padded.len(), LEADING_SILENCE_SAMPLES + speech.len());
+        assert!(padded[..LEADING_SILENCE_SAMPLES]
+            .iter()
+            .all(|sample| *sample == 0.0));
+        assert_eq!(&padded[LEADING_SILENCE_SAMPLES..], speech);
     }
 }
