@@ -24,6 +24,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Configure OpenSSL
+        run: echo "CMAKE_PREFIX_PATH=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
