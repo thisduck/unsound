@@ -2,6 +2,40 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+const SILENCE_PEAK_THRESHOLD: f32 = 0.005;
+const NO_SPEECH_PROBABILITY_THRESHOLD: f32 = 0.6;
+
+/// Whisper can emit special markers, or a short stock phrase such as "Thank
+/// you", when it believes the input contains no speech. Keep that model output
+/// from becoming user text while preserving the same words when they were
+/// actually spoken.
+fn sanitize_segment(text: &str, no_speech_probability: f32) -> String {
+    let mut cleaned = text.to_string();
+    let marker = "[BLANK_AUDIO]";
+    let lowercase_marker = marker.to_ascii_lowercase();
+    while let Some(start) = cleaned.to_ascii_lowercase().find(&lowercase_marker) {
+        cleaned.replace_range(start..start + marker.len(), "");
+    }
+    let cleaned = cleaned.trim();
+    let words = cleaned
+        .chars()
+        .filter(|c| c.is_alphabetic() || c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    if no_speech_probability >= NO_SPEECH_PROBABILITY_THRESHOLD && words == "thank you" {
+        String::new()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+fn is_effectively_silent(samples: &[f32]) -> bool {
+    samples
+        .iter()
+        .all(|sample| sample.abs() < SILENCE_PEAK_THRESHOLD)
+}
+
 /// Caches the most recently used whisper model so switching between
 /// recordings doesn't reload multi-hundred-MB weights every time.
 #[derive(Default)]
@@ -62,6 +96,9 @@ pub fn transcribe(
     if samples.len() < 1600 {
         return Err("recording is too short to transcribe".into());
     }
+    if is_effectively_silent(samples) {
+        return Ok(String::new());
+    }
     let ctx = state.context_for(model_path)?;
     let mut ws = ctx
         .create_state()
@@ -95,7 +132,7 @@ pub fn transcribe(
             let piece = segment
                 .to_str_lossy()
                 .map_err(|e| format!("failed to read segment {i}: {e}"))?;
-            text.push_str(&piece);
+            text.push_str(&sanitize_segment(&piece, segment.no_speech_probability()));
         }
     }
     Ok(text.trim().to_string())
@@ -121,7 +158,7 @@ pub fn transcribe_segments(
     // call — rather than emit that garbage. Real speech peaks well above this.
     let peak = samples.iter().fold(0f32, |m, &s| m.max(s.abs()));
     eprintln!("[stt] segments: {} samples, peak {peak:.4}", samples.len());
-    if peak < 0.005 {
+    if is_effectively_silent(samples) {
         eprintln!("[stt] channel is effectively silent — skipping to avoid hallucination");
         return Ok(Vec::new());
     }
@@ -154,11 +191,12 @@ pub fn transcribe_segments(
     let mut out = Vec::new();
     for i in 0..n {
         if let Some(segment) = ws.get_segment(i) {
-            let text = segment
-                .to_str_lossy()
-                .map_err(|e| format!("failed to read segment {i}: {e}"))?
-                .trim()
-                .to_string();
+            let text = sanitize_segment(
+                &segment
+                    .to_str_lossy()
+                    .map_err(|e| format!("failed to read segment {i}: {e}"))?,
+                segment.no_speech_probability(),
+            );
             if text.is_empty() {
                 continue;
             }
@@ -169,4 +207,30 @@ pub fn transcribe_segments(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_blank_audio_markers() {
+        assert_eq!(sanitize_segment(" [BLANK_AUDIO] ", 0.0), "");
+        assert_eq!(
+            sanitize_segment("hello [blank_audio] world", 0.0),
+            "hello  world"
+        );
+    }
+
+    #[test]
+    fn drops_thank_you_only_when_model_detects_no_speech() {
+        assert_eq!(sanitize_segment("Thank you.", 0.9), "");
+        assert_eq!(sanitize_segment("Thank you.", 0.1), "Thank you.");
+    }
+
+    #[test]
+    fn detects_effectively_silent_audio() {
+        assert!(is_effectively_silent(&[0.0, 0.001, -0.0049]));
+        assert!(!is_effectively_silent(&[0.0, 0.005, -0.0049]));
+    }
 }
