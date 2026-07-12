@@ -16,8 +16,8 @@ fn sanitize_segment(text: &str, no_speech_probability: f32) -> String {
     while let Some(start) = cleaned.to_ascii_lowercase().find(&lowercase_marker) {
         cleaned.replace_range(start..start + marker.len(), "");
     }
-    let cleaned = cleaned.trim();
     let words = cleaned
+        .trim()
         .chars()
         .filter(|c| c.is_alphabetic() || c.is_whitespace())
         .flat_map(char::to_lowercase)
@@ -26,7 +26,7 @@ fn sanitize_segment(text: &str, no_speech_probability: f32) -> String {
     if no_speech_probability >= NO_SPEECH_PROBABILITY_THRESHOLD && words == "thank you" {
         String::new()
     } else {
-        cleaned.to_string()
+        cleaned
     }
 }
 
@@ -196,7 +196,9 @@ pub fn transcribe_segments(
                     .to_str_lossy()
                     .map_err(|e| format!("failed to read segment {i}: {e}"))?,
                 segment.no_speech_probability(),
-            );
+            )
+            .trim()
+            .to_string();
             if text.is_empty() {
                 continue;
             }
@@ -215,7 +217,7 @@ mod tests {
 
     #[test]
     fn strips_blank_audio_markers() {
-        assert_eq!(sanitize_segment(" [BLANK_AUDIO] ", 0.0), "");
+        assert_eq!(sanitize_segment(" [BLANK_AUDIO] ", 0.0), "  ");
         assert_eq!(
             sanitize_segment("hello [blank_audio] world", 0.0),
             "hello  world"
@@ -226,6 +228,13 @@ mod tests {
     fn drops_thank_you_only_when_model_detects_no_speech() {
         assert_eq!(sanitize_segment("Thank you.", 0.9), "");
         assert_eq!(sanitize_segment("Thank you.", 0.1), "Thank you.");
+    }
+
+    #[test]
+    fn preserves_word_boundaries_between_segments() {
+        let mut transcript = sanitize_segment(" Hello", 0.0);
+        transcript.push_str(&sanitize_segment(" world", 0.0));
+        assert_eq!(transcript, " Hello world");
     }
 
     #[test]
