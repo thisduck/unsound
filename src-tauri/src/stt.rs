@@ -2,6 +2,18 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+/// Whisper is prone to dropping the first word when speech starts at sample
+/// zero. A short quiet lead-in gives its speech detector enough context without
+/// delaying capture or changing the duration reported to the UI.
+const LEADING_SILENCE_SAMPLES: usize = 8_000; // 500 ms at 16 kHz
+
+fn with_leading_silence(samples: &[f32]) -> Vec<f32> {
+    let mut padded = Vec::with_capacity(LEADING_SILENCE_SAMPLES + samples.len());
+    padded.resize(LEADING_SILENCE_SAMPLES, 0.0);
+    padded.extend_from_slice(samples);
+    padded
+}
+
 /// Caches the most recently used whisper model so switching between
 /// recordings doesn't reload multi-hundred-MB weights every time.
 #[derive(Default)]
@@ -85,7 +97,11 @@ pub fn transcribe(
         params.set_initial_prompt(p);
     }
 
-    ws.full(params, samples)
+    // Dictation often begins immediately after push-to-talk is pressed. Keep
+    // the captured speech intact, but move it away from the decoder's absolute
+    // start boundary so the opening phonemes are not mistaken for noise.
+    let padded = with_leading_silence(samples);
+    ws.full(params, &padded)
         .map_err(|e| format!("transcription failed: {e}"))?;
 
     let n = ws.full_n_segments();
@@ -169,4 +185,21 @@ pub fn transcribe_segments(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dictation_padding_preserves_every_captured_sample() {
+        let speech = [0.25, -0.5, 0.75];
+        let padded = with_leading_silence(&speech);
+
+        assert_eq!(padded.len(), LEADING_SILENCE_SAMPLES + speech.len());
+        assert!(padded[..LEADING_SILENCE_SAMPLES]
+            .iter()
+            .all(|sample| *sample == 0.0));
+        assert_eq!(&padded[LEADING_SILENCE_SAMPLES..], speech);
+    }
 }
