@@ -10,6 +10,7 @@ mod llm;
 mod meeting;
 mod models;
 mod permissions;
+mod remote;
 mod settings;
 mod store;
 mod stt;
@@ -349,6 +350,26 @@ fn set_dictionary(app: AppHandle, entries: Vec<settings::DictEntry>) -> Result<(
     Ok(())
 }
 
+#[tauri::command]
+fn set_cloud_settings(
+    app: AppHandle,
+    cloud_providers: Vec<settings::CloudProvider>,
+    cloud_voice_provider: String,
+    cloud_text_provider: String,
+) -> Result<(), String> {
+    let valid = ["openai", "mistral", "deepgram", "elevenlabs"];
+    if cloud_providers.iter().any(|p| !valid.contains(&p.id.as_str())) {
+        return Err("unsupported cloud provider".into());
+    }
+    let mut s = settings::load(&app);
+    s.cloud_providers = cloud_providers;
+    s.cloud_voice_provider = cloud_voice_provider;
+    s.cloud_text_provider = cloud_text_provider;
+    settings::save(&app, &s)?;
+    let _ = app.emit("settings-changed", ());
+    Ok(())
+}
+
 // ---- history (takes) — now backed by SQLite instead of localStorage --------
 
 #[tauri::command]
@@ -541,7 +562,6 @@ async fn summarize_meeting(
     meeting_id: String,
     model_id: String,
 ) -> Result<String, String> {
-    let model_path = models::downloaded_model_path(&app, &model_id)?;
     let meeting =
         store::get_meeting(&db, &meeting_id)?.ok_or_else(|| "meeting not found".to_string())?;
     let mut transcript = String::new();
@@ -551,13 +571,18 @@ async fn summarize_meeting(
     if transcript.trim().is_empty() {
         return Ok(String::new());
     }
-    let worker_app = app.clone();
-    let summary = tauri::async_runtime::spawn_blocking(move || {
-        let s = worker_app.state::<AppState>();
-        llm::summarize_meeting(&worker_app, &s.llm, &model_path, &transcript)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let summary = if model_id == "cloud" {
+        remote::summarize(&settings::load(&app), &transcript).await?
+    } else {
+        let model_path = models::downloaded_model_path(&app, &model_id)?;
+        let worker_app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let s = worker_app.state::<AppState>();
+            llm::summarize_meeting(&worker_app, &s.llm, &model_path, &transcript)
+        })
+        .await
+        .map_err(|e| e.to_string())??
+    };
     store::set_meeting_summary(&db, &meeting_id, &summary)?;
     Ok(summary)
 }
@@ -572,7 +597,6 @@ async fn ask_meeting(
     model_id: String,
     question: String,
 ) -> Result<String, String> {
-    let model_path = models::downloaded_model_path(&app, &model_id)?;
     let meeting =
         store::get_meeting(&db, &meeting_id)?.ok_or_else(|| "meeting not found".to_string())?;
     let mut context = String::new();
@@ -586,13 +610,18 @@ async fn ask_meeting(
     for s in &meeting.segments {
         context.push_str(&format!("{}: {}\n", speaker_label(&s.speaker), s.text));
     }
-    let worker_app = app.clone();
-    let answer = tauri::async_runtime::spawn_blocking(move || {
-        let s = worker_app.state::<AppState>();
-        llm::answer_meeting_question(&worker_app, &s.llm, &model_path, &context, &question)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let answer = if model_id == "cloud" {
+        remote::answer(&settings::load(&app), &context, &question).await?
+    } else {
+        let model_path = models::downloaded_model_path(&app, &model_id)?;
+        let worker_app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let s = worker_app.state::<AppState>();
+            llm::answer_meeting_question(&worker_app, &s.llm, &model_path, &context, &question)
+        })
+        .await
+        .map_err(|e| e.to_string())??
+    };
     Ok(answer)
 }
 
@@ -1024,6 +1053,7 @@ pub fn run() {
             set_styles,
             add_correction,
             set_dictionary,
+            set_cloud_settings,
             start_shortcut_capture,
             cancel_shortcut_capture,
             set_overlay,

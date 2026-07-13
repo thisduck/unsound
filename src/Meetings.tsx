@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, on, formatDuration, Meeting, ModelInfo, SearchHit, Segment } from "./api";
+import { api, on, formatDuration, Meeting, ModelInfo, SearchHit, Segment, Settings } from "./api";
 import { MeetingSetup } from "./MeetingSetup";
 
 type Phase = "idle" | "recording" | "transcribing" | "summarizing" | "diarizing";
@@ -112,6 +112,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const [liveSegments, setLiveSegments] = useState<Segment[]>([]);
   // Tentative in-progress transcript per channel ("me"/"them"), shown dimmed.
   const [partials, setPartials] = useState<Record<string, string>>({});
+  const [cloudSettings, setCloudSettings] = useState<Settings | null>(null);
   // Meeting-specific model choices (persisted, independent of the dictate tab).
   const [meetingSttId, setMeetingSttId] = useState(
     () => localStorage.getItem("unsound.meeting.stt") ?? "",
@@ -147,15 +148,25 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const meetStt = sttModels.find((m) => m.id === meetingSttId) ?? stt ?? sttModels[0];
   const meetLlm = llmModels.find((m) => m.id === meetingLlmId) ?? llm ?? llmModels[0];
   const meetEmbId = (embModels.find((m) => m.id === meetingEmbId) ?? embModels[0])?.id;
+  const voiceProvider = cloudSettings?.cloudProviders.find((p) => p.id === cloudSettings.cloudVoiceProvider);
+  const textProvider = cloudSettings?.cloudProviders.find((p) => p.id === cloudSettings.cloudTextProvider);
+  const cloudVoiceReady = !!voiceProvider?.apiKey && !!voiceProvider.voiceModel;
+  const cloudTextReady = !!textProvider?.apiKey && !!textProvider.textModel;
+  const usingCloudVoice = meetingSttId === "cloud" && cloudVoiceReady;
+  const usingCloudText = meetingLlmId === "cloud" && cloudTextReady;
+  const activeSttId = usingCloudVoice ? "cloud" : meetStt?.id;
+  const activeSttName = usingCloudVoice ? `${voiceProvider!.id} · ${voiceProvider!.voiceModel}` : meetStt?.name;
+  const activeLlmId = usingCloudText ? "cloud" : meetLlm?.id;
+  const activeLlmName = usingCloudText ? `${textProvider!.id} · ${textProvider!.textModel}` : meetLlm?.name;
   const numSpeakers = meetingSpeakers ? parseInt(meetingSpeakers, 10) : undefined;
 
-  // Setup gate: meetings need a speech model, the VAD model, the segmentation
-  // model, and at least one speaker-embedding model.
+  // Setup gate: meetings need a local speech model (or configured cloud voice)
+  // plus VAD. Segmentation and speaker embeddings are optional speaker detection.
   const sttReady = sttModels.length > 0;
   const vadReady = !!models.find((m) => m.id === "vad-silero")?.downloaded;
   const segReady = !!models.find((m) => m.id === "diarize-segmentation")?.downloaded;
   const diarizeReady = segReady && embModels.length > 0;
-  const setupNeeded = !sttReady || !vadReady || !diarizeReady;
+  const setupNeeded = (!sttReady && !cloudVoiceReady) || !vadReady;
 
   const refresh = async () => {
     try {
@@ -167,6 +178,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
 
   useEffect(() => {
     refresh();
+    api.getSettings().then(setCloudSettings).catch(() => {});
     api.systemAudioSupported().then(setSysSupported).catch(() => {});
     const sub = on.meetingSummaryToken((chunk) => {
       if (summaryRef.current) setLiveSummary((s) => s + chunk);
@@ -177,7 +189,9 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     // Live transcript: segments finalized by the backend as the meeting runs.
     // A finalized segment supersedes that channel's partial.
     const sub3 = on.meetingSegments((segs) => {
-      setLiveSegments((cur) => [...cur, ...segs]);
+      // Cloud workers can finish adjacent segments out of order; keep the live
+      // transcript in its capture-time order just like the stored transcript.
+      setLiveSegments((cur) => [...cur, ...segs].sort((a, b) => a.startMs - b.startMs));
       setPartials((cur) => {
         const next = { ...cur };
         for (const s of segs) delete next[s.speaker];
@@ -187,6 +201,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     const sub5 = on.meetingPartial(({ speaker, text }) =>
       setPartials((cur) => ({ ...cur, [speaker]: text })),
     );
+    const sub7 = on.meetingTranscriptionError((message) => setError(message));
+    const sub6 = on.settingsChanged(() => api.getSettings().then(setCloudSettings).catch(() => {}));
     // Tray "Start / stop meeting".
     const sub4 = on.meetingToggle(() => toggleRef.current());
     return () => {
@@ -195,6 +211,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       sub3.then((un) => un());
       sub4.then((un) => un());
       sub5.then((un) => un());
+      sub7.then((un) => un());
+      sub6.then((un) => un());
     };
   }, []);
 
@@ -231,12 +249,12 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   };
 
   const ask = async () => {
-    if (!selected || !meetLlm || !question.trim() || asking) return;
+    if (!selected || !activeLlmId || !question.trim() || asking) return;
     setAnswer("");
     setAsking(true);
     answerRef.current = true;
     try {
-      const a = await api.askMeeting(selected.id, meetLlm.id, question.trim());
+      const a = await api.askMeeting(selected.id, activeLlmId, question.trim());
       setAnswer(a);
     } catch (e) {
       setAnswer(String(e));
@@ -247,8 +265,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   };
 
   const startMeeting = async () => {
-    if (!meetStt) {
-      setError("download a speech model first (settings → models)");
+    if (!activeSttId) {
+      setError("download a speech model or configure a cloud voice provider first");
       return;
     }
     setError(null);
@@ -274,15 +292,15 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         endedAt: null,
         summary: "",
         notes: "",
-        sttModel: meetStt.name,
-        llmModel: meetLlm?.name ?? "",
+        sttModel: activeSttName ?? "",
+        llmModel: activeLlmName ?? "",
         lang: language,
         segments: [],
         segmentCount: 0,
       });
       // The backend now owns capture + rolling transcription; it emits
       // `meeting-segments` as they finalize.
-      await api.meetingStart(id, meetStt.id, language || undefined);
+      await api.meetingStart(id, activeSttId, language || undefined);
     } catch (e) {
       setError(String(e));
       setPhase("idle");
@@ -318,12 +336,12 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
           console.error("diarization failed", e);
         }
       }
-      if (meetLlm && m && m.segments.length > 0) {
+      if (activeLlmId && m && m.segments.length > 0) {
         setPhase("summarizing");
         setStatus("summarizing…");
         setLiveSummary("");
         summaryRef.current = true;
-        const summary = await api.summarizeMeeting(id, meetLlm.id);
+        const summary = await api.summarizeMeeting(id, activeLlmId);
         summaryRef.current = false;
         setSelected((cur) => (cur ? { ...cur, summary } : cur));
         // Give an untitled meeting a name from its summary.
@@ -611,7 +629,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
             </section>
           )}
 
-          {meetLlm && selected.segments.length > 0 && (
+          {activeLlmId && selected.segments.length > 0 && (
             <section className="meet-section">
               <h3>ask about this meeting</h3>
               <div className="meet-ask">
@@ -720,9 +738,10 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
               <label>
                 <span>Speech model</span>
                 <select
-                  value={meetStt?.id ?? ""}
+                  value={usingCloudVoice ? "cloud" : meetStt?.id ?? ""}
                   onChange={(e) => persist("unsound.meeting.stt", e.target.value, setMeetingSttId)}
                 >
+                  {cloudVoiceReady && <option value="cloud">Cloud · {voiceProvider!.id} / {voiceProvider!.voiceModel}</option>}
                   {sttModels.map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.name}
@@ -762,9 +781,10 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
               <label>
                 <span>Summary model</span>
                 <select
-                  value={meetLlm?.id ?? ""}
+                  value={usingCloudText ? "cloud" : meetLlm?.id ?? ""}
                   onChange={(e) => persist("unsound.meeting.llm", e.target.value, setMeetingLlmId)}
                 >
+                  {cloudTextReady && <option value="cloud">Cloud · {textProvider!.id} / {textProvider!.textModel}</option>}
                   {llmModels.length === 0 && <option value="">none downloaded</option>}
                   {llmModels.map((m) => (
                     <option key={m.id} value={m.id}>

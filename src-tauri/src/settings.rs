@@ -33,6 +33,20 @@ pub struct Style {
     pub samples: Vec<String>,
 }
 
+/// A user-supplied remote AI provider. API keys deliberately live in
+/// `settings.json` at the user's request, alongside the model choices.
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProvider {
+    pub id: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub voice_model: String,
+    #[serde(default)]
+    pub text_model: String,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -47,6 +61,11 @@ pub struct Settings {
     pub default_style: String,
     /// Personal dictionary built from the user's corrections.
     pub dictionary: Vec<DictEntry>,
+    /// Connected remote providers and their API keys.
+    pub cloud_providers: Vec<CloudProvider>,
+    /// Provider ids selected independently for speech and meeting text.
+    pub cloud_voice_provider: String,
+    pub cloud_text_provider: String,
 }
 
 impl Default for Settings {
@@ -58,6 +77,9 @@ impl Default for Settings {
             styles: vec![],
             default_style: String::new(),
             dictionary: vec![],
+            cloud_providers: vec![],
+            cloud_voice_provider: String::new(),
+            cloud_text_provider: String::new(),
         }
     }
 }
@@ -73,6 +95,9 @@ struct RawSettings {
     styles: Option<Vec<Style>>,
     default_style: Option<String>,
     dictionary: Option<Vec<DictEntry>>,
+    cloud_providers: Option<Vec<CloudProvider>>,
+    cloud_voice_provider: Option<String>,
+    cloud_text_provider: Option<String>,
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -101,6 +126,9 @@ pub fn load(app: &AppHandle) -> Settings {
         styles: raw.styles.unwrap_or_default(),
         default_style: raw.default_style.unwrap_or_default(),
         dictionary: raw.dictionary.unwrap_or_default(),
+        cloud_providers: raw.cloud_providers.unwrap_or_default(),
+        cloud_voice_provider: raw.cloud_voice_provider.unwrap_or_default(),
+        cloud_text_provider: raw.cloud_text_provider.unwrap_or_default(),
     }
 }
 

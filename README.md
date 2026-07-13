@@ -1,12 +1,12 @@
 # unsound
 
-**Talk, and unsound turns it into clean writing — entirely on your own Mac.**
+**Talk, and unsound turns it into clean writing — on your own Mac by default.**
 
 Speak into unsound and it writes down what you said, then quietly tidies it
 up: fixes punctuation, drops the "um"s and false starts, breaks it into
-paragraphs. Nothing you say ever leaves your computer — no cloud, no account,
-no internet. The only time it touches the network is the one-time download of
-the models that do the work.
+paragraphs. Local processing needs no account or internet after model download.
+If you opt into cloud models for meetings, Unsound sends only the meeting audio
+and/or text needed by the provider you choose, using your own API key.
 
 [**Download the latest release →**](https://github.com/thisduck/unsound/releases)
 (macOS, Apple Silicon)
@@ -31,11 +31,21 @@ the models that do the work.
   reopen, or re-style.
 - **🔎 Comfortable to read.** Adjustable text size for the transcript and
   refined output.
-- **🔒 Completely private.** Everything runs on your machine. Works with the
-  Wi-Fi off.
+- **🔒 Local by default.** Everything runs on your machine and works with the
+  Wi-Fi off. Cloud meeting processing is an explicit, bring-your-own-key option.
 
 Pick the models you like from a built-in library (smaller and faster, or
 larger and sharper) — they download once and you can swap them anytime.
+
+### Optional cloud meeting models
+
+In **Settings → Cloud models**, you can use your own key for **OpenAI**,
+**Mistral**, **Deepgram**, or **ElevenLabs**. Choose a voice provider/model and
+a text provider/model independently in the meeting options. OpenAI and Mistral
+can generate meeting summaries and answer meeting questions; all four providers
+can transcribe finalized live-meeting speech segments. API keys are stored in
+Unsound's `settings.json` file at the user's request, so use restricted keys and
+do not share that file.
 
 ---
 

@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { api, ModelInfo, ModelKind } from "./api";
+import { api, CloudProvider, CloudProviderId, ModelInfo, ModelKind } from "./api";
 import { DictionarySection, MicPicker, ModelLibrary, PermissionsSection, ShortcutsSection, StylesSection } from "./sections";
 
 type Section =
   | "models"
+  | "cloud"
   | "shortcuts"
   | "styles"
   | "dictionary"
@@ -17,6 +18,7 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: "styles", label: "styles" },
   { id: "dictionary", label: "dictionary" },
   { id: "models", label: "models" },
+  { id: "cloud", label: "cloud models" },
   { id: "microphone", label: "microphone" },
   { id: "prompt", label: "prompt" },
   { id: "accessibility", label: "accessibility" },
@@ -30,6 +32,20 @@ const TEXT_SIZES: { label: string; value: string }[] = [
   { label: "Larger", value: "1.4" },
   { label: "Largest", value: "1.6" },
 ];
+
+const VOICE_PROVIDERS: { id: CloudProviderId; label: string }[] = [
+  { id: "openai", label: "OpenAI" },
+  { id: "mistral", label: "Mistral" },
+  { id: "deepgram", label: "Deepgram" },
+  { id: "elevenlabs", label: "ElevenLabs" },
+];
+const TEXT_PROVIDERS = VOICE_PROVIDERS.filter((p) => p.id === "openai" || p.id === "mistral");
+const defaults: Record<CloudProviderId, { voice: string; text: string }> = {
+  openai: { voice: "gpt-4o-mini-transcribe", text: "gpt-4o-mini" },
+  mistral: { voice: "voxtral-mini-latest", text: "mistral-small-latest" },
+  deepgram: { voice: "nova-3", text: "" },
+  elevenlabs: { voice: "scribe_v1", text: "" },
+};
 
 interface Props {
   models: ModelInfo[];
@@ -68,6 +84,31 @@ export function SettingsSheet({
   const [customName, setCustomName] = useState("");
   const [customUrl, setCustomUrl] = useState("");
   const [customKind, setCustomKind] = useState<ModelKind>("llm");
+  const [cloudProviders, setCloudProviders] = useState<CloudProvider[] | null>(null);
+  const [cloudVoiceProvider, setCloudVoiceProvider] = useState("");
+  const [cloudTextProvider, setCloudTextProvider] = useState("");
+
+  const loadCloud = async () => {
+    const settings = await api.getSettings();
+    setCloudProviders(settings.cloudProviders);
+    setCloudVoiceProvider(settings.cloudVoiceProvider);
+    setCloudTextProvider(settings.cloudTextProvider);
+  };
+  const cloud = cloudProviders ?? [];
+  const provider = (id: CloudProviderId): CloudProvider =>
+    cloud.find((p) => p.id === id) ?? {
+      id, apiKey: "", voiceModel: defaults[id].voice, textModel: defaults[id].text,
+    };
+  const updateProvider = (next: CloudProvider) =>
+    setCloudProviders([...cloud.filter((p) => p.id !== next.id), next]);
+  const saveCloud = async () => {
+    setErr(null);
+    try {
+      await api.setCloudSettings(cloud, cloudVoiceProvider, cloudTextProvider);
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
 
   const sttModels = models.filter((m) => m.kind === "stt" && m.downloaded);
   const llmModels = models.filter((m) => m.kind === "llm" && m.downloaded);
@@ -169,6 +210,46 @@ export function SettingsSheet({
               )}
             </section>
           </>
+        );
+      case "cloud":
+        return (
+          <section className="sheet-section">
+            <div className="sheet-section-head">
+              <h3>bring your own API key</h3>
+              <span className="sheet-hint">meeting audio and/or text is sent to the providers you select</span>
+            </div>
+            {cloudProviders === null ? (
+              <button className="quiet" onClick={() => loadCloud().catch((e) => setErr(String(e)))}>load cloud settings</button>
+            ) : (
+              <>
+                <div className="add-row">
+                  <label>Meeting voice
+                    <select value={cloudVoiceProvider} onChange={(e) => setCloudVoiceProvider(e.target.value)}>
+                      <option value="">process on this Mac</option>
+                      {VOICE_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                    </select>
+                  </label>
+                  <label>Meeting text
+                    <select value={cloudTextProvider} onChange={(e) => setCloudTextProvider(e.target.value)}>
+                      <option value="">process on this Mac</option>
+                      {TEXT_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                    </select>
+                  </label>
+                </div>
+                {VOICE_PROVIDERS.map(({ id, label }) => {
+                  const p = provider(id);
+                  return <div className="add-form" key={id}>
+                    <strong>{label}</strong>
+                    <input type="password" placeholder="API key" value={p.apiKey} onChange={(e) => updateProvider({ ...p, apiKey: e.target.value })} />
+                    <input placeholder="Voice model" value={p.voiceModel} onChange={(e) => updateProvider({ ...p, voiceModel: e.target.value })} />
+                    {(id === "openai" || id === "mistral") && <input placeholder="Text model" value={p.textModel} onChange={(e) => updateProvider({ ...p, textModel: e.target.value })} />}
+                  </div>;
+                })}
+                <button className="quiet accent" onClick={saveCloud}>save cloud settings</button>
+                <p className="sheet-hint">Keys are stored in Unsound’s settings file, as requested. Use a restricted key and do not share that file.</p>
+              </>
+            )}
+          </section>
         );
       case "shortcuts":
         return (
@@ -294,6 +375,9 @@ export function SettingsSheet({
               onClick={() => {
                 setErr(null);
                 setSection(s.id);
+                if (s.id === "cloud" && cloudProviders === null) {
+                  loadCloud().catch((e) => setErr(String(e)));
+                }
               }}
             >
               {s.label}
@@ -307,7 +391,7 @@ export function SettingsSheet({
         <div className="settings-pane">
           <header className="sheet-head">
             <h2>{SECTIONS.find((s) => s.id === section)?.label}</h2>
-            <span className="sheet-note">downloads are the only time unsound touches the network</span>
+            <span className="sheet-note">local processing is default; cloud models are opt-in</span>
             <button className="quiet" onClick={onClose}>
               close ✕
             </button>

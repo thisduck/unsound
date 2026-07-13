@@ -64,6 +64,18 @@ export interface Settings {
   styles: Style[];
   defaultStyle: string;
   dictionary: DictEntry[];
+  cloudProviders: CloudProvider[];
+  cloudVoiceProvider: string;
+  cloudTextProvider: string;
+}
+
+export type CloudProviderId = "openai" | "mistral" | "deepgram" | "elevenlabs";
+
+export interface CloudProvider {
+  id: CloudProviderId;
+  apiKey: string;
+  voiceModel: string;
+  textModel: string;
 }
 
 /// One utterance in a meeting transcript. `speaker` is free-form so "me"/"them"
@@ -141,6 +153,16 @@ export const api = {
   deliverText: (text: string) => invoke<string>("deliver_text", { text }),
   addCorrection: (from: string, to: string) => invoke<void>("add_correction", { from, to }),
   setDictionary: (entries: DictEntry[]) => invoke<void>("set_dictionary", { entries }),
+  setCloudSettings: (
+    cloudProviders: CloudProvider[],
+    cloudVoiceProvider: string,
+    cloudTextProvider: string,
+  ) =>
+    invoke<void>("set_cloud_settings", {
+      cloudProviders,
+      cloudVoiceProvider,
+      cloudTextProvider,
+    }),
   permissionStatus: () => invoke<PermissionStatus>("permission_status"),
   startShortcutCapture: () => invoke<boolean>("start_shortcut_capture"),
   cancelShortcutCapture: () => invoke<void>("cancel_shortcut_capture"),
@@ -223,6 +245,8 @@ export const on = {
     listen<Segment[]>("meeting-segments", (e) => cb(e.payload)),
   meetingPartial: (cb: (p: { speaker: string; text: string }) => void): Promise<UnlistenFn> =>
     listen<{ speaker: string; text: string }>("meeting-partial", (e) => cb(e.payload)),
+  meetingTranscriptionError: (cb: (message: string) => void): Promise<UnlistenFn> =>
+    listen<string>("meeting-transcription-error", (e) => cb(e.payload)),
   meetingToggle: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("meeting-toggle", () => cb()),
   hotkeyToggle: (cb: () => void): Promise<UnlistenFn> =>
