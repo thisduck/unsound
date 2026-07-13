@@ -287,13 +287,17 @@ fn run_transcribe(
     depth: Arc<AtomicI64>,
 ) {
     // Build the engine on this thread (sherpa recognizers are !Send).
-    let mut engine = asr::resolve(&app, &model_id).unwrap_or_else(|e| {
-        eprintln!("[meeting] speech engine unavailable: {e}");
-        asr::Engine::None
-    });
+    let cloud = model_id == "cloud";
+    let mut engine = (!cloud)
+        .then(|| asr::resolve(&app, &model_id))
+        .transpose()
+        .unwrap_or_else(|e| {
+            eprintln!("[meeting] speech engine unavailable: {e}");
+            None
+        });
     // Warm the model up front so the first segment of the meeting isn't slow.
     // Moonshine/Parakeet already loaded when constructed; whisper is lazy.
-    if let asr::Engine::Whisper(path) = &engine {
+    if let Some(asr::Engine::Whisper(path)) = engine.as_ref() {
         if let Err(e) = app.state::<AppState>().stt.warmup(path) {
             eprintln!("[meeting] warmup failed: {e}");
         }
@@ -308,7 +312,32 @@ fn run_transcribe(
                 speaker,
                 source,
             } => {
-                let parts = asr::transcribe_parts(&app, &mut engine, &samples, lang, prompt);
+                let parts = if cloud {
+                    match tauri::async_runtime::block_on(crate::remote::transcribe(
+                        &settings::load(&app),
+                        &samples,
+                        lang,
+                    )) {
+                        Ok(text) if !text.is_empty() => vec![(
+                            0,
+                            samples.len() as i64 * 1000 / audio::WHISPER_SAMPLE_RATE as i64,
+                            text,
+                        )],
+                        Ok(_) => vec![],
+                        Err(e) => {
+                            eprintln!("[meeting] cloud transcription failed: {e}");
+                            vec![]
+                        }
+                    }
+                } else {
+                    asr::transcribe_parts(
+                        &app,
+                        engine.as_mut().expect("local speech engine"),
+                        &samples,
+                        lang,
+                        prompt,
+                    )
+                };
                 if !parts.is_empty() {
                     let segs: Vec<Segment> = parts
                         .into_iter()
@@ -329,11 +358,23 @@ fn run_transcribe(
                 }
             }
             Job::Partial { samples, speaker } => {
-                let text = asr::transcribe_parts(&app, &mut engine, &samples, lang, prompt)
+                // Request-based cloud APIs do not provide a useful partial here;
+                // finalized VAD segments arrive shortly after each pause.
+                let text = if cloud {
+                    String::new()
+                } else {
+                    asr::transcribe_parts(
+                        &app,
+                        engine.as_mut().expect("local speech engine"),
+                        &samples,
+                        lang,
+                        prompt,
+                    )
                     .into_iter()
                     .map(|(_, _, t)| t)
                     .collect::<Vec<_>>()
-                    .join(" ");
+                    .join(" ")
+                };
                 if !text.trim().is_empty() {
                     let _ = app.emit(
                         "meeting-partial",
@@ -356,6 +397,10 @@ pub fn start_with_model(
     let vad_path = models::downloaded_model_path(app, "vad-silero")?;
     // Surface a missing speech model early; the engine itself is built on the
     // transcription thread (sherpa recognizers are !Send).
-    models::downloaded_model_path(app, &model_id)?;
+    if model_id != "cloud" {
+        models::downloaded_model_path(app, &model_id)?;
+    } else if !crate::remote::voice_ready(&settings::load(app)) {
+        return Err("configure a cloud voice provider and API key in Settings first".into());
+    }
     start(app, meeting_id, model_id, vad_path, language)
 }
