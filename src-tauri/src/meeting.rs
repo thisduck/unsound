@@ -24,6 +24,9 @@ use tauri::{AppHandle, Emitter, Manager};
 /// How often the capture thread pulls new audio and lets the VADs emit finished
 /// speech segments.
 const POLL_MS: u64 = 1000;
+const MAX_QUEUED_JOBS: usize = 24;
+const CLOUD_TRANSCRIBE_WORKERS: usize = 2;
+const CLOUD_TRANSCRIBE_ATTEMPTS: usize = 3;
 
 /// A unit of audio to transcribe: a finalized segment (persisted + shown as a
 /// real line) or an in-progress partial (shown tentatively, not persisted).
@@ -53,7 +56,8 @@ pub struct MeetingState {
 struct Handle {
     stop: Arc<AtomicBool>,
     capture: Option<JoinHandle<()>>,
-    transcribe: Option<JoinHandle<()>>,
+    transcribe: Vec<JoinHandle<()>>,
+    failures: Arc<Mutex<Vec<String>>>,
 }
 
 /// Begin recording + live transcription. Returns once capture is running.
@@ -80,6 +84,12 @@ pub fn start(
             .collect()
     };
     let initial_prompt = (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
+    let cloud = model_id == "cloud";
+    // Snapshot provider selection and the key once at start. A meeting uses a
+    // stable configuration even if Settings changes while it is recording.
+    let cloud_session = cloud
+        .then(|| crate::remote::VoiceSession::new(settings::load(app)))
+        .transpose()?;
 
     let mic = settings::load(app).mic_device;
     audio::start_recording(app.clone(), &st.audio, mic)?;
@@ -89,30 +99,57 @@ pub fn start(
     }
 
     let stop = Arc::new(AtomicBool::new(false));
+    let failures = Arc::new(Mutex::new(Vec::new()));
     // Outstanding jobs in the queue; used to throttle partials so they only go
     // out when the transcriber is idle (never let partials back up the queue).
     let depth = Arc::new(AtomicI64::new(0));
-    let (tx, rx) = mpsc::channel::<Job>();
+    let (tx, rx) = mpsc::sync_channel::<Job>(MAX_QUEUED_JOBS);
+    let rx = Arc::new(Mutex::new(rx));
 
     // Capture thread (producer): audio → VAD → queue.
     let capture = {
         let app = app.clone();
         let stop = stop.clone();
         let depth = depth.clone();
-        std::thread::spawn(move || run_capture(app, vad_path, stop, tx, depth))
+        let failures = failures.clone();
+        std::thread::spawn(move || run_capture(app, vad_path, stop, tx, depth, failures))
     };
-    // Transcription thread (consumer): queue → text → persist + emit.
-    let transcribe = {
+    // Cloud jobs use a small worker pool to keep up with both audio channels.
+    // Local engines remain single-threaded because recognizers are !Send.
+    let worker_count = if cloud { CLOUD_TRANSCRIBE_WORKERS } else { 1 };
+    let mut transcribe = Vec::with_capacity(worker_count);
+    for _ in 0..worker_count {
         let app = app.clone();
-        std::thread::spawn(move || {
-            run_transcribe(app, meeting_id, model_id, language, initial_prompt, rx, depth)
-        })
-    };
+        let rx = rx.clone();
+        let depth = depth.clone();
+        let failures = failures.clone();
+        let cloud_session = cloud_session.clone();
+        transcribe.push(std::thread::spawn({
+            let meeting_id = meeting_id.clone();
+            let model_id = model_id.clone();
+            let language = language.clone();
+            let initial_prompt = initial_prompt.clone();
+            move || {
+                run_transcribe(
+                    app,
+                    meeting_id,
+                    model_id,
+                    language,
+                    initial_prompt,
+                    cloud_session,
+                    rx,
+                    depth,
+                    failures,
+                )
+            }
+        }));
+    }
 
     *active = Some(Handle {
         stop,
         capture: Some(capture),
-        transcribe: Some(transcribe),
+        transcribe,
+        failures,
     });
     *st.meeting.recording.lock().unwrap() = true;
     crate::tray::refresh_menu(app);
@@ -131,8 +168,14 @@ pub fn stop(app: &AppHandle) -> Result<(), String> {
             let _ = j.join();
         }
         // …then the transcription thread drains what's left and exits.
-        if let Some(j) = h.transcribe.take() {
-            let _ = j.join();
+        for j in h.transcribe.drain(..) {
+            if j.join().is_err() {
+                record_failure(
+                    app,
+                    &h.failures,
+                    "meeting transcription worker stopped unexpectedly".into(),
+                );
+            }
         }
     }
     let _ = audio::stop_recording(&st.audio);
@@ -179,8 +222,9 @@ fn run_capture(
     app: AppHandle,
     vad_path: PathBuf,
     stop: Arc<AtomicBool>,
-    tx: mpsc::Sender<Job>,
+    tx: mpsc::SyncSender<Job>,
     depth: Arc<AtomicI64>,
+    failures: Arc<Mutex<Vec<String>>>,
 ) {
     let mut mic_vad = make_vad(&vad_path);
     #[cfg(target_os = "macos")]
@@ -201,13 +245,35 @@ fn run_capture(
 
         let mic = audio::drain_16k(&app.state::<AppState>().audio);
         if let Some(v) = mic_vad.as_mut() {
-            handle_channel(&tx, &depth, v, &mut mic_pending, mic, stopping, "me", "mic");
+            handle_channel(
+                &app,
+                &tx,
+                &depth,
+                &failures,
+                v,
+                &mut mic_pending,
+                mic,
+                stopping,
+                "me",
+                "mic",
+            );
         }
         #[cfg(target_os = "macos")]
         {
             let sys = crate::syscapture::drain(&app.state::<AppState>().sys);
             if let Some(v) = sys_vad.as_mut() {
-                handle_channel(&tx, &depth, v, &mut sys_pending, sys, stopping, "them", "system");
+                handle_channel(
+                    &app,
+                    &tx,
+                    &depth,
+                    &failures,
+                    v,
+                    &mut sys_pending,
+                    sys,
+                    stopping,
+                    "them",
+                    "system",
+                );
             }
         }
 
@@ -222,8 +288,10 @@ fn run_capture(
 /// the transcriber is idle and we're mid-utterance — push a partial.
 #[allow(clippy::too_many_arguments)]
 fn handle_channel(
-    tx: &mpsc::Sender<Job>,
+    app: &AppHandle,
+    tx: &mpsc::SyncSender<Job>,
     depth: &Arc<AtomicI64>,
+    failures: &Arc<Mutex<Vec<String>>>,
     vad: &mut SileroVad,
     pending: &mut Vec<f32>,
     new: Vec<f32>,
@@ -246,14 +314,25 @@ fn handle_channel(
         // seg.start is the sample index into everything fed to this VAD, i.e.
         // the position on the meeting timeline; convert to milliseconds.
         let base_ms = seg.start as i64 * 1000 / audio::WHISPER_SAMPLE_RATE as i64;
-        depth.fetch_add(1, Ordering::Relaxed);
-        let _ = tx.send(Job::Final {
+        let job = Job::Final {
             samples: seg.samples,
             base_ms,
             speaker,
             source,
-        });
-        had_final = true;
+        };
+        match tx.try_send(job) {
+            Ok(()) => {
+                depth.fetch_add(1, Ordering::Relaxed);
+                had_final = true;
+            }
+            Err(mpsc::TrySendError::Full(_)) => record_failure(
+                app,
+                failures,
+                "cloud transcription queue is full; a finalized audio segment was not processed"
+                    .into(),
+            ),
+            Err(mpsc::TrySendError::Disconnected(_)) => break,
+        }
     }
 
     if had_final {
@@ -267,11 +346,15 @@ fn handle_channel(
         && pending.len() >= PARTIAL_MIN_SAMPLES
         && vad.is_speech()
     {
-        depth.fetch_add(1, Ordering::Relaxed);
-        let _ = tx.send(Job::Partial {
+        if tx
+            .try_send(Job::Partial {
             samples: pending.clone(),
             speaker,
-        });
+            })
+            .is_ok()
+        {
+            depth.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -283,28 +366,35 @@ fn run_transcribe(
     model_id: String,
     language: Option<String>,
     initial_prompt: Option<String>,
-    rx: mpsc::Receiver<Job>,
+    cloud_session: Option<crate::remote::VoiceSession>,
+    rx: Arc<Mutex<mpsc::Receiver<Job>>>,
     depth: Arc<AtomicI64>,
+    failures: Arc<Mutex<Vec<String>>>,
 ) {
     // Build the engine on this thread (sherpa recognizers are !Send).
     let cloud = model_id == "cloud";
-    let mut engine = (!cloud)
-        .then(|| asr::resolve(&app, &model_id))
-        .transpose()
-        .unwrap_or_else(|e| {
-            eprintln!("[meeting] speech engine unavailable: {e}");
-            None
-        });
+    let mut engine = if cloud {
+        asr::Engine::None
+    } else {
+        asr::resolve(&app, &model_id).unwrap_or_else(|e| {
+            record_failure(&app, &failures, format!("speech engine unavailable: {e}"));
+            asr::Engine::None
+        })
+    };
     // Warm the model up front so the first segment of the meeting isn't slow.
     // Moonshine/Parakeet already loaded when constructed; whisper is lazy.
-    if let Some(asr::Engine::Whisper(path)) = engine.as_ref() {
+    if let asr::Engine::Whisper(path) = &engine {
         if let Err(e) = app.state::<AppState>().stt.warmup(path) {
             eprintln!("[meeting] warmup failed: {e}");
         }
     }
     let lang = language.as_deref();
     let prompt = initial_prompt.as_deref();
-    while let Ok(job) = rx.recv() {
+    loop {
+        let job = match rx.lock().unwrap().recv() {
+            Ok(job) => job,
+            Err(_) => break,
+        };
         match job {
             Job::Final {
                 samples,
@@ -313,30 +403,36 @@ fn run_transcribe(
                 source,
             } => {
                 let parts = if cloud {
-                    match tauri::async_runtime::block_on(crate::remote::transcribe(
-                        &settings::load(&app),
-                        &samples,
-                        lang,
-                    )) {
-                        Ok(text) if !text.is_empty() => vec![(
-                            0,
-                            samples.len() as i64 * 1000 / audio::WHISPER_SAMPLE_RATE as i64,
-                            text,
-                        )],
-                        Ok(_) => vec![],
-                        Err(e) => {
-                            eprintln!("[meeting] cloud transcription failed: {e}");
+                    match cloud_session.as_ref() {
+                        Some(session) => match transcribe_cloud(session, &samples, lang) {
+                            Ok(text) if !text.is_empty() => vec![(
+                                0,
+                                samples.len() as i64
+                                    * 1000
+                                    / audio::WHISPER_SAMPLE_RATE as i64,
+                                text,
+                            )],
+                            Ok(_) => vec![],
+                            Err(e) => {
+                                record_failure(
+                                    &app,
+                                    &failures,
+                                    format!("cloud transcription failed after retries: {e}"),
+                                );
+                                vec![]
+                            }
+                        },
+                        None => {
+                            record_failure(
+                                &app,
+                                &failures,
+                                "cloud voice session was not initialized".into(),
+                            );
                             vec![]
                         }
                     }
                 } else {
-                    asr::transcribe_parts(
-                        &app,
-                        engine.as_mut().expect("local speech engine"),
-                        &samples,
-                        lang,
-                        prompt,
-                    )
+                    asr::transcribe_parts(&app, &mut engine, &samples, lang, prompt)
                 };
                 if !parts.is_empty() {
                     let segs: Vec<Segment> = parts
@@ -363,13 +459,7 @@ fn run_transcribe(
                 let text = if cloud {
                     String::new()
                 } else {
-                    asr::transcribe_parts(
-                        &app,
-                        engine.as_mut().expect("local speech engine"),
-                        &samples,
-                        lang,
-                        prompt,
-                    )
+                    asr::transcribe_parts(&app, &mut engine, &samples, lang, prompt)
                     .into_iter()
                     .map(|(_, _, t)| t)
                     .collect::<Vec<_>>()
@@ -384,6 +474,35 @@ fn run_transcribe(
             }
         }
         depth.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn transcribe_cloud(
+    session: &crate::remote::VoiceSession,
+    samples: &[f32],
+    language: Option<&str>,
+) -> Result<String, String> {
+    let mut last_error = String::new();
+    for attempt in 1..=CLOUD_TRANSCRIBE_ATTEMPTS {
+        match tauri::async_runtime::block_on(crate::remote::transcribe(session, samples, language)) {
+            Ok(text) => return Ok(text),
+            Err(error) => {
+                last_error = error;
+                if attempt < CLOUD_TRANSCRIBE_ATTEMPTS {
+                    std::thread::sleep(Duration::from_millis(500 * attempt as u64));
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
+
+fn record_failure(app: &AppHandle, failures: &Arc<Mutex<Vec<String>>>, message: String) {
+    eprintln!("[meeting] {message}");
+    let mut recorded = failures.lock().unwrap();
+    if !recorded.contains(&message) {
+        recorded.push(message.clone());
+        let _ = app.emit("meeting-transcription-error", &message);
     }
 }
 

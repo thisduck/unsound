@@ -160,8 +160,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const activeLlmName = usingCloudText ? `${textProvider!.id} · ${textProvider!.textModel}` : meetLlm?.name;
   const numSpeakers = meetingSpeakers ? parseInt(meetingSpeakers, 10) : undefined;
 
-  // Setup gate: meetings need a speech model, the VAD model, the segmentation
-  // model, and at least one speaker-embedding model.
+  // Setup gate: meetings need a local speech model (or configured cloud voice)
+  // plus VAD. Segmentation and speaker embeddings are optional speaker detection.
   const sttReady = sttModels.length > 0;
   const vadReady = !!models.find((m) => m.id === "vad-silero")?.downloaded;
   const segReady = !!models.find((m) => m.id === "diarize-segmentation")?.downloaded;
@@ -189,7 +189,9 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     // Live transcript: segments finalized by the backend as the meeting runs.
     // A finalized segment supersedes that channel's partial.
     const sub3 = on.meetingSegments((segs) => {
-      setLiveSegments((cur) => [...cur, ...segs]);
+      // Cloud workers can finish adjacent segments out of order; keep the live
+      // transcript in its capture-time order just like the stored transcript.
+      setLiveSegments((cur) => [...cur, ...segs].sort((a, b) => a.startMs - b.startMs));
       setPartials((cur) => {
         const next = { ...cur };
         for (const s of segs) delete next[s.speaker];
@@ -199,6 +201,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     const sub5 = on.meetingPartial(({ speaker, text }) =>
       setPartials((cur) => ({ ...cur, [speaker]: text })),
     );
+    const sub7 = on.meetingTranscriptionError((message) => setError(message));
     const sub6 = on.settingsChanged(() => api.getSettings().then(setCloudSettings).catch(() => {}));
     // Tray "Start / stop meeting".
     const sub4 = on.meetingToggle(() => toggleRef.current());
@@ -208,6 +211,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       sub3.then((un) => un());
       sub4.then((un) => un());
       sub5.then((un) => un());
+      sub7.then((un) => un());
       sub6.then((un) => un());
     };
   }, []);

@@ -245,6 +245,8 @@ export const on = {
     listen<Segment[]>("meeting-segments", (e) => cb(e.payload)),
   meetingPartial: (cb: (p: { speaker: string; text: string }) => void): Promise<UnlistenFn> =>
     listen<{ speaker: string; text: string }>("meeting-partial", (e) => cb(e.payload)),
+  meetingTranscriptionError: (cb: (message: string) => void): Promise<UnlistenFn> =>
+    listen<string>("meeting-transcription-error", (e) => cb(e.payload)),
   meetingToggle: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("meeting-toggle", () => cb()),
   hotkeyToggle: (cb: () => void): Promise<UnlistenFn> =>

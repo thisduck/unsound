@@ -5,8 +5,49 @@ use crate::audio::WHISPER_SAMPLE_RATE;
 use crate::settings::{CloudProvider, Settings};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
+use std::time::Duration;
 
-fn selected<'a>(settings: &'a Settings, id: &str, purpose: &str) -> Result<&'a CloudProvider, String> {
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A reusable, bounded HTTP client for one remote-processing session.
+#[derive(Clone)]
+pub struct VoiceSession {
+    settings: Settings,
+    client: reqwest::Client,
+}
+
+impl VoiceSession {
+    pub fn new(settings: Settings) -> Result<Self, String> {
+        selected(&settings, &settings.cloud_voice_provider, "voice")?;
+        Ok(Self {
+            settings,
+            client: request_client()?,
+        })
+    }
+}
+
+fn request_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| format!("could not create cloud HTTP client: {e}"))
+}
+
+fn request_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        format!("cloud request timed out after {} seconds", REQUEST_TIMEOUT.as_secs())
+    } else {
+        error.to_string()
+    }
+}
+
+fn selected<'a>(
+    settings: &'a Settings,
+    id: &str,
+    purpose: &str,
+) -> Result<&'a CloudProvider, String> {
     if id.trim().is_empty() {
         return Err(format!("choose a cloud {purpose} provider in Settings first"));
     }
@@ -46,12 +87,16 @@ fn wav(samples: &[f32]) -> Vec<u8> {
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
     for sample in samples {
-        out.extend_from_slice(&((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes());
+        let pcm = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        out.extend_from_slice(&pcm.to_le_bytes());
     }
     out
 }
 
-async fn json_response(provider: &str, response: reqwest::Response) -> Result<Value, String> {
+async fn json_response(
+    provider: &str,
+    response: reqwest::Response,
+) -> Result<Value, String> {
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -62,14 +107,21 @@ async fn json_response(provider: &str, response: reqwest::Response) -> Result<Va
 
 /// Transcribe a completed 16kHz mono segment. These APIs are deliberately
 /// request-based first; Unsound's local VAD still provides natural chunks.
-pub async fn transcribe(settings: &Settings, samples: &[f32], language: Option<&str>) -> Result<String, String> {
-    let p = selected(settings, &settings.cloud_voice_provider, "voice")?;
+pub async fn transcribe(
+    session: &VoiceSession,
+    samples: &[f32],
+    language: Option<&str>,
+) -> Result<String, String> {
+    let p = selected(
+        &session.settings,
+        &session.settings.cloud_voice_provider,
+        "voice",
+    )?;
     let model = p.voice_model.trim();
     if model.is_empty() {
         return Err(format!("choose a voice model for {} in Settings", p.id));
     }
     let audio = wav(samples);
-    let client = reqwest::Client::new();
     let response = match p.id.as_str() {
         "openai" | "mistral" => {
             let url = if p.id == "openai" {
@@ -86,25 +138,41 @@ pub async fn transcribe(settings: &Settings, samples: &[f32], language: Option<&
                         .mime_str("audio/wav")
                         .map_err(|e| e.to_string())?,
                 );
-            if let Some(lang) = language.filter(|v| !v.is_empty()) {
+            if let Some(lang) = language.filter(|value| !value.is_empty()) {
                 form = form.text("language", lang.to_string());
             }
-            client
+            session
+                .client
                 .post(url)
                 .header(AUTHORIZATION, format!("Bearer {}", p.api_key))
                 .multipart(form)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(request_error)?
         }
-        "deepgram" => client
-            .post(format!("https://api.deepgram.com/v1/listen?model={model}&smart_format=true"))
-            .header(AUTHORIZATION, format!("Token {}", p.api_key))
-            .header(CONTENT_TYPE, "audio/wav")
-            .body(audio)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?,
+        "deepgram" => {
+            let mut url = reqwest::Url::parse("https://api.deepgram.com/v1/listen")
+                .map_err(|e| e.to_string())?;
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("model", model);
+                query.append_pair("smart_format", "true");
+                if let Some(lang) = language.filter(|value| !value.is_empty()) {
+                    query.append_pair("language", lang);
+                } else {
+                    query.append_pair("detect_language", "true");
+                }
+            }
+            session
+                .client
+                .post(url)
+                .header(AUTHORIZATION, format!("Token {}", p.api_key))
+                .header(CONTENT_TYPE, "audio/wav")
+                .body(audio)
+                .send()
+                .await
+                .map_err(request_error)?
+        }
         "elevenlabs" => {
             let mut form = reqwest::multipart::Form::new()
                 .text("model_id", model.to_string())
@@ -115,16 +183,17 @@ pub async fn transcribe(settings: &Settings, samples: &[f32], language: Option<&
                         .mime_str("audio/wav")
                         .map_err(|e| e.to_string())?,
                 );
-            if let Some(lang) = language.filter(|v| !v.is_empty()) {
+            if let Some(lang) = language.filter(|value| !value.is_empty()) {
                 form = form.text("language_code", lang.to_string());
             }
-            client
+            session
+                .client
                 .post("https://api.elevenlabs.io/v1/speech-to-text")
                 .header("xi-api-key", &p.api_key)
                 .multipart(form)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(request_error)?
         }
         other => return Err(format!("unsupported cloud voice provider: {other}")),
     };
@@ -150,9 +219,14 @@ async fn chat(settings: &Settings, system: &str, user: &str) -> Result<String, S
     let url = match p.id.as_str() {
         "openai" => "https://api.openai.com/v1/chat/completions",
         "mistral" => "https://api.mistral.ai/v1/chat/completions",
-        other => return Err(format!("{other} is not available for meeting text; choose OpenAI or Mistral")),
+        other => {
+            return Err(format!(
+                "{other} is not available for meeting text; choose OpenAI or Mistral"
+            ))
+        }
     };
-    let response = reqwest::Client::new()
+    let client = request_client()?;
+    let response = client
         .post(url)
         .header(AUTHORIZATION, format!("Bearer {}", p.api_key))
         .json(&json!({
@@ -162,7 +236,7 @@ async fn chat(settings: &Settings, system: &str, user: &str) -> Result<String, S
         }))
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(request_error)?;
     let json = json_response(&p.id, response).await?;
     json
         .pointer("/choices/0/message/content")
@@ -174,11 +248,25 @@ async fn chat(settings: &Settings, system: &str, user: &str) -> Result<String, S
 }
 
 pub async fn summarize(settings: &Settings, transcript: &str) -> Result<String, String> {
-    chat(settings, crate::llm::MEETING_SUMMARY_PROMPT, &format!("Transcript:\n\n{transcript}")).await
+    chat(
+        settings,
+        crate::llm::MEETING_SUMMARY_PROMPT,
+        &format!("Transcript:\n\n{transcript}"),
+    )
+    .await
 }
 
-pub async fn answer(settings: &Settings, context: &str, question: &str) -> Result<String, String> {
-    chat(settings, crate::llm::MEETING_QA_PROMPT, &format!("{context}\n\nQuestion: {question}")).await
+pub async fn answer(
+    settings: &Settings,
+    context: &str,
+    question: &str,
+) -> Result<String, String> {
+    chat(
+        settings,
+        crate::llm::MEETING_QA_PROMPT,
+        &format!("{context}\n\nQuestion: {question}"),
+    )
+    .await
 }
 
 #[cfg(test)]
