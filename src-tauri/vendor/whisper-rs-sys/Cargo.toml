@@ -1,0 +1,33 @@
+# whisper-rs-sys 0.15.0, patched to build whisper.cpp against llama-cpp-sys-2's
+# ggml instead of its own copy. See README.md.
+[package]
+name = "whisper-rs-sys"
+version = "0.15.0"
+edition = "2021"
+description = "Rust bindings for whisper.cpp (FFI bindings)"
+license = "Unlicense"
+repository = "https://codeberg.org/tazz4843/whisper-rs"
+links = "whisper"
+
+[features]
+coreml = []
+cuda = []
+hipblas = []
+openblas = []
+metal = []
+vulkan = []
+force-debug = []
+openmp = []
+intel-sycl = []
+
+[dependencies]
+# Supplies ggml (DEP_LLAMA_GGML_CMAKE_DIR). whisper.cpp must be a release built
+# for a compatible ggml; update the two together.
+llama-cpp-sys-2 = "0.1.157"
+
+[build-dependencies]
+cmake = "0.1"
+bindgen = "0.72"
+cfg-if = "1"
+fs_extra = "1.3"
+semver = "1.0"

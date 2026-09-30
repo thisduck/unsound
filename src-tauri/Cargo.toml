@@ -23,7 +23,7 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 whisper-rs = "0.16.0"
-llama-cpp-2 = "0.1.150"
+llama-cpp-2 = "0.1.157"
 cpal = "0.18.1"
 rubato = "0.16"
 futures-util = "0.3.32"
@@ -44,7 +44,7 @@ sherpa-rs = { version = "0.6.8", default-features = false, features = ["download
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
 core-graphics = "0.25"
-llama-cpp-2 = { version = "0.1.150", features = ["metal"] }
+llama-cpp-2 = { version = "0.1.157", features = ["metal"] }
 macos-accessibility-client = "0.0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
@@ -62,3 +62,8 @@ objc2-core-audio-types = { version = "0.3", features = ["std"] }
 block2 = "0.6"
 dispatch2 = "0.3"
 
+
+# whisper.cpp built against llama.cpp's ggml, so the binary holds one copy of
+# it rather than two colliding versions. See vendor/whisper-rs-sys/README.md.
+[patch.crates-io]
+whisper-rs-sys = { path = "vendor/whisper-rs-sys" }
