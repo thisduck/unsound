@@ -128,8 +128,8 @@ export const api = {
       targetLang: targetLang ?? null,
       transliterate,
     }),
-  startLiveDictation: (modelId: string, language: string | undefined, captions: boolean) =>
-    invoke<void>("start_live_dictation", { modelId, language: language ?? null, captions }),
+  startLiveDictation: (modelId: string, language?: string) =>
+    invoke<void>("start_live_dictation", { modelId, language: language ?? null }),
   stopLiveDictation: () => invoke<void>("stop_live_dictation"),
   cleanupText: (
     modelId: string,

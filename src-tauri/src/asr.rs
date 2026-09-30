@@ -7,6 +7,8 @@ use crate::{models, stt, AppState};
 use sherpa_rs::moonshine::{MoonshineConfig, MoonshineRecognizer};
 use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
 pub struct Moonshine {
@@ -138,6 +140,25 @@ pub fn transcribe_parts(
         Engine::Moonshine(m) => text_part(m.transcribe(samples), samples.len()),
         Engine::Parakeet(p) => text_part(p.transcribe(samples), samples.len()),
         Engine::None => Vec::new(),
+    }
+}
+
+/// Like `transcribe_text`, for a live preview: Whisper gives up soon after
+/// `stop` is set. (The sherpa models are quick enough to let finish.)
+pub fn transcribe_preview(
+    app: &AppHandle,
+    engine: &mut Engine,
+    samples: &[f32],
+    language: Option<&str>,
+    initial_prompt: Option<&str>,
+    stop: Arc<AtomicBool>,
+) -> Result<String, String> {
+    match engine {
+        Engine::Whisper(path) => {
+            let st = app.state::<AppState>();
+            stt::transcribe_until(&st.stt, path, samples, language, initial_prompt, Some(stop))
+        }
+        _ => transcribe_text(app, engine, samples, language, initial_prompt),
     }
 }
 

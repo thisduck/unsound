@@ -416,11 +416,11 @@ export default function App() {
         setLiveText("");
         setRawOpen(false);
         changePhase("recording");
-        // Background work while recording: live captions for in-app takes
-        // (the hotkey flow uses the overlay and isn't looking at the window),
-        // and spoken-language detection when it's on auto.
+        // Background work while recording: live captions (shown here, or in
+        // the overlay bubble for hotkey takes), and spoken-language detection
+        // when it's on auto.
         if (stt) {
-          api.startLiveDictation(stt.id, language || undefined, !fromHotkey).catch(() => {});
+          api.startLiveDictation(stt.id, language || undefined).catch(() => {});
         }
         if (fromHotkey) {
           await api.setOverlay(true).catch(() => {});

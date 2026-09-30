@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -42,6 +43,11 @@ fn is_effectively_silent(samples: &[f32]) -> bool {
     samples
         .iter()
         .all(|sample| sample.abs() < SILENCE_PEAK_THRESHOLD)
+}
+
+/// Whisper's abort hook: give up once the `AtomicBool` behind `flag` is set.
+unsafe extern "C" fn abort_when_set(flag: *mut std::ffi::c_void) -> bool {
+    (*(flag as *const AtomicBool)).load(Ordering::Relaxed)
 }
 
 fn n_threads() -> i32 {
@@ -150,6 +156,19 @@ pub fn transcribe(
     language: Option<&str>,
     initial_prompt: Option<&str>,
 ) -> Result<String, String> {
+    transcribe_until(state, model_path, samples, language, initial_prompt, None)
+}
+
+/// `transcribe`, giving up with an error soon after `stop` is set — for live
+/// previews, which mustn't hold up the final pass when a take ends.
+pub fn transcribe_until(
+    state: &SttState,
+    model_path: &Path,
+    samples: &[f32],
+    language: Option<&str>,
+    initial_prompt: Option<&str>,
+    stop: Option<Arc<AtomicBool>>,
+) -> Result<String, String> {
     if samples.len() < 1600 {
         return Err("recording is too short to transcribe".into());
     }
@@ -173,6 +192,16 @@ pub fn transcribe(
     // Bias recognition toward the user's vocabulary (names, jargon).
     if let Some(p) = initial_prompt {
         params.set_initial_prompt(p);
+    }
+    if let Some(stop) = stop.as_ref() {
+        // Wired directly: whisper-rs 0.16's set_abort_callback_safe hands its
+        // trampoline the wrong pointer type, so the closure reads garbage and
+        // aborts at once.
+        // SAFETY: `stop` is alive until this function returns, after `full`.
+        unsafe {
+            params.set_abort_callback(Some(abort_when_set));
+            params.set_abort_callback_user_data(Arc::as_ptr(stop) as *mut std::ffi::c_void);
+        }
     }
 
     // Dictation often begins immediately after push-to-talk is pressed. Keep

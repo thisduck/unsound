@@ -162,22 +162,21 @@ fn vocab_prompt(app: &AppHandle) -> Option<String> {
     (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")))
 }
 
-/// Start a take's background work: live captions (`captions`), so the words
-/// appear in the window as you speak, and — with the language on auto —
-/// language detection. The final cleaned text still lands at stop.
+/// Start a take's background work: live captions, so the words appear (in the
+/// window, or the overlay bubble) as you speak, and — with the language on
+/// auto — language detection. The final cleaned text still lands at stop.
 #[tauri::command]
 async fn start_live_dictation(
     app: AppHandle,
     model_id: String,
     language: Option<String>,
-    captions: bool,
 ) -> Result<(), String> {
     // Validate the model is present; the engine is built on the live thread.
     models::downloaded_model_path(&app, &model_id)?;
     let initial_prompt = vocab_prompt(&app);
     // May wait out a previous take's worker; keep that off the main thread.
     tauri::async_runtime::spawn_blocking(move || {
-        dictation::start(&app, model_id, language, initial_prompt, captions)
+        dictation::start(&app, model_id, language, initial_prompt)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -945,10 +944,13 @@ fn apply_shortcuts(app: &AppHandle, s: &Settings) -> Result<(), String> {
     Ok(())
 }
 
-const OVERLAY_W: f64 = 200.0;
-const OVERLAY_H: f64 = 56.0;
+// Room for the pill plus a three-line caption above it. The window is
+// transparent and click-through, so the unused area is invisible.
+const OVERLAY_W: f64 = 460.0;
+const OVERLAY_H: f64 = 136.0;
 
-/// Small always-on-top wave shown while dictating into other apps.
+/// Small always-on-top wave shown while dictating into other apps, with the
+/// words so far streaming above it.
 fn create_overlay(app: &AppHandle) -> tauri::Result<()> {
     let overlay = tauri::WebviewWindowBuilder::new(
         app,

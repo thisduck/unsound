@@ -1215,9 +1215,52 @@ body {
   height: 100%;
 }
 
+/* The window is sized for the caption; the pill sits at its bottom edge and
+   the caption grows upward from it. */
+.overlay-stack {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+}
+
+.overlay-caption {
+  max-width: 100%;
+  max-height: calc(3 * 1.4em + 16px);
+  box-sizing: border-box;
+  padding: 8px 14px;
+  border-radius: 14px;
+  background: rgba(24, 26, 30, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(6px);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  line-height: 1.4;
+  /* Bottom-aligned: overflow spills off the top, keeping the newest words. */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
+.overlay-caption p {
+  margin: 0;
+}
+
+.overlay-caption.clipped p {
+  mask-image: linear-gradient(to bottom, transparent, #000 1.4em);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 1.4em);
+}
+
 .overlay-pill {
+  flex: none;
+  width: 180px;
   height: 44px;
-  margin: 6px 10px;
   border-radius: 999px;
   background: rgba(24, 26, 30, 0.88);
   border: 1px solid rgba(255, 255, 255, 0.09);
