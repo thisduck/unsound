@@ -116,6 +116,9 @@ async fn transcribe(
     // a sherpa model) is resolved on the blocking thread.
     let worker_app = app.clone();
     let text = tauri::async_runtime::spawn_blocking(move || {
+        // On auto, use the language detected while recording, sparing Whisper
+        // its own detection pass.
+        let language = language.or_else(|| dictation::finish(&worker_app));
         let mut engine = asr::resolve(&worker_app, &model_id)?;
         asr::transcribe_text(
             &worker_app,
@@ -131,6 +134,21 @@ async fn transcribe(
     Ok(text)
 }
 
+/// Load the selected speech model and compile its GPU kernels ahead of the
+/// first take (at launch, and whenever the selection changes).
+#[tauri::command]
+async fn warm_stt(app: AppHandle, model_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // The sherpa models are built per use, so there's nothing to keep warm.
+        match asr::whisper_path(&app, &model_id)? {
+            Some(path) => app.state::<AppState>().stt.warmup(&path),
+            None => Ok(()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The user's corrected vocabulary, as a Whisper `initial_prompt` that biases
 /// recognition toward names/jargon.
 fn vocab_prompt(app: &AppHandle) -> Option<String> {
@@ -144,23 +162,30 @@ fn vocab_prompt(app: &AppHandle) -> Option<String> {
     (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")))
 }
 
-/// Start live dictation captions: while recording, the words appear in the
-/// window as you speak. The final cleaned text still lands at stop.
+/// Start a take's background work: live captions (`captions`), so the words
+/// appear in the window as you speak, and — with the language on auto —
+/// language detection. The final cleaned text still lands at stop.
 #[tauri::command]
-fn start_live_dictation(
+async fn start_live_dictation(
     app: AppHandle,
     model_id: String,
     language: Option<String>,
+    captions: bool,
 ) -> Result<(), String> {
     // Validate the model is present; the engine is built on the live thread.
     models::downloaded_model_path(&app, &model_id)?;
     let initial_prompt = vocab_prompt(&app);
-    dictation::start(&app, model_id, language, initial_prompt)
+    // May wait out a previous take's worker; keep that off the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        dictation::start(&app, model_id, language, initial_prompt, captions)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn stop_live_dictation(app: AppHandle) {
-    dictation::stop(&app);
+async fn stop_live_dictation(app: AppHandle) {
+    let _ = tauri::async_runtime::spawn_blocking(move || dictation::stop(&app)).await;
 }
 
 /// Decode an uploaded audio file into the recording buffer, then run the
@@ -210,6 +235,55 @@ async fn transcribe_file(
     Ok(text)
 }
 
+/// The cleanup system prompt — the fixed base, the user's additions on top,
+/// and their dictionary — plus the chosen writing style.
+fn cleanup_setup(
+    app: &AppHandle,
+    prompt: Option<String>,
+    style_id: Option<String>,
+) -> (String, Option<settings::Style>) {
+    let settings = settings::load(app);
+    let mut system_prompt = llm::DEFAULT_CLEANUP_PROMPT.to_string();
+    if let Some(additions) = prompt.filter(|p| !p.trim().is_empty()) {
+        system_prompt.push_str(&format!(
+            "\n\nAdditional instructions from the user (apply alongside the rules above):\n{additions}"
+        ));
+    }
+    system_prompt.push_str(&llm::dictionary_addendum(&settings.dictionary));
+    let style = style_id
+        .filter(|id| !id.is_empty())
+        .and_then(|id| settings.styles.into_iter().find(|s| s.id == id));
+    (system_prompt, style)
+}
+
+/// Load the cleanup model and process the prompt every take shares, ahead of
+/// the first take (at launch, and when the model, style or language changes).
+/// Takes the same settings as `cleanup_text`.
+#[tauri::command]
+async fn warm_llm(
+    app: AppHandle,
+    model_id: String,
+    prompt: Option<String>,
+    style_id: Option<String>,
+    target_lang: Option<String>,
+    transliterate: bool,
+) -> Result<(), String> {
+    let model_path = models::downloaded_model_path(&app, &model_id)?;
+    let (system_prompt, style) = cleanup_setup(&app, prompt, style_id);
+    tauri::async_runtime::spawn_blocking(move || {
+        llm::prime_cleanup(
+            &app.state::<AppState>().llm,
+            &model_path,
+            &system_prompt,
+            style.as_ref(),
+            target_lang.as_deref(),
+            transliterate,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn cleanup_text(
     app: AppHandle,
@@ -221,17 +295,7 @@ async fn cleanup_text(
     transliterate: bool,
 ) -> Result<String, String> {
     let model_path = models::downloaded_model_path(&app, &model_id)?;
-    // The base prompt is fixed; the user contributes additions on top.
-    let mut system_prompt = llm::DEFAULT_CLEANUP_PROMPT.to_string();
-    if let Some(additions) = prompt.filter(|p| !p.trim().is_empty()) {
-        system_prompt.push_str(&format!(
-            "\n\nAdditional instructions from the user (apply alongside the rules above):\n{additions}"
-        ));
-    }
-    system_prompt.push_str(&llm::dictionary_addendum(&settings::load(&app).dictionary));
-    let style = style_id
-        .filter(|id| !id.is_empty())
-        .and_then(|id| settings::load(&app).styles.into_iter().find(|s| s.id == id));
+    let (system_prompt, style) = cleanup_setup(&app, prompt, style_id);
     let emitter = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -1014,6 +1078,8 @@ pub fn run() {
             start_recording,
             stop_recording,
             transcribe,
+            warm_stt,
+            warm_llm,
             transcribe_file,
             start_live_dictation,
             stop_live_dictation,

@@ -113,8 +113,23 @@ export const api = {
     invoke<string>("transcribe", { modelId, language: language ?? null, translate }),
   transcribeFile: (path: string, modelId: string, language?: string, translate = false) =>
     invoke<string>("transcribe_file", { path, modelId, language: language ?? null, translate }),
-  startLiveDictation: (modelId: string, language?: string) =>
-    invoke<void>("start_live_dictation", { modelId, language: language ?? null }),
+  warmStt: (modelId: string) => invoke<void>("warm_stt", { modelId }),
+  warmLlm: (
+    modelId: string,
+    prompt?: string,
+    styleId?: string,
+    targetLang?: string,
+    transliterate = false,
+  ) =>
+    invoke<void>("warm_llm", {
+      modelId,
+      prompt: prompt ?? null,
+      styleId: styleId ?? null,
+      targetLang: targetLang ?? null,
+      transliterate,
+    }),
+  startLiveDictation: (modelId: string, language: string | undefined, captions: boolean) =>
+    invoke<void>("start_live_dictation", { modelId, language: language ?? null, captions }),
   stopLiveDictation: () => invoke<void>("stop_live_dictation"),
   cleanupText: (
     modelId: string,

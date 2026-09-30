@@ -100,6 +100,14 @@ pub fn resolve(app: &AppHandle, model_id: &str) -> Result<Engine, String> {
     }
 }
 
+/// The model file for a Whisper model id; `None` for the sherpa models.
+pub fn whisper_path(app: &AppHandle, model_id: &str) -> Result<Option<PathBuf>, String> {
+    if !models::find_model(app, model_id)?.files.is_empty() {
+        return Ok(None);
+    }
+    models::downloaded_model_path(app, model_id).map(Some)
+}
+
 fn text_part(text: String, n_samples: usize) -> Vec<(i64, i64, String)> {
     if text.is_empty() {
         Vec::new()

@@ -1,10 +1,12 @@
 use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::TokenToStringError;
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -32,6 +34,10 @@ Preserve filenames, commands, paths, IDs, code, quoted text, branch names, and U
 Output only the cleaned text, without the tags."#;
 
 const MAX_NEW_TOKENS: usize = 4096;
+/// Largest context kept alive between cleanups. Its KV cache stays resident
+/// (~0.9 GB for Qwen3 4B at a typical dictation's 6k), so bigger prompts —
+/// long audio files — get a one-off context instead.
+const CACHED_CTX_MAX: usize = 8192;
 
 static BACKEND: OnceLock<Result<LlamaBackend, String>> = OnceLock::new();
 
@@ -46,12 +52,29 @@ fn backend() -> Result<&'static LlamaBackend, String> {
 #[derive(Default)]
 pub struct LlmState {
     loaded: Mutex<Option<(String, Arc<LlamaModel>)>>,
+    /// Cleanup's long-lived context. Every take's prompt opens with the same
+    /// ~1.1k tokens (instructions, style samples, examples); keeping them
+    /// processed saves ~0.6 s per take.
+    cleanup: Mutex<Option<CachedContext>>,
 }
+
+/// A context kept between prompts, with the tokens its KV cache holds, so the
+/// next prompt only processes where it departs from the last one.
+struct CachedContext {
+    // Declared before `model` so it drops first: it borrows the model.
+    ctx: LlamaContext<'static>,
+    model: Arc<LlamaModel>,
+    tokens: Vec<LlamaToken>,
+}
+
+// The context is only ever used by whoever holds `LlmState::cleanup`.
+unsafe impl Send for CachedContext {}
 
 impl LlmState {
     /// Drop the cached model so its Metal buffers are released before
     /// ggml's static destructors run at process exit.
     pub fn clear(&self) {
+        *self.cleanup.lock().unwrap() = None;
         *self.loaded.lock().unwrap() = None;
     }
 
@@ -63,6 +86,8 @@ impl LlmState {
                 return Ok(model.clone());
             }
         }
+        // A context on the old model would keep it resident alongside the new.
+        *self.cleanup.lock().unwrap() = None;
         let backend = backend()?;
         // Offload everything to the GPU where one exists (Metal on macOS);
         // harmless on CPU-only builds.
@@ -262,9 +287,92 @@ pub fn cleanup_text(
     // Romanize the original words into the Latin alphabet without translating.
     transliterate: bool,
 ) -> Result<String, String> {
+    let emit = &mut |t: &str| {
+        let _ = app.emit("llm-token", t);
+    };
+    cleanup(emit, state, model_path, system_prompt, transcript, style, target_lang, transliterate)
+}
+
+/// `cleanup_text`, streaming tokens to `on_token`.
+#[allow(clippy::too_many_arguments)]
+fn cleanup(
+    on_token: &mut dyn FnMut(&str),
+    state: &LlmState,
+    model_path: &Path,
+    system_prompt: &str,
+    transcript: &str,
+    style: Option<&crate::settings::Style>,
+    target_lang: Option<&str>,
+    transliterate: bool,
+) -> Result<String, String> {
     let backend = backend()?;
     let model = state.model_for(model_path)?;
+    let (prompt, force_lowercase) = cleanup_prompt(
+        &model,
+        system_prompt,
+        transcript,
+        style,
+        target_lang,
+        transliterate,
+    )?;
+    let tokens = tokenize(&model, &prompt)?;
+    let output = with_prompt(state, backend, &model, &tokens, |ctx, batch| {
+        sample(on_token, &model, ctx, batch, tokens.len(), force_lowercase, 0.2)
+    })?;
 
+    // Small models occasionally echo the wrapper tags; strip them.
+    let mut out = output.as_str();
+    out = out.strip_prefix("<transcript>").unwrap_or(out);
+    out = out.strip_suffix("</transcript>").unwrap_or(out);
+    Ok(out.trim().to_string())
+}
+
+/// Load the cleanup model and process the part of the prompt every take
+/// shares, so the first take after launch — or after a change of model, style
+/// or language — is as quick as the rest.
+pub fn prime_cleanup(
+    state: &LlmState,
+    model_path: &Path,
+    system_prompt: &str,
+    style: Option<&crate::settings::Style>,
+    target_lang: Option<&str>,
+    transliterate: bool,
+) -> Result<(), String> {
+    let backend = backend()?;
+    let model = state.model_for(model_path)?;
+    // First the shared part alone (an empty transcript: the prompt matches a
+    // real take's up to the transcript), then a dry-run take on top of it, one
+    // token deep — so the GPU kernels a take uses (a short batch, then
+    // single-token steps) are compiled now rather than during the first take.
+    for transcript in ["", "okay, let's see how this sounds."] {
+        let (prompt, _) =
+            cleanup_prompt(&model, system_prompt, transcript, style, target_lang, transliterate)?;
+        let tokens = tokenize(&model, &prompt)?;
+        with_prompt(state, backend, &model, &tokens, |ctx, batch| {
+            if transcript.is_empty() {
+                return Ok(());
+            }
+            let token = LlamaSampler::greedy().sample(ctx, batch.n_tokens() - 1);
+            batch.clear();
+            batch
+                .add(token, tokens.len() as i32, &[0], true)
+                .map_err(|e| e.to_string())?;
+            ctx.decode(batch).map_err(|e| format!("decode failed: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// Build the cleanup prompt for `transcript`, and whether the style forces
+/// lowercase output.
+fn cleanup_prompt(
+    model: &LlamaModel,
+    system_prompt: &str,
+    transcript: &str,
+    style: Option<&crate::settings::Style>,
+    target_lang: Option<&str>,
+    transliterate: bool,
+) -> Result<(String, bool), String> {
     let style = style.filter(|s| {
         !s.notes.trim().is_empty()
             || s.lowercase
@@ -329,48 +437,103 @@ pub fn cleanup_text(
         ("assistant", "Please rewrite this in a more formal tone.".to_string()),
         ("user", format!("{}{final_user}", wrap(transcript))),
     ];
-    let prompt = render_prompt(&model, &messages)?;
-
+    let prompt = render_prompt(model, &messages)?;
     let force_lowercase = style.map(|s| s.lowercase).unwrap_or(false);
-    let output = generate(app, backend, &model, &prompt, force_lowercase, "llm-token", 0.2)?;
-
-    // Small models occasionally echo the wrapper tags; strip them.
-    let mut out = output.as_str();
-    out = out.strip_prefix("<transcript>").unwrap_or(out);
-    out = out.strip_suffix("</transcript>").unwrap_or(out);
-    Ok(out.trim().to_string())
+    Ok((prompt, force_lowercase))
 }
 
-/// Shared llama.cpp generation: tokenize `prompt`, ingest it in batch-sized
-/// chunks, then sample to end-of-generation, streaming decoded UTF-8 to the
-/// frontend on `stream_event`. Returns the full generated text, trimmed.
-fn generate(
-    app: &AppHandle,
-    backend: &LlamaBackend,
-    model: &LlamaModel,
-    prompt: &str,
-    force_lowercase: bool,
-    stream_event: &str,
-    temperature: f32,
-) -> Result<String, String> {
-    let tokens = model
+fn tokenize(model: &LlamaModel, prompt: &str) -> Result<Vec<LlamaToken>, String> {
+    model
         .str_to_token(prompt, AddBos::Always)
-        .map_err(|e| format!("tokenization failed: {e}"))?;
-    if tokens.is_empty() {
-        return Ok(String::new());
-    }
-    let n_ctx = (tokens.len() + MAX_NEW_TOKENS + 16).max(2048) as u32;
-    let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx));
-    let mut ctx = model
-        .new_context(backend, ctx_params)
-        .map_err(|e| format!("failed to create LLM context: {e}"))?;
+        .map_err(|e| format!("tokenization failed: {e}"))
+}
 
-    // Ingest the prompt in chunks that fit llama.cpp's batch limit; a single
-    // batch of thousands of tokens (long meetings/files) otherwise aborts in ggml.
+/// Context size for a prompt of `n_prompt` tokens plus the longest reply.
+fn ctx_size(n_prompt: usize) -> usize {
+    (n_prompt + MAX_NEW_TOKENS + 16).max(2048)
+}
+
+/// Run `f` on a context whose KV cache holds `tokens`, with the batch that
+/// produced the last token's logits. Reuses cleanup's long-lived context,
+/// processing only what differs from the previous prompt; a prompt too long to
+/// keep resident gets a one-off context.
+fn with_prompt<R>(
+    state: &LlmState,
+    backend: &LlamaBackend,
+    model: &Arc<LlamaModel>,
+    tokens: &[LlamaToken],
+    f: impl FnOnce(&mut LlamaContext<'_>, &mut LlamaBatch<'_>) -> Result<R, String>,
+) -> Result<R, String> {
+    if tokens.is_empty() {
+        return Err("empty prompt".into());
+    }
+    let n_ctx = ctx_size(tokens.len());
+    let new_context = |n_ctx: usize| {
+        let params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx as u32));
+        model
+            .new_context(backend, params)
+            .map_err(|e| format!("failed to create LLM context: {e}"))
+    };
+    if n_ctx > CACHED_CTX_MAX {
+        let mut ctx = new_context(n_ctx)?;
+        let mut batch = ingest(&mut ctx, tokens, 0)?;
+        return f(&mut ctx, &mut batch);
+    }
+
+    let mut cache = state.cleanup.lock().unwrap();
+    let fits = cache
+        .as_ref()
+        .is_some_and(|c| Arc::ptr_eq(&c.model, model) && c.ctx.n_ctx() as usize >= n_ctx);
+    if !fits {
+        *cache = None; // free the old KV cache before allocating the next
+        // Headroom, so a slightly longer prompt (another style, a longer take)
+        // doesn't force a new context and lose the cache.
+        let ctx = new_context(n_ctx.next_multiple_of(2048).min(CACHED_CTX_MAX))?;
+        // SAFETY: the context borrows the model inside the `Arc` stored beside
+        // it, which is dropped after it (field order) and never moves.
+        let ctx = unsafe { std::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(ctx) };
+        *cache = Some(CachedContext {
+            ctx,
+            model: model.clone(),
+            tokens: Vec::new(),
+        });
+    }
+    let c = cache.as_mut().expect("context was just ensured");
+
+    // Keep the prefix shared with what's cached; always re-run the last token
+    // so there are fresh logits to sample from.
+    let mut keep = c
+        .tokens
+        .iter()
+        .zip(tokens)
+        .take_while(|(a, b)| a == b)
+        .count()
+        .min(tokens.len() - 1);
+    if !c.ctx.clear_kv_cache_seq(Some(0), Some(keep as u32), None).unwrap_or(false) {
+        // Recurrent models can't drop just the tail; start over.
+        c.ctx.clear_kv_cache();
+        keep = 0;
+    }
+    // Not trusted again until the new prompt is fully in.
+    c.tokens.clear();
+    let mut batch = ingest(&mut c.ctx, tokens, keep)?;
+    // Anything generated after these is dropped by the next call's trim.
+    c.tokens = tokens.to_vec();
+    f(&mut c.ctx, &mut batch)
+}
+
+/// Decode `tokens[start..]` (positions carry on from `start`) in chunks that
+/// fit llama.cpp's batch limit — a single batch of thousands of tokens (long
+/// meetings/files) otherwise aborts in ggml. Only the last token gets logits.
+fn ingest<'b>(
+    ctx: &mut LlamaContext<'_>,
+    tokens: &[LlamaToken],
+    start: usize,
+) -> Result<LlamaBatch<'b>, String> {
     const CHUNK: usize = 512;
     let last = tokens.len() - 1;
     let mut batch = LlamaBatch::new(CHUNK, 1);
-    let mut start = 0;
+    let mut start = start;
     while start < tokens.len() {
         let end = (start + CHUNK).min(tokens.len());
         batch.clear();
@@ -384,7 +547,48 @@ fn generate(
             .map_err(|e| format!("prompt decode failed: {e}"))?;
         start = end;
     }
+    Ok(batch)
+}
 
+/// Shared llama.cpp generation on a one-off context: ingest `prompt`, then
+/// sample to end-of-generation, streaming decoded UTF-8 to the frontend on
+/// `stream_event`. Returns the full generated text, trimmed.
+fn generate(
+    app: &AppHandle,
+    backend: &LlamaBackend,
+    model: &LlamaModel,
+    prompt: &str,
+    force_lowercase: bool,
+    stream_event: &str,
+    temperature: f32,
+) -> Result<String, String> {
+    let tokens = tokenize(model, prompt)?;
+    if tokens.is_empty() {
+        return Ok(String::new());
+    }
+    let ctx_params =
+        LlamaContextParams::default().with_n_ctx(NonZeroU32::new(ctx_size(tokens.len()) as u32));
+    let mut ctx = model
+        .new_context(backend, ctx_params)
+        .map_err(|e| format!("failed to create LLM context: {e}"))?;
+    let mut batch = ingest(&mut ctx, &tokens, 0)?;
+    let emit = &mut |t: &str| {
+        let _ = app.emit(stream_event, t);
+    };
+    sample(emit, model, &mut ctx, &mut batch, tokens.len(), force_lowercase, temperature)
+}
+
+/// Sample from a context whose prompt (`n_prompt` tokens) is already in, to
+/// end-of-generation, streaming decoded UTF-8 chunks to `on_token`.
+fn sample(
+    on_token: &mut dyn FnMut(&str),
+    model: &LlamaModel,
+    ctx: &mut LlamaContext<'_>,
+    batch: &mut LlamaBatch<'_>,
+    n_prompt: usize,
+    force_lowercase: bool,
+    temperature: f32,
+) -> Result<String, String> {
     let mut sampler = LlamaSampler::chain_simple([
         LlamaSampler::temp(temperature),
         LlamaSampler::min_p(0.05, 1),
@@ -393,11 +597,11 @@ fn generate(
 
     let mut utf8 = Utf8Stream::new();
     let mut output = String::new();
-    let mut n_cur = tokens.len() as i32;
+    let mut n_cur = n_prompt as i32;
     let mut generated = 0usize;
 
     loop {
-        let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+        let token = sampler.sample(ctx, batch.n_tokens() - 1);
         sampler.accept(token);
         if model.is_eog_token(token) {
             break;
@@ -414,7 +618,7 @@ fn generate(
         }
         if !chunk.is_empty() {
             output.push_str(&chunk);
-            let _ = app.emit(stream_event, &chunk);
+            on_token(&chunk);
         }
         generated += 1;
         if generated >= MAX_NEW_TOKENS {
@@ -423,7 +627,7 @@ fn generate(
         batch.clear();
         batch.add(token, n_cur, &[0], true).map_err(|e| e.to_string())?;
         n_cur += 1;
-        ctx.decode(&mut batch)
+        ctx.decode(batch)
             .map_err(|e| format!("decode failed: {e}"))?;
     }
 
@@ -535,4 +739,73 @@ pub fn answer_meeting_question(
         ],
     )?;
     generate(app, backend, &model, &prompt, false, "meeting-answer-token", 0.1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::Style;
+    use std::time::Instant;
+
+    /// Cleanup on the long-lived context — reusing whatever prefix the last
+    /// prompt left behind — must write what a fresh context writes.
+    /// Needs a real model: `LLM_MODEL=/path/to.gguf cargo test --release -- --ignored`
+    #[test]
+    #[ignore]
+    fn cached_cleanup_matches_a_fresh_context() {
+        let path = std::path::PathBuf::from(std::env::var("LLM_MODEL").expect("set LLM_MODEL"));
+        let state = LlmState::default();
+        let backend = backend().unwrap();
+        let model = state.model_for(&path).unwrap();
+        let casual = Style {
+            id: "casual".into(),
+            name: "casual".into(),
+            notes: "all lowercase, short sentences.".into(),
+            lowercase: false,
+            samples: vec!["sounds good. i'll take a look tomorrow and get back to you.".into()],
+        };
+        let system = format!("{DEFAULT_CLEANUP_PROMPT}{}", dictionary_addendum(&[]));
+        let short = "um so can you send me the uh notes from yesterday's call i want to go over the pricing before friday";
+        let other = "quick update the billing service moved to the new cluster last night and latency dropped by about thirty percent";
+        let long = [other; 120].join(". ");
+        // A sequence that moves the shared prefix around: same settings, a
+        // new style, a translation, and a prompt too long to cache.
+        let takes: Vec<(&str, Option<&Style>, Option<&str>)> = vec![
+            (short, None, None),
+            (other, None, None),
+            (short, Some(&casual), None),
+            (other, Some(&casual), None),
+            (short, Some(&casual), Some("French")),
+            (&long, None, None),
+            (other, Some(&casual), None),
+        ];
+        prime_cleanup(&state, &path, &system, None, None, false).unwrap();
+        for (transcript, style, lang) in takes {
+            let (prompt, lower) = cleanup_prompt(&model, &system, transcript, style, lang, false).unwrap();
+            let tokens = tokenize(&model, &prompt).unwrap();
+
+            let t = Instant::now();
+            let cached = with_prompt(&state, backend, &model, &tokens, |ctx, batch| {
+                sample(&mut |_| {}, &model, ctx, batch, tokens.len(), lower, 0.2)
+            })
+            .unwrap();
+            let cached_ms = t.elapsed().as_millis();
+
+            let t = Instant::now();
+            let params = LlamaContextParams::default()
+                .with_n_ctx(NonZeroU32::new(ctx_size(tokens.len()) as u32));
+            let mut ctx = model.new_context(backend, params).unwrap();
+            let mut batch = ingest(&mut ctx, &tokens, 0).unwrap();
+            let fresh = sample(&mut |_| {}, &model, &mut ctx, &mut batch, tokens.len(), lower, 0.2)
+                .unwrap();
+            let fresh_ms = t.elapsed().as_millis();
+
+            println!(
+                "{} tokens, style {:?}, lang {lang:?}: cached {cached_ms}ms, fresh {fresh_ms}ms",
+                tokens.len(),
+                style.map(|s| &s.name)
+            );
+            assert_eq!(cached, fresh);
+        }
+    }
 }

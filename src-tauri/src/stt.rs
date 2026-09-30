@@ -4,6 +4,9 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 
 const SILENCE_PEAK_THRESHOLD: f32 = 0.005;
 const NO_SPEECH_PROBABILITY_THRESHOLD: f32 = 0.6;
+/// Below this, a background language guess is discarded and the final
+/// transcription detects the language itself, as it would without one.
+const LANGUAGE_MIN_PROBABILITY: f32 = 0.5;
 
 /// Whisper is prone to dropping the first word when speech starts at sample
 /// zero. A short quiet lead-in gives its speech detector enough context without
@@ -41,6 +44,13 @@ fn is_effectively_silent(samples: &[f32]) -> bool {
         .all(|sample| sample.abs() < SILENCE_PEAK_THRESHOLD)
 }
 
+fn n_threads() -> i32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(4)
+        .min(8)
+}
+
 fn with_leading_silence(samples: &[f32]) -> Vec<f32> {
     let mut padded = Vec::with_capacity(LEADING_SILENCE_SAMPLES + samples.len());
     padded.resize(LEADING_SILENCE_SAMPLES, 0.0);
@@ -70,7 +80,11 @@ impl SttState {
                 return Ok(ctx.clone());
             }
         }
-        let ctx = WhisperContext::new_with_params(&key, WhisperContextParameters::default())
+        // whisper-rs defaults flash attention off (whisper.cpp itself defaults
+        // it on); with Metal it cuts transcription time by 15-40%.
+        let mut params = WhisperContextParameters::default();
+        params.flash_attn(true);
+        let ctx = WhisperContext::new_with_params(&key, params)
             .map_err(|e| format!("failed to load whisper model: {e}"))?;
         let ctx = Arc::new(ctx);
         *loaded = Some((key, ctx.clone()));
@@ -98,6 +112,37 @@ impl SttState {
     }
 }
 
+/// Identify the spoken language of `samples` (the first 30 s are used), for
+/// passing to `transcribe` in place of auto-detection, which otherwise costs
+/// Whisper a second full encoder pass on every take. `None` when the guess
+/// isn't confident enough to trust.
+pub fn detect_language(
+    state: &SttState,
+    model_path: &Path,
+    samples: &[f32],
+) -> Result<Option<String>, String> {
+    let ctx = state.context_for(model_path)?;
+    // English-only models ignore the language anyway.
+    if !ctx.is_multilingual() {
+        return Ok(Some("en".into()));
+    }
+    let mut ws = ctx
+        .create_state()
+        .map_err(|e| format!("failed to create whisper state: {e}"))?;
+    // Match what `transcribe` feeds Whisper, whose own detection this replaces.
+    let window = &samples[..samples.len().min(30 * 16_000)];
+    let threads = n_threads() as usize;
+    ws.pcm_to_mel(&with_leading_silence(window), threads)
+        .map_err(|e| format!("failed to compute mel: {e}"))?;
+    let (id, probs) = ws
+        .lang_detect(0, threads)
+        .map_err(|e| format!("language detection failed: {e}"))?;
+    let p = probs.get(id as usize).copied().unwrap_or(0.0);
+    let lang = whisper_rs::get_lang_str(id).map(str::to_string);
+    eprintln!("[stt] detected language {lang:?} (p = {p:.2})");
+    Ok(lang.filter(|_| p >= LANGUAGE_MIN_PROBABILITY))
+}
+
 pub fn transcribe(
     state: &SttState,
     model_path: &Path,
@@ -117,11 +162,7 @@ pub fn transcribe(
         .map_err(|e| format!("failed to create whisper state: {e}"))?;
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get() as i32)
-        .unwrap_or(4)
-        .min(8);
-    params.set_n_threads(threads);
+    params.set_n_threads(n_threads());
     params.set_language(language.or(Some("auto")));
     params.set_translate(false);
     params.set_print_special(false);
@@ -184,11 +225,7 @@ pub fn transcribe_segments(
         .map_err(|e| format!("failed to create whisper state: {e}"))?;
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get() as i32)
-        .unwrap_or(4)
-        .min(8);
-    params.set_n_threads(threads);
+    params.set_n_threads(n_threads());
     params.set_language(language.or(Some("auto")));
     params.set_translate(false);
     params.set_print_special(false);

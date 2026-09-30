@@ -54,6 +54,16 @@ function Timer({ running }: { running: boolean }) {
   );
 }
 
+/// What an output-language code asks of cleanup: romanize, or translate into
+/// a named language ("" keeps the transcript's own language).
+function outputLang(code: string): { transliterate: boolean; targetName?: string } {
+  const transliterate = code === "translit";
+  const targetName = transliterate
+    ? undefined
+    : LANGUAGES.find((l) => l.code === code && l.code !== "")?.name;
+  return { transliterate, targetName };
+}
+
 export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -193,6 +203,24 @@ export default function App() {
   const stt = sttModels.find((m) => m.id === sttId) ?? sttModels[0];
   const llm = llmModels.find((m) => m.id === llmId) ?? llmModels[0];
 
+  // Load the speech model ahead of the first take, so it isn't the slow one.
+  useEffect(() => {
+    if (stt) api.warmStt(stt.id).catch(() => {});
+  }, [stt?.id]);
+
+  // Likewise the cleanup model, with the instructions every take shares
+  // already processed. Debounced: the prompt additions change as they're typed.
+  useEffect(() => {
+    if (!llm) return;
+    const { transliterate, targetName } = outputLang(outLang);
+    const t = setTimeout(() => {
+      api
+        .warmLlm(llm.id, prompt || undefined, styleId || undefined, targetName, transliterate)
+        .catch(() => {});
+    }, 800);
+    return () => clearTimeout(t);
+  }, [llm?.id, prompt, styleId, outLang]);
+
   const upsertTake = (patch: Partial<Omit<Take, "id" | "at">>) => {
     const id = takeRef.current;
     if (!id) return;
@@ -301,10 +329,7 @@ export default function App() {
     if (!llm || !text) return null;
     const useStyle = styleOverride !== undefined ? styleOverride : styleIdRef.current;
     const useLangCode = langOverride !== undefined ? langOverride : outLangRef.current;
-    const transliterate = useLangCode === "translit";
-    const targetName = transliterate
-      ? undefined
-      : LANGUAGES.find((l) => l.code === useLangCode && l.code !== "")?.name;
+    const { transliterate, targetName } = outputLang(useLangCode);
     changePhase("cleaning");
     setCleaned("");
     cleaningRef.current = true;
@@ -391,10 +416,11 @@ export default function App() {
         setLiveText("");
         setRawOpen(false);
         changePhase("recording");
-        // Live captions for in-app takes (window visible); the hotkey flow uses
-        // the overlay and isn't looking at the window, so skip it there.
-        if (!fromHotkey && stt) {
-          api.startLiveDictation(stt.id, language || undefined).catch(() => {});
+        // Background work while recording: live captions for in-app takes
+        // (the hotkey flow uses the overlay and isn't looking at the window),
+        // and spoken-language detection when it's on auto.
+        if (stt) {
+          api.startLiveDictation(stt.id, language || undefined, !fromHotkey).catch(() => {});
         }
         if (fromHotkey) {
           await api.setOverlay(true).catch(() => {});
