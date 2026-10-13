@@ -40,6 +40,8 @@ mp4 = "0.14.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Speaker diarization (offline). download-binaries pulls a prebuilt sherpa-onnx.
 sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries", "static"] }
+# MCP client for the meeting assistant (stdio + streamable HTTP servers).
+rmcp = { version = "3.5", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
@@ -48,7 +50,7 @@ llama-cpp-2 = { version = "0.1.157", features = ["metal"] }
 macos-accessibility-client = "0.0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSError", "NSGeometry"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSError", "NSGeometry", "NSDate", "NSURL"] }
 whisper-rs = { version = "0.16.0", features = ["metal"] }
 # System-audio capture for meetings (macOS 13+, runtime-gated).
 objc2-screen-capture-kit = { version = "0.3", features = [
@@ -61,6 +63,13 @@ objc2-core-media = { version = "0.3", features = [
 objc2-core-audio-types = { version = "0.3", features = ["std"] }
 block2 = "0.6"
 dispatch2 = "0.3"
+# Keychain storage for assistant credentials (Jira token, endpoint keys).
+keyring = { version = "3", features = ["apple-native"] }
+# Calendar lookup at meeting start (title + attendees); read-only.
+objc2-event-kit = { version = "0.3", default-features = false, features = [
+    "std", "block2", "bitflags", "EKTypes", "EKObject", "EKCalendar", "EKCalendarItem",
+    "EKEvent", "EKEventStore", "EKParticipant",
+] }
 
 
 # whisper.cpp built against llama.cpp's ggml, so the binary holds one copy of

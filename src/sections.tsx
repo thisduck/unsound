@@ -3,7 +3,7 @@ import { api, DictEntry, formatBytes, formatShortcut, ModelInfo, ModelKind, on, 
 
 /* ── global shortcuts (hands-free + push-to-talk, multiple each) ── */
 
-type ShortcutMode = "handsFree" | "pushToTalk";
+type ShortcutMode = "handsFree" | "pushToTalk" | "command";
 
 function comboFromEvent(e: KeyboardEvent): string | null {
   const mods = [
@@ -43,6 +43,7 @@ function partialFromEvent(e: KeyboardEvent): string {
 export function ShortcutsSection({ onError }: { onError: (msg: string | null) => void }) {
   const [handsFree, setHandsFree] = useState<string[]>([]);
   const [pushToTalk, setPushToTalk] = useState<string[]>([]);
+  const [commandKeys, setCommandKeys] = useState<string[]>([]);
   const [loaded, setLoaded] = useState(false);
   // Which binding is being recorded: mode + index (-1 appends a new one).
   const [capturing, setCapturing] = useState<{ mode: ShortcutMode; index: number } | null>(null);
@@ -54,9 +55,18 @@ export function ShortcutsSection({ onError }: { onError: (msg: string | null) =>
     api.getSettings().then((s) => {
       setHandsFree(s.handsFree);
       setPushToTalk(s.pushToTalk);
+      setCommandKeys(s.commandKeys);
       setLoaded(true);
     });
   }, []);
+
+  const saveCommand = (keys: string[]) => {
+    onError(null);
+    api
+      .setCommandKeys(keys)
+      .then(() => setCommandKeys(keys))
+      .catch((err) => onError(String(err)));
+  };
 
   const save = (hf: string[], ptt: string[]) => {
     onError(null);
@@ -72,11 +82,12 @@ export function ShortcutsSection({ onError }: { onError: (msg: string | null) =>
   const commit = (combo: string) => {
     if (!capturing) return;
     const { mode, index } = capturing;
-    const current = mode === "handsFree" ? handsFree : pushToTalk;
+    const current = mode === "handsFree" ? handsFree : mode === "pushToTalk" ? pushToTalk : commandKeys;
     const next = index === -1 ? [...current, combo] : current.map((c, i) => (i === index ? combo : c));
     setCapturing(null);
     setHeld("");
-    save(mode === "handsFree" ? next : handsFree, mode === "pushToTalk" ? next : pushToTalk);
+    if (mode === "command") saveCommand(next);
+    else save(mode === "handsFree" ? next : handsFree, mode === "pushToTalk" ? next : pushToTalk);
   };
 
   const beginCapture = async (mode: ShortcutMode, index: number) => {
@@ -108,7 +119,7 @@ export function ShortcutsSection({ onError }: { onError: (msg: string | null) =>
       subs.forEach((p) => p.then((un) => un()));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [capturing, nativeCapture, handsFree, pushToTalk]);
+  }, [capturing, nativeCapture, handsFree, pushToTalk, commandKeys]);
 
   // Webview fallback: modifier keydowns give the live display, a full combo commits.
   useEffect(() => {
@@ -132,7 +143,7 @@ export function ShortcutsSection({ onError }: { onError: (msg: string | null) =>
       window.removeEventListener("keyup", onUp, true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [capturing, nativeCapture, handsFree, pushToTalk]);
+  }, [capturing, nativeCapture, handsFree, pushToTalk, commandKeys]);
 
   const liveChip = (
     <span className="capture-hint">
@@ -164,10 +175,12 @@ export function ShortcutsSection({ onError }: { onError: (msg: string | null) =>
               className="quiet"
               title="Remove"
               onClick={() =>
-                save(
-                  mode === "handsFree" ? combos.filter((_, j) => j !== i) : handsFree,
-                  mode === "pushToTalk" ? combos.filter((_, j) => j !== i) : pushToTalk,
-                )
+                mode === "command"
+                  ? saveCommand(combos.filter((_, j) => j !== i))
+                  : save(
+                      mode === "handsFree" ? combos.filter((_, j) => j !== i) : handsFree,
+                      mode === "pushToTalk" ? combos.filter((_, j) => j !== i) : pushToTalk,
+                    )
               }
             >
               ✕
@@ -199,6 +212,12 @@ export function ShortcutsSection({ onError }: { onError: (msg: string | null) =>
         "push to talk",
         "hold to say something short; release to finish",
         pushToTalk,
+      )}
+      {block(
+        "command",
+        "ask unsound",
+        "hold and speak a request (“draft an email to Priya about…”); in a meeting it uses the conversation",
+        commandKeys,
       )}
       <div className="sheet-hint" style={{ display: "block", marginTop: 6 }}>
         fn-based shortcuts (bare fn, fn Space…) need the Accessibility permission; other combos

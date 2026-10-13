@@ -59,31 +59,38 @@ export function MeetingSetup({ models, onModelsChanged }: Props) {
   const sttModel = models.find((m) => m.kind === "stt" && m.downloaded) ?? recStt;
   const llmModel = models.find((m) => m.kind === "llm" && m.downloaded) ?? recLlm;
   const vad = models.find((m) => m.id === "vad-silero");
-  const seg = models.find((m) => m.id === "diarize-segmentation");
-  const embs = models.filter((m) => m.kind === "diarize" && m.id !== "diarize-segmentation");
+  // CAM++ ("diarize-embedding") is fast and the most accurate on real calls.
+  const embs = models
+    .filter((m) => m.kind === "diarize" && m.id !== "diarize-segmentation")
+    .sort((a, b) => Number(b.id === "diarize-embedding") - Number(a.id === "diarize-embedding"));
+  const assistant =
+    models.find((m) => m.id === "gemma-4-12b" && m.downloaded) ??
+    models.find((m) => m.id === "gemma-4-26b-a4b" && m.downloaded) ??
+    models.find((m) => m.id === "gemma-4-12b");
 
   return (
     <div className="meet-setup">
       <h2>set up meetings</h2>
       <p className="setup-intro">
-        Meetings transcribe both you and the call, tell the other speakers apart, and write a
-        summary — entirely on your machine. These are one-time downloads.
+        Meetings transcribe both you and the call, tell the other speakers apart as they talk, write
+        notes around yours, and do what you ask along the way — entirely on your machine. These are
+        one-time downloads.
       </p>
 
       <div className="setup-group-label">Required</div>
       {sttModel && <ModelRow model={sttModel} onDone={onModelsChanged} />}
       {vad && <ModelRow model={vad} onDone={onModelsChanged} />}
-      {seg && <ModelRow model={seg} onDone={onModelsChanged} />}
 
       <div className="setup-group-label">
-        Speaker detection — get at least one (you can switch in meeting options)
+        Voice model (who's speaking) — get at least one; the first is the best default
       </div>
       {embs.map((m) => (
         <ModelRow key={m.id} model={m} onDone={onModelsChanged} />
       ))}
 
-      <div className="setup-group-label">Recommended — for summaries &amp; Q&amp;A</div>
+      <div className="setup-group-label">Recommended — for notes, Q&amp;A and the assistant</div>
       {llmModel && <ModelRow model={llmModel} onDone={onModelsChanged} />}
+      {assistant && assistant.id !== llmModel?.id && <ModelRow model={assistant} onDone={onModelsChanged} />}
     </div>
   );
 }

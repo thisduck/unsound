@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, UnlistenFn } from "@tauri-apps/api/event";
 import type { Take } from "./HistoryDrawer";
 
-export type OverlayState = "recording" | "processing" | "hidden";
+export type OverlayState = "recording" | "processing" | "command" | "hidden";
 
 export type ModelKind = "stt" | "llm" | "diarize" | "vad";
 
@@ -57,6 +57,74 @@ export interface Style {
   samples: string[];
 }
 
+export interface JiraConfig {
+  site: string;
+  email: string;
+  defaultProject: string;
+  defaultIssueType: string;
+}
+
+export interface McpServer {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  url: string;
+  headers: Record<string, string>;
+  enabled: boolean;
+}
+
+export interface ToolInfo {
+  server: string;
+  name: string;
+  description: string;
+  input_schema: unknown;
+}
+
+/// A tool described in the user's own words (see settings.rs ToolGuide).
+export interface ToolGuide {
+  id: string;
+  name: string;
+  when: string;
+  site: string;
+  guidance: string;
+  /// "browser" | "auto" | "draft"
+  mode: string;
+  leaveFinalStep: boolean;
+  enabled: boolean;
+}
+
+export interface AssistantSettings {
+  enabled: boolean;
+  wakeWord: string;
+  listenForWakeWord: boolean;
+  /// "local" | "claude" | "codex" | "anthropic" | "openai" | "compatible"
+  backend: string;
+  localModel: string;
+  cloudModel: string;
+  cliModel: string;
+  endpointUrl: string;
+  endpointModel: string;
+  autoRun: string[];
+  jira: JiraConfig;
+  mcpServers: McpServer[];
+  claudeCode: boolean;
+  claudeAllowedTools: string[];
+  claudeModel: string;
+  guides: ToolGuide[];
+  aboutMe: string;
+  /// "chrome" | "local" | "off"
+  browser: string;
+  browserServer: McpServer;
+}
+
+export interface MeetingSettings {
+  detectMeetings: boolean;
+  useCalendar: boolean;
+  embeddingModel: string;
+  summaryModel: string;
+}
+
 export interface Settings {
   handsFree: string[];
   pushToTalk: string[];
@@ -64,6 +132,20 @@ export interface Settings {
   styles: Style[];
   defaultStyle: string;
   dictionary: DictEntry[];
+  commandKeys: string[];
+  assistant: AssistantSettings;
+  meetings: MeetingSettings;
+}
+
+export type CalAccess = "notDetermined" | "denied" | "granted";
+
+export interface CalEvent {
+  title: string;
+  start: string;
+  end: string;
+  attendees: string[];
+  organizer?: string | null;
+  location: string;
 }
 
 /// One utterance in a meeting transcript. `speaker` is free-form so "me"/"them"
@@ -76,6 +158,25 @@ export interface Segment {
   startMs: number;
   endMs: number;
   text: string;
+}
+
+export interface Mark {
+  id: number;
+  atMs: number;
+  label: string;
+}
+
+export interface ActionItem {
+  id: number;
+  meetingId?: string | null;
+  text: string;
+  owner: string;
+  due: string;
+  atMs?: number | null;
+  done: boolean;
+  manual: boolean;
+  createdAt: string;
+  meetingTitle: string;
 }
 
 export interface Meeting {
@@ -92,6 +193,10 @@ export interface Meeting {
   segmentCount: number;
   /// Per-meeting speaker display-name overrides (speaker key → name).
   speakerNames?: Record<string, string>;
+  attendees?: string[];
+  marks?: Mark[];
+  actionItems?: ActionItem[];
+  hasAudio?: boolean;
 }
 
 export interface SearchHit {
@@ -99,6 +204,57 @@ export interface SearchHit {
   title: string;
   startedAt: string;
   snippet: string;
+  /// "transcript" | "meeting"
+  kind: string;
+  segmentId?: number | null;
+  startMs?: number | null;
+  speaker?: string | null;
+  speakerName?: string | null;
+}
+
+export type TaskAction =
+  | "email"
+  | "jira_issue"
+  | "reminder"
+  | "calendar_event"
+  | "slack_message"
+  | "note"
+  | "text"
+  | "browser"
+  | "delegate";
+
+export type TaskStatus =
+  | "heard"
+  | "planning"
+  | "drafting"
+  | "waiting"
+  | "ready"
+  | "running"
+  | "done"
+  | "failed"
+  | "dismissed";
+
+/// Something the user asked the assistant to do.
+export interface Task {
+  id: string;
+  meetingId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  atMs?: number | null;
+  utterance: string;
+  trigger: string;
+  action: TaskAction | "";
+  runWhen: string;
+  status: TaskStatus;
+  instruction: string;
+  spanStartMs?: number | null;
+  spanEndMs?: number | null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  draft: any;
+  result: { message?: string; url?: string } | null;
+  error: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log: any[];
 }
 
 export const api = {
@@ -175,39 +331,97 @@ export const api = {
 
   // Meetings.
   createMeeting: (meeting: Meeting) => invoke<void>("create_meeting", { meeting }),
-  addMeetingSegments: (meetingId: string, segments: Segment[]) =>
-    invoke<void>("add_meeting_segments", { meetingId, segments }),
-  endMeeting: (id: string, endedAt: string, summary: string, title?: string) =>
-    invoke<void>("end_meeting", { id, endedAt, summary, title: title ?? null }),
   updateMeetingNotes: (id: string, notes: string) =>
     invoke<void>("update_meeting_notes", { id, notes }),
-  setSpeakerName: (meetingId: string, speaker: string, name: string) =>
-    invoke<void>("set_speaker_name", { meetingId, speaker, name }),
+  setSpeakerName: (meetingId: string, speaker: string, name: string, remember = true) =>
+    invoke<boolean>("set_speaker_name", { meetingId, speaker, name, remember }),
   setMeetingSummary: (id: string, summary: string) =>
     invoke<void>("set_meeting_summary", { id, summary }),
   updateSegmentText: (segmentId: number, text: string) =>
     invoke<void>("update_segment_text", { segmentId, text }),
+  replaceInMeeting: (meetingId: string, from: string, to: string, remember: boolean) =>
+    invoke<number>("replace_in_meeting", { meetingId, from, to, remember }),
   renameMeeting: (id: string, title: string) => invoke<void>("rename_meeting", { id, title }),
   deleteMeeting: (id: string) => invoke<void>("delete_meeting", { id }),
   listMeetings: () => invoke<Meeting[]>("list_meetings"),
   getMeeting: (id: string) => invoke<Meeting | null>("get_meeting", { id }),
-  transcribeMeeting: (meetingId: string, modelId: string, language?: string) =>
-    invoke<Meeting>("transcribe_meeting", { meetingId, modelId, language: language ?? null }),
   summarizeMeeting: (meetingId: string, modelId: string) =>
-    invoke<string>("summarize_meeting", { meetingId, modelId }),
+    invoke<Meeting>("summarize_meeting", { meetingId, modelId }),
   askMeeting: (meetingId: string, modelId: string, question: string) =>
     invoke<string>("ask_meeting", { meetingId, modelId, question }),
+  askMeetings: (modelId: string, question: string) =>
+    invoke<string>("ask_meetings", { modelId, question }),
   searchMeetings: (query: string) => invoke<SearchHit[]>("search_meetings", { query }),
-  meetingStart: (meetingId: string, modelId: string, language?: string) =>
-    invoke<void>("meeting_start", { meetingId, modelId, language: language ?? null }),
-  meetingStop: () => invoke<void>("meeting_stop"),
+  meetingStart: (
+    meetingId: string,
+    modelId: string,
+    language?: string,
+    llmModelId?: string,
+    embeddingModelId?: string,
+  ) =>
+    invoke<Meeting | null>("meeting_start", {
+      meetingId,
+      modelId,
+      language: language ?? null,
+      llmModelId: llmModelId ?? null,
+      embeddingModelId: embeddingModelId ?? null,
+    }),
+  meetingStop: () => invoke<Meeting | null>("meeting_stop"),
   diarizeMeeting: (meetingId: string, embeddingModelId?: string, numSpeakers?: number) =>
     invoke<Meeting>("diarize_meeting", {
       meetingId,
       embeddingModelId: embeddingModelId ?? null,
       numSpeakers: numSpeakers ?? null,
     }),
-  saveMeetingAudio: (meetingId: string) => invoke<void>("save_meeting_audio", { meetingId }),
+  meetingClip: (meetingId: string, startMs: number, endMs: number) =>
+    invoke<ArrayBuffer>("meeting_clip", { meetingId, startMs, endMs }),
+  addMark: (meetingId: string, label = "", atMs?: number) =>
+    invoke<Mark>("add_mark", { meetingId, atMs: atMs ?? null, label }),
+  deleteMark: (id: number) => invoke<void>("delete_mark", { id }),
+  openActionItems: () => invoke<ActionItem[]>("open_action_items"),
+  saveActionItem: (item: ActionItem) => invoke<ActionItem>("save_action_item", { item }),
+  deleteActionItem: (id: number) => invoke<void>("delete_action_item", { id }),
+
+  // Assistant tasks.
+  listTasks: (meetingId?: string) => invoke<Task[]>("list_tasks", { meetingId: meetingId ?? null }),
+  addTask: (text: string, meetingId?: string) =>
+    invoke<Task | null>("add_task", { meetingId: meetingId ?? null, text }),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  approveTask: (id: string, draft?: any) => invoke<Task>("approve_task", { id, draft: draft ?? null }),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  updateTaskDraft: (id: string, draft: any, action?: string) =>
+    invoke<Task>("update_task_draft", { id, draft, action: action ?? null }),
+  retryTask: (id: string, utterance?: string) =>
+    invoke<Task>("retry_task", { id, utterance: utterance ?? null }),
+  redraftTask: (id: string) => invoke<Task>("redraft_task", { id }),
+  dismissTask: (id: string) => invoke<Task>("dismiss_task", { id }),
+  deleteTask: (id: string) => invoke<void>("delete_task", { id }),
+  commandBegin: () => invoke<void>("command_begin"),
+  commandEnd: () => invoke<void>("command_end"),
+  assistantStatus: () =>
+    invoke<{ ok: boolean; model?: string; error?: string; cloud?: boolean }>("assistant_status"),
+  listCloudModels: (provider: string, base?: string) =>
+    invoke<string[]>("list_cloud_models", { provider, base: base ?? null }),
+  subscriptionClis: () => invoke<{ claude: string | null; codex: string | null }>("subscription_clis"),
+  setAssistantSettings: (assistant: AssistantSettings) =>
+    invoke<void>("set_assistant_settings", { assistant }),
+  setMeetingSettings: (meetings: MeetingSettings) =>
+    invoke<void>("set_meeting_settings", { meetings }),
+  setCommandKeys: (keys: string[]) => invoke<void>("set_command_keys", { keys }),
+  setSecret: (key: string, value: string) => invoke<void>("set_secret", { key, value }),
+  hasSecret: (key: string) => invoke<boolean>("has_secret", { key }),
+  jiraTest: () =>
+    invoke<{ user: string; projects: { key: string; name: string }[] }>("jira_test"),
+  mcpProbe: (server: McpServer) => invoke<ToolInfo[]>("mcp_probe", { server }),
+  mcpParse: (json: string) => invoke<McpServer[]>("mcp_parse", { json }),
+  claudeCodePath: () => invoke<string | null>("claude_code_path"),
+  browserTest: () => invoke<string>("browser_test"),
+  listVoices: () => invoke<[string, number][]>("list_voices"),
+  deleteVoice: (name: string) => invoke<void>("delete_voice", { name }),
+  calendarAccess: () => invoke<CalAccess>("calendar_access"),
+  calendarRequest: () => invoke<boolean>("calendar_request"),
+  calendarCurrent: () => invoke<CalEvent | null>("calendar_current"),
+  hideMeetingPrompt: () => invoke<void>("hide_meeting_prompt"),
 
   // System-audio capture (ScreenCaptureKit; macOS 13+).
   systemAudioSupported: () => invoke<boolean>("system_audio_supported"),
@@ -240,6 +454,34 @@ export const on = {
     listen<{ speaker: string; text: string }>("meeting-partial", (e) => cb(e.payload)),
   meetingToggle: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("meeting-toggle", () => cb()),
+  meetingsAnswerToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
+    listen<string>("meetings-answer-token", (e) => cb(e.payload)),
+  meetingStatus: (
+    cb: (s: { positionMs: number; pending: number; systemAudio: boolean }) => void,
+  ): Promise<UnlistenFn> =>
+    listen<{ positionMs: number; pending: number; systemAudio: boolean }>("meeting-status", (e) =>
+      cb(e.payload),
+    ),
+  meetingWarning: (cb: (msg: string) => void): Promise<UnlistenFn> =>
+    listen<string>("meeting-warning", (e) => cb(e.payload)),
+  meetingSpeakerNamed: (cb: (p: { speaker: string; name: string }) => void): Promise<UnlistenFn> =>
+    listen<{ speaker: string; name: string }>("meeting-speaker-named", (e) => cb(e.payload)),
+  meetingNotesChanged: (cb: (p: { meetingId: string; notes: string }) => void): Promise<UnlistenFn> =>
+    listen<{ meetingId: string; notes: string }>("meeting-notes-changed", (e) => cb(e.payload)),
+  meetingNotesProgress: (
+    cb: (p: { meetingId: string; throughMs: number }) => void,
+  ): Promise<UnlistenFn> =>
+    listen<{ meetingId: string; throughMs: number }>("meeting-notes-progress", (e) => cb(e.payload)),
+  meetingDetected: (cb: (p: { app: string; bundleId: string }) => void): Promise<UnlistenFn> =>
+    listen<{ app: string; bundleId: string }>("meeting-detected", (e) => cb(e.payload)),
+  meetingStartRequest: (cb: (p: { app: string; bundleId: string }) => void): Promise<UnlistenFn> =>
+    listen<{ app: string; bundleId: string }>("meeting-start-request", (e) => cb(e.payload)),
+  meetingAppReleased: (cb: (p: { app: string; bundleId: string }) => void): Promise<UnlistenFn> =>
+    listen<{ app: string; bundleId: string }>("meeting-app-released", (e) => cb(e.payload)),
+  taskUpdated: (cb: (t: Task) => void): Promise<UnlistenFn> =>
+    listen<Task>("task-updated", (e) => cb(e.payload)),
+  assistantToast: (cb: (text: string) => void): Promise<UnlistenFn> =>
+    listen<string>("assistant-toast", (e) => cb(e.payload)),
   hotkeyToggle: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("hotkey-toggle", () => cb()),
   pttDown: (cb: () => void): Promise<UnlistenFn> => listen<void>("ptt-down", () => cb()),
@@ -260,6 +502,25 @@ export const on = {
   dictationLive: (cb: (text: string) => void): Promise<UnlistenFn> =>
     listen<string>("dictation-live", (e) => cb(e.payload)),
 };
+
+/// A meeting position as people read it: "4:05", or "1:02:03" past an hour.
+export function clock(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+}
+
+/// "4:05" / "1:02:03" → ms (null if it isn't a time).
+export function parseClock(t: string): number | null {
+  const parts = t.trim().split(":").map((p) => Number(p));
+  if (parts.some((p) => !Number.isFinite(p))) return null;
+  if (parts.length === 2 && parts[1] < 60) return (parts[0] * 60 + parts[1]) * 1000;
+  if (parts.length === 3 && parts[1] < 60 && parts[2] < 60)
+    return (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000;
+  return null;
+}
 
 export function formatDuration(secs: number): string {
   const s = Math.round(secs);

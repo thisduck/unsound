@@ -20,9 +20,29 @@ struct ActiveRecording {
     buffer: Arc<Mutex<Vec<f32>>>,
     sample_rate: u32,
     channels: u16,
-    /// How many raw samples have already been handed out by `drain_16k`, so
-    /// meeting streaming can pull only the newly-captured audio each cycle.
+    /// Absolute raw-sample index of `buffer[0]`. Meeting recordings drop audio
+    /// once it's been drained (it's on disk by then), so indices into the
+    /// buffer are offset by what's been trimmed — memory stays flat for hours.
+    base: usize,
+    /// Absolute raw index already handed out by `drain_16k`.
     drained: usize,
+    /// Streaming resampler for `drain_16k`: one continuous filter across
+    /// drains, so chunk boundaries add no padding (a fresh resampler per 1 s
+    /// chunk drifted the mic timeline ~4.5 s/hour against system audio).
+    stream: Option<StreamResampler>,
+    owner: Owner,
+    /// Open taps: id → absolute raw start index (frame-aligned). A tap is a
+    /// slice of the running recording claimed by someone else — dictation or
+    /// a spoken command during a meeting — so both can share the one mic.
+    taps: Vec<(u64, usize)>,
+    next_tap: u64,
+}
+
+/// Who started the recording (and so who may stop it).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Owner {
+    Dictation,
+    Meeting,
 }
 
 #[derive(Default)]
@@ -30,6 +50,50 @@ pub struct AudioState {
     active: Mutex<Option<ActiveRecording>>,
     /// The last finished recording, as 16 kHz mono samples ready for whisper.
     pub last_recording: Mutex<Vec<f32>>,
+    /// A dictation take running as a tap on a meeting's recording.
+    pub dictation_tap: Mutex<Option<u64>>,
+}
+
+/// A continuous downmix + resample to 16 kHz mono. Input that doesn't fill a
+/// whole resampler chunk waits for the next call instead of being padded.
+struct StreamResampler {
+    resampler: Option<rubato::SincFixedIn<f32>>,
+    pending: Vec<f32>,
+}
+
+const STREAM_CHUNK: usize = 1024;
+
+impl StreamResampler {
+    fn new(from: u32) -> Result<Self, String> {
+        let resampler = if from == WHISPER_SAMPLE_RATE {
+            None
+        } else {
+            Some(new_resampler(from, WHISPER_SAMPLE_RATE, STREAM_CHUNK)?)
+        };
+        Ok(Self {
+            resampler,
+            pending: Vec::new(),
+        })
+    }
+
+    fn push(&mut self, mono: &[f32]) -> Vec<f32> {
+        use rubato::Resampler;
+        let Some(r) = self.resampler.as_mut() else {
+            return mono.to_vec();
+        };
+        self.pending.extend_from_slice(mono);
+        let mut out = Vec::new();
+        let mut pos = 0;
+        while pos + STREAM_CHUNK <= self.pending.len() {
+            match r.process(&[&self.pending[pos..pos + STREAM_CHUNK]], None) {
+                Ok(frames) => out.extend_from_slice(&frames[0]),
+                Err(e) => eprintln!("[audio] resample failed: {e}"),
+            }
+            pos += STREAM_CHUNK;
+        }
+        self.pending.drain(..pos);
+        out
+    }
 }
 
 /// Names of available input devices, for the microphone picker.
@@ -53,7 +117,12 @@ fn input_device(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
     host.default_input_device()
 }
 
-pub fn start_recording(app: AppHandle, state: &AudioState, device_name: String) -> Result<(), String> {
+pub fn start_recording(
+    app: AppHandle,
+    state: &AudioState,
+    device_name: String,
+    owner: Owner,
+) -> Result<(), String> {
     let mut active = state.active.lock().unwrap();
     if active.is_some() {
         return Err("already recording".into());
@@ -158,34 +227,161 @@ pub fn start_recording(app: AppHandle, state: &AudioState, device_name: String) 
         buffer,
         sample_rate,
         channels,
+        base: 0,
         drained: 0,
+        stream: None,
+        owner,
+        taps: Vec::new(),
+        next_tap: 1,
     });
     Ok(())
 }
 
+/// Who owns the running recording, if any.
+pub fn owner(state: &AudioState) -> Option<Owner> {
+    state.active.lock().unwrap().as_ref().map(|r| r.owner)
+}
+
 /// Pull the audio captured since the last call, as 16 kHz mono ready for
 /// Whisper — the mic side of live meeting transcription. Returns empty when
-/// not recording or nothing new has arrived. Each chunk is resampled
-/// independently; the tiny boundary discontinuity is inaudible for speech.
+/// not recording or nothing new has arrived. Resampling is continuous across
+/// calls, so the returned stream has exactly the recording's timeline.
+/// Meeting recordings then forget the drained audio (unless a tap still
+/// needs it), keeping memory flat however long the meeting runs.
 pub fn drain_16k(state: &AudioState) -> Vec<f32> {
     let mut active = state.active.lock().unwrap();
     let Some(rec) = active.as_mut() else {
         return Vec::new();
     };
-    let raw = rec.buffer.lock().unwrap();
-    if raw.len() <= rec.drained {
+    let mut raw = rec.buffer.lock().unwrap();
+    let end = rec.base + raw.len();
+    if end <= rec.drained {
         return Vec::new();
     }
     // cpal callback buffers are frame-aligned, so `raw.len()` is always a whole
     // number of frames — no mid-frame split to worry about.
-    let slice = raw[rec.drained..].to_vec();
-    rec.drained = raw.len();
-    let (sample_rate, channels) = (rec.sample_rate, rec.channels);
+    let slice = raw[rec.drained - rec.base..].to_vec();
+    rec.drained = end;
+    if rec.owner == Owner::Meeting {
+        let keep_from = rec
+            .taps
+            .iter()
+            .map(|(_, start)| *start)
+            .min()
+            .unwrap_or(rec.drained)
+            .min(rec.drained);
+        if keep_from > rec.base {
+            raw.drain(..keep_from - rec.base);
+            rec.base = keep_from;
+        }
+    }
+    drop(raw);
+    let channels = rec.channels;
+    if rec.stream.is_none() {
+        match StreamResampler::new(rec.sample_rate) {
+            Ok(s) => rec.stream = Some(s),
+            Err(e) => {
+                eprintln!("[audio] {e}");
+                return Vec::new();
+            }
+        }
+    }
+    let mono = downmix(&slice, channels);
+    rec.stream.as_mut().map(|s| s.push(&mono)).unwrap_or_default()
+}
+
+/// Claim the audio from now on as a separate take while the recording keeps
+/// running (dictation or a spoken command during a meeting). Returns the tap
+/// id and where it starts on the 16 kHz timeline, in ms.
+pub fn tap_begin(state: &AudioState) -> Result<(u64, i64), String> {
+    let mut active = state.active.lock().unwrap();
+    let rec = active.as_mut().ok_or("not recording")?;
+    let len = rec.buffer.lock().unwrap().len();
+    let start = rec.base + len;
+    let id = rec.next_tap;
+    rec.next_tap += 1;
+    rec.taps.push((id, start));
+    let ms = frames_to_ms(start / rec.channels.max(1) as usize, rec.sample_rate);
+    Ok((id, ms))
+}
+
+/// The tap's audio so far (16 kHz mono) without ending it — live captions.
+pub fn tap_snapshot(state: &AudioState, id: u64) -> Vec<f32> {
+    let active = state.active.lock().unwrap();
+    let Some(rec) = active.as_ref() else {
+        return Vec::new();
+    };
+    let Some((_, start)) = rec.taps.iter().find(|(t, _)| *t == id).copied() else {
+        return Vec::new();
+    };
+    let raw = rec.buffer.lock().unwrap();
+    let slice = raw[start.saturating_sub(rec.base).min(raw.len())..].to_vec();
+    let (rate, channels) = (rec.sample_rate, rec.channels);
     drop(raw);
     drop(active);
+    resample(&downmix(&slice, channels), rate, WHISPER_SAMPLE_RATE).unwrap_or_default()
+}
 
-    let mono = downmix(&slice, channels);
-    resample(&mono, sample_rate, WHISPER_SAMPLE_RATE).unwrap_or_default()
+/// End a tap: its audio as 16 kHz mono, plus where it ended (ms on the
+/// recording's timeline).
+pub fn tap_end(state: &AudioState, id: u64) -> Result<(Vec<f32>, i64), String> {
+    let mut active = state.active.lock().unwrap();
+    let rec = active.as_mut().ok_or("not recording")?;
+    let idx = rec
+        .taps
+        .iter()
+        .position(|(t, _)| *t == id)
+        .ok_or("that take already ended")?;
+    let (_, start) = rec.taps.remove(idx);
+    let raw = rec.buffer.lock().unwrap();
+    let end = rec.base + raw.len();
+    let slice = raw[start.saturating_sub(rec.base).min(raw.len())..].to_vec();
+    let (rate, channels) = (rec.sample_rate, rec.channels);
+    drop(raw);
+    let end_ms = frames_to_ms(end / channels.max(1) as usize, rate);
+    drop(active);
+    let samples = resample(&downmix(&slice, channels), rate, WHISPER_SAMPLE_RATE)?;
+    Ok((samples, end_ms))
+}
+
+/// Where the recording is now on its 16 kHz timeline, in ms.
+pub fn position_ms(state: &AudioState) -> Option<i64> {
+    let active = state.active.lock().unwrap();
+    let rec = active.as_ref()?;
+    let len = rec.buffer.lock().unwrap().len();
+    Some(frames_to_ms((rec.base + len) / rec.channels.max(1) as usize, rec.sample_rate))
+}
+
+fn frames_to_ms(frames: usize, rate: u32) -> i64 {
+    (frames as i64 * 1000) / rate.max(1) as i64
+}
+
+/// Hand a meeting's recording over to the dictation take tapping it: the
+/// meeting is ending, but the take isn't, so the stream keeps running and the
+/// take's later `stop_recording` ends it normally, from where the tap began.
+/// Returns false when there's no dictation tap to hand over to.
+pub fn hand_over_to_dictation(state: &AudioState) -> bool {
+    let Some(tap) = state.dictation_tap.lock().unwrap().take() else {
+        return false;
+    };
+    let mut active = state.active.lock().unwrap();
+    let Some(rec) = active.as_mut() else {
+        return false;
+    };
+    let Some(idx) = rec.taps.iter().position(|(t, _)| *t == tap) else {
+        return false;
+    };
+    let (_, start) = rec.taps.remove(idx);
+    let mut raw = rec.buffer.lock().unwrap();
+    let cut = start.saturating_sub(rec.base).min(raw.len());
+    raw.drain(..cut);
+    drop(raw);
+    rec.base = 0;
+    rec.drained = 0;
+    rec.stream = None;
+    rec.owner = Owner::Dictation;
+    rec.taps.clear();
+    true
 }
 
 /// A copy of the *entire* audio captured so far, as 16 kHz mono — for live
@@ -193,6 +389,10 @@ pub fn drain_16k(state: &AudioState) -> Vec<f32> {
 /// `drain_16k` this doesn't advance any cursor, so it never disturbs the final
 /// transcription taken at stop. Empty when not recording.
 pub fn snapshot_16k(state: &AudioState) -> Vec<f32> {
+    // Dictating during a meeting: the take is just the tapped slice.
+    if let Some(tap) = *state.dictation_tap.lock().unwrap() {
+        return tap_snapshot(state, tap);
+    }
     let active = state.active.lock().unwrap();
     let Some(rec) = active.as_ref() else {
         return Vec::new();
@@ -205,12 +405,15 @@ pub fn snapshot_16k(state: &AudioState) -> Vec<f32> {
 }
 
 pub fn stop_recording(state: &AudioState) -> Result<RecordingResult, String> {
-    let rec = state
-        .active
-        .lock()
-        .unwrap()
-        .take()
-        .ok_or("not recording")?;
+    let rec = {
+        let mut active = state.active.lock().unwrap();
+        match active.as_ref().map(|r| r.owner) {
+            None => return Err("not recording".into()),
+            // Never let a dictation stop end a meeting's capture.
+            Some(Owner::Meeting) => return Err("the microphone is recording a meeting".into()),
+            Some(Owner::Dictation) => active.take().expect("checked above"),
+        }
+    };
 
     let _ = rec.stop_tx.send(());
     let _ = rec.done_rx.recv_timeout(std::time::Duration::from_secs(5));
@@ -225,6 +428,47 @@ pub fn stop_recording(state: &AudioState) -> Result<RecordingResult, String> {
     };
     *state.last_recording.lock().unwrap() = samples;
     Ok(result)
+}
+
+/// End a meeting's mic capture, returning the last undrained audio (16 kHz,
+/// including what was waiting inside the resampler) for the final VAD flush.
+/// If a dictation take is tapping the mic, the stream is handed to it instead
+/// of stopped, so the take can finish.
+pub fn stop_meeting_recording(state: &AudioState) -> Vec<f32> {
+    if owner(state) != Some(Owner::Meeting) {
+        return Vec::new();
+    }
+    let mut tail = drain_16k(state);
+    if let Some(rest) = flush_stream(state) {
+        tail.extend(rest);
+    }
+    if hand_over_to_dictation(state) {
+        return tail;
+    }
+    let rec = state.active.lock().unwrap().take();
+    if let Some(rec) = rec {
+        let _ = rec.stop_tx.send(());
+        let _ = rec.done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    }
+    tail
+}
+
+/// Push the resampler's held-back input through (zero-padded) at the end.
+fn flush_stream(state: &AudioState) -> Option<Vec<f32>> {
+    use rubato::Resampler;
+    let mut active = state.active.lock().unwrap();
+    let rec = active.as_mut()?;
+    let rate = rec.sample_rate;
+    let stream = rec.stream.as_mut()?;
+    let pending = std::mem::take(&mut stream.pending);
+    let r = stream.resampler.as_mut()?;
+    if pending.is_empty() {
+        return None;
+    }
+    let out = r.process_partial(Some(&[&pending[..]]), None).ok()?;
+    // Padding produced output past the real input; keep only its share.
+    let keep = pending.len() * WHISPER_SAMPLE_RATE as usize / rate.max(1) as usize;
+    Some(out[0][..keep.min(out[0].len())].to_vec())
 }
 
 fn downmix(samples: &[f32], channels: u16) -> Vec<f32> {
@@ -242,20 +486,9 @@ fn resample(input: &[f32], from: u32, to: u32) -> Result<Vec<f32>, String> {
     if from == to || input.is_empty() {
         return Ok(input.to_vec());
     }
-    use rubato::{
-        Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
-        WindowFunction,
-    };
-    let params = SincInterpolationParameters {
-        sinc_len: 128,
-        f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 128,
-        window: WindowFunction::BlackmanHarris2,
-    };
+    use rubato::Resampler;
     let chunk = 1024;
-    let mut resampler = SincFixedIn::<f32>::new(to as f64 / from as f64, 2.0, params, chunk, 1)
-        .map_err(|e| e.to_string())?;
+    let mut resampler = new_resampler(from, to, chunk)?;
 
     let mut out = Vec::with_capacity(input.len() * to as usize / from as usize + chunk);
     let mut pos = 0;
@@ -273,4 +506,41 @@ fn resample(input: &[f32], from: u32, to: u32) -> Result<Vec<f32>, String> {
         out.extend_from_slice(&frames[0]);
     }
     Ok(out)
+}
+
+fn new_resampler(from: u32, to: u32, chunk: usize) -> Result<rubato::SincFixedIn<f32>, String> {
+    use rubato::{SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+    let params = SincInterpolationParameters {
+        sinc_len: 128,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 128,
+        window: WindowFunction::BlackmanHarris2,
+    };
+    SincFixedIn::<f32>::new(to as f64 / from as f64, 2.0, params, chunk, 1).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Draining in uneven pieces must produce the same timeline as one pass:
+    /// no padding at chunk boundaries (the old per-drain resampler added
+    /// ~0.12%, i.e. seconds per hour).
+    #[test]
+    fn stream_resampler_keeps_the_timeline() {
+        let mut s = StreamResampler::new(48_000).unwrap();
+        let mut out = 0usize;
+        let mut fed = 0usize;
+        for i in 0..600 {
+            // Irregular drain sizes, like 1 s polls of 512-frame callbacks.
+            let n = if i % 2 == 0 { 48_512 } else { 47_488 };
+            out += s.push(&vec![0.1; n]).len();
+            fed += n;
+        }
+        let expected = fed / 3;
+        let diff = expected as i64 - out as i64;
+        // Only what's still waiting inside the filter may be missing.
+        assert!((0..=STREAM_CHUNK as i64).contains(&diff), "diff {diff}");
+    }
 }

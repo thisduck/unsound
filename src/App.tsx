@@ -7,6 +7,7 @@ import { SettingsSheet } from "./SettingsSheet";
 import { Onboarding } from "./Onboarding";
 import { HistoryDrawer, Take } from "./HistoryDrawer";
 import { Meetings } from "./Meetings";
+import { TasksView } from "./TasksView";
 import "./App.css";
 
 type Phase = "idle" | "recording" | "transcribing" | "cleaning";
@@ -75,7 +76,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [view, setView] = useState<"dictate" | "meetings">("dictate");
+  const [view, setView] = useState<"dictate" | "meetings" | "tasks">("dictate");
+  const [readyTasks, setReadyTasks] = useState(0);
   const [rawOpen, setRawOpen] = useState(false);
   const [onboarding, setOnboarding] = useState(() => !localStorage.getItem("unsound.onboarded"));
   const [prompt, setPrompt] = useLocalStorage("unsound.prompt", "");
@@ -581,6 +583,12 @@ export default function App() {
           >
             meetings<span className="beta-badge">beta</span>
           </button>
+          <button
+            className={"nav-tab" + (view === "tasks" ? " on" : "")}
+            onClick={() => setView("tasks")}
+          >
+            tasks{readyTasks > 0 && <span className="count-badge">{readyTasks}</span>}
+          </button>
         </nav>
         <span className="spacer" />
         {view === "dictate" && (
@@ -604,6 +612,11 @@ export default function App() {
           onModelsChanged={refreshModels}
           onActivate={() => setView("meetings")}
         />
+      </div>
+
+      {/* Tasks stays mounted too, so its "needs your ok" count stays live. */}
+      <div className={"view-wrap" + (view === "tasks" ? "" : " hidden")}>
+        <TasksView onCount={setReadyTasks} />
       </div>
 
       {view === "dictate" && (

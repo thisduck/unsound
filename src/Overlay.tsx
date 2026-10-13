@@ -1,16 +1,19 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { on, OverlayState } from "./api";
+import { api, on, OverlayState } from "./api";
 import { useLevelHistory, Wave } from "./Wave";
 import "./App.css";
 
 /// Rendered in the tiny always-on-top window while dictating into other apps:
 /// the wave, with the words so far streaming in a bubble above it.
 export default function Overlay() {
-  const [state, setState] = useState<OverlayState>("recording");
+  const [state, setState] = useState<OverlayState>("hidden");
   const [caption, setCaption] = useState("");
+  // Assistant acknowledgements ("Got it: …", "Created ENG-142").
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
   const stateRef = useRef(state);
   stateRef.current = state;
-  const bars = useLevelHistory(state === "recording");
+  const bars = useLevelHistory(state === "recording" || state === "command");
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-root");
@@ -22,6 +25,18 @@ export default function Overlay() {
       }),
       on.dictationLive((t) => {
         if (stateRef.current === "recording") setCaption(t);
+      }),
+      on.assistantToast((text) => {
+        setToast(text);
+        window.clearTimeout(toastTimer.current);
+        toastTimer.current = window.setTimeout(() => {
+          setToast(null);
+          // Nothing else on screen: put the overlay away again.
+          if (stateRef.current === "hidden" || stateRef.current === "processing") {
+            setState("hidden");
+            api.setOverlay(false).catch(() => {});
+          }
+        }, 4000);
       }),
     ];
     return () => {
@@ -43,14 +58,21 @@ export default function Overlay() {
     setClipped(text.offsetHeight > room + 1);
   }, [caption]);
 
+  const showPill = state === "recording" || state === "processing" || state === "command";
   return (
     <div className="overlay-stack">
-      {caption && (
+      {toast && (
+        <div className="overlay-caption overlay-toast">
+          <p>{toast}</p>
+        </div>
+      )}
+      {!toast && caption && (
         <div ref={captionRef} className={"overlay-caption" + (clipped ? " clipped" : "")}>
           <p>{caption}</p>
         </div>
       )}
-      <div className="overlay-pill">
+      {showPill && <div className={"overlay-pill" + (state === "command" ? " command" : "")}>
+        {state === "command" && <span className="overlay-label">ask</span>}
         {state === "processing" ? (
           <div className="overlay-processing">
             <span className="overlay-dot" />
@@ -60,7 +82,7 @@ export default function Overlay() {
         ) : (
           <Wave bars={bars} className="overlay-wave" />
         )}
-      </div>
+      </div>}
     </div>
   );
 }

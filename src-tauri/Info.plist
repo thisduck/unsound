@@ -4,5 +4,11 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>unsound records audio from your microphone to transcribe it locally on this device.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>unsound reads the calendar event you're in to title a meeting and name its attendees. It never leaves this device.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>unsound reads the calendar event you're in to title a meeting and name its attendees. It never leaves this device.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>unsound drafts emails in Mail and adds reminders when you ask it to during a meeting.</string>
 </dict>
 </plist>

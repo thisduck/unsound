@@ -31,8 +31,26 @@ the models that do the work.
   reopen, or re-style.
 - **🔎 Comfortable to read.** Adjustable text size for the transcript and
   refined output.
+- **🗓 Meetings.** Start one (or let unsound offer when Zoom, Meet or Teams
+  takes your mic) and it transcribes you and the call live, tells the other
+  speakers apart as they talk — and recognizes people you've named before —
+  and writes notes built around the ones you jot, with action items, open
+  questions, and timestamps you can click to hear that moment again.
+- **🙋 Ask it to do things.** Mid-meeting, say "unsound, create a Jira ticket
+  from what we just discussed" or "…draft an email to Priya about the launch
+  date" (or hold your command key — it works while you're muted on the
+  call). It drafts from the conversation right away; you review, edit and
+  approve before anything is sent. Mail, Reminders, Calendar, Jira, any MCP
+  tool server, or a hand-off to Claude Code.
+- **🌐 Use the sites you're already signed into.** Describe your tools in your
+  own words — "Jira: tickets; if no project is mentioned use BLAH" — and
+  unsound follows your rules and does the work in your own browser (through
+  Claude in Chrome, or its own model with a browser connector). No
+  integration needed per site.
+- **🔎 Search every meeting.** Full-text search across all transcripts, or ask
+  a question across meetings and get an answer with sources.
 - **🔒 Completely private.** Everything runs on your machine. Works with the
-  Wi-Fi off.
+  Wi-Fi off — the only exceptions are tools you connect and approve.
 
 Pick the models you like from a built-in library (smaller and faster, or
 larger and sharper) — they download once and you can swap them anytime.
@@ -55,6 +73,32 @@ microphone ──cpal──▶ 16kHz mono PCM ──whisper.cpp──▶ raw tra
 - **Speech-to-text:** [whisper.cpp](https://github.com/ggml-org/whisper.cpp) via `whisper-rs`, Metal-accelerated on macOS.
 - **Cleanup LLM:** [llama.cpp](https://github.com/ggml-org/llama.cpp) via `llama-cpp-2`, Metal-accelerated on macOS. Runs any GGUF instruct model.
 - **Audio capture:** `cpal` (CoreAudio / WASAPI), downmixed and resampled to the 16 kHz mono Whisper expects with `rubato`.
+
+### Meetings, in more detail
+
+```
+mic ─┐                      ┌─▶ whisper / parakeet ─▶ live transcript ─┐
+     ├─▶ disk (both WAVs) ──┤   (commands jump the queue; wake word    │
+sys ─┘   + Silero VAD       │    lifted into the assistant)            │
+                            └─▶ voice embeddings ─▶ live speaker labels │
+                                                                        ▼
+        every 5 minutes, while you talk:  extract grounded points (LLM) │
+        at stop:  compose notes (streamed) → action items → title  ◀────┘
+```
+
+- **Audio** from both channels streams to `meeting-audio/<id>.wav` and
+  `<id>.mic.wav` as it's captured, on one clock (the mic's); system audio is
+  placed by its buffer timestamps so silent stretches don't drift it.
+- **Speakers** are clustered live from CAM++ voice embeddings; tiny phantom
+  clusters are merged at the end, and naming someone remembers their voice.
+- **Notes** are extracted per five-minute stretch during the meeting and
+  cached by the exact text they came from, so edits and renames only redo
+  what changed; the final compose starts streaming seconds after you stop.
+- **The assistant** turns a request into a task: plan (what, when, about which
+  part of the meeting) → draft (grammar-constrained JSON, so drafts are always
+  well-formed) → your approval → run. Only your mic can give requests, and the
+  transcript is always handled as untrusted data. Pick a stronger local model
+  for it (Gemma 4 12B/26B-A4B, Qwen3.6, gpt-oss) or any OpenAI-compatible server.
 
 ## Models
 

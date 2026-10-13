@@ -1,8 +1,11 @@
 import { useState } from "react";
 import { api, ModelInfo, ModelKind } from "./api";
 import { DictionarySection, MicPicker, ModelLibrary, PermissionsSection, ShortcutsSection, StylesSection } from "./sections";
+import { AssistantSection, MeetingsSection } from "./AssistantSettings";
 
 type Section =
+  | "assistant"
+  | "meetings"
   | "models"
   | "shortcuts"
   | "styles"
@@ -14,6 +17,8 @@ type Section =
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "shortcuts", label: "shortcuts" },
+  { id: "assistant", label: "assistant" },
+  { id: "meetings", label: "meetings" },
   { id: "styles", label: "styles" },
   { id: "dictionary", label: "dictionary" },
   { id: "models", label: "models" },
@@ -119,6 +124,10 @@ export function SettingsSheet({
 
   const body = () => {
     switch (section) {
+      case "assistant":
+        return <AssistantSection models={models} onError={setErr} onOpenShortcuts={() => setSection("shortcuts")} />;
+      case "meetings":
+        return <MeetingsSection models={models} onError={setErr} />;
       case "models":
         return (
           <>
@@ -307,7 +316,11 @@ export function SettingsSheet({
         <div className="settings-pane">
           <header className="sheet-head">
             <h2>{SECTIONS.find((s) => s.id === section)?.label}</h2>
-            <span className="sheet-note">downloads are the only time unsound touches the network</span>
+            <span className="sheet-note">
+              {section === "assistant"
+                ? "tools you connect here are the only way anything leaves this Mac — and only after you approve"
+                : "downloads are the only time unsound touches the network"}
+            </span>
             <button className="quiet" onClick={onClose}>
               close ✕
             </button>

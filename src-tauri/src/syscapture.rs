@@ -32,8 +32,8 @@ use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
 use objc2_core_media::{CMBlockBuffer, CMSampleBuffer};
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamOutput,
-    SCStreamOutputType, SCWindow,
+    SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
+    SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 
 /// SCK delivers this rate/layout to us, which is what Whisper consumes.
@@ -65,7 +65,42 @@ fn err_msg(err: *mut NSError) -> String {
 
 /// Instance state for the delegate: the shared sink captured samples land in.
 struct Ivars {
-    sink: Arc<Mutex<Vec<f32>>>,
+    sink: Arc<Mutex<Sink>>,
+}
+
+/// Captured audio plus what's needed to keep it on the wall clock. SCK only
+/// delivers buffers while something is producing sound, so samples are placed
+/// by each buffer's presentation timestamp and gaps are filled with silence —
+/// otherwise every quiet stretch would pull the system timeline earlier than
+/// the mic's, and "them" lines would sort before what they answered.
+#[derive(Default)]
+struct Sink {
+    samples: Vec<f32>,
+    /// Absolute sample index of `samples[0]` (drained audio is dropped).
+    base: usize,
+    /// PTS (seconds) of the first buffer — the timeline's zero.
+    first_pts: Option<f64>,
+    /// Set when macOS stops the stream on its own (display change, sleep…).
+    stopped: Option<String>,
+}
+
+impl Sink {
+    fn end(&self) -> usize {
+        self.base + self.samples.len()
+    }
+
+    fn push(&mut self, pts: Option<f64>, samples: &[f32]) {
+        if let Some(pts) = pts {
+            let first = *self.first_pts.get_or_insert(pts);
+            let at = ((pts - first) * CAPTURE_SAMPLE_RATE as f64).round() as i64;
+            let gap = at - self.end() as i64;
+            // Fill real gaps (>50 ms); ignore jitter and small overlaps.
+            if gap > (CAPTURE_SAMPLE_RATE / 20) as i64 && gap < CAPTURE_SAMPLE_RATE as i64 * 3600 {
+                self.samples.resize(self.samples.len() + gap as usize, 0.0);
+            }
+        }
+        self.samples.extend_from_slice(samples);
+    }
 }
 
 define_class!(
@@ -91,14 +126,26 @@ define_class!(
             }
             let samples = extract_mono(sample_buffer);
             if !samples.is_empty() {
-                self.ivars().sink.lock().unwrap().extend_from_slice(&samples);
+                let t = unsafe { sample_buffer.presentation_time_stamp() };
+                let pts = (t.timescale > 0 && (t.flags.0 & 1) != 0)
+                    .then(|| t.value as f64 / t.timescale as f64);
+                self.ivars().sink.lock().unwrap().push(pts, &samples);
             }
+        }
+    }
+
+    unsafe impl SCStreamDelegate for AudioOutput {
+        #[unsafe(method(stream:didStopWithError:))]
+        fn did_stop(&self, _stream: &SCStream, error: &NSError) {
+            let msg = error.localizedDescription().to_string();
+            eprintln!("[syscapture] stream stopped by the system: {msg}");
+            self.ivars().sink.lock().unwrap().stopped = Some(msg);
         }
     }
 );
 
 impl AudioOutput {
-    fn new(sink: Arc<Mutex<Vec<f32>>>) -> Retained<Self> {
+    fn new(sink: Arc<Mutex<Sink>>) -> Retained<Self> {
         let this = Self::alloc().set_ivars(Ivars { sink });
         unsafe { msg_send![super(this), init] }
     }
@@ -206,9 +253,7 @@ fn extract_mono(sbuf: &CMSampleBuffer) -> Vec<f32> {
 struct Active {
     stop_tx: mpsc::Sender<()>,
     done_rx: mpsc::Receiver<()>,
-    buffer: Arc<Mutex<Vec<f32>>>,
-    /// Samples already handed out by `drain`, for live meeting streaming.
-    drained: usize,
+    buffer: Arc<Mutex<Sink>>,
 }
 
 /// Mirrors `AudioState`: one capture at a time, plus the finished samples.
@@ -234,7 +279,7 @@ pub fn start(state: &SysCaptureState) -> Result<(), String> {
         return Err("already capturing system audio".into());
     }
 
-    let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let buffer: Arc<Mutex<Sink>> = Arc::new(Mutex::new(Sink::default()));
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let (done_tx, done_rx) = mpsc::channel::<()>();
     // The SCStream and its Objective-C friends are !Send, so like the cpal
@@ -301,12 +346,13 @@ pub fn start(state: &SysCaptureState) -> Result<(), String> {
 
             // 4. The stream, our delegate, and a serial delivery queue.
             let output = AudioOutput::new(thread_buffer.clone());
+            let delegate = ProtocolObject::from_ref(&*output);
             let stream = unsafe {
                 SCStream::initWithFilter_configuration_delegate(
                     SCStream::alloc(),
                     &filter,
                     &config,
-                    None,
+                    Some(delegate),
                 )
             };
             let queue = DispatchQueue::new("com.unsound.sysaudio", DispatchQueueAttr::SERIAL);
@@ -365,26 +411,31 @@ pub fn start(state: &SysCaptureState) -> Result<(), String> {
         stop_tx,
         done_rx,
         buffer,
-        drained: 0,
     });
     Ok(())
 }
 
-/// Pull the system audio captured since the last call (already 16 kHz mono) —
-/// the "them" side of live meeting transcription. Empty when not capturing or
-/// nothing new has arrived.
+/// Pull (and forget) the system audio captured since the last call — already
+/// 16 kHz mono, with silent gaps filled so it tracks the wall clock. The "them"
+/// side of live meeting transcription; empty when not capturing.
 pub fn drain(state: &SysCaptureState) -> Vec<f32> {
-    let mut active = state.active.lock().unwrap();
-    let Some(a) = active.as_mut() else {
+    let active = state.active.lock().unwrap();
+    let Some(a) = active.as_ref() else {
         return Vec::new();
     };
-    let buf = a.buffer.lock().unwrap();
-    if buf.len() <= a.drained {
-        return Vec::new();
-    }
-    let out = buf[a.drained..].to_vec();
-    a.drained = buf.len();
+    let mut sink = a.buffer.lock().unwrap();
+    let out = std::mem::take(&mut sink.samples);
+    sink.base += out.len();
     out
+}
+
+/// Why macOS stopped the stream on its own, if it did (taken: reported once).
+pub fn take_stop_error(state: &SysCaptureState) -> Option<String> {
+    let active = state.active.lock().unwrap();
+    let buffer = active.as_ref()?.buffer.clone();
+    drop(active);
+    let taken = buffer.lock().unwrap().stopped.take();
+    taken
 }
 
 pub fn stop(state: &SysCaptureState) -> Result<CaptureResult, String> {
@@ -398,7 +449,7 @@ pub fn stop(state: &SysCaptureState) -> Result<CaptureResult, String> {
     let _ = cap.stop_tx.send(());
     let _ = cap.done_rx.recv_timeout(Duration::from_secs(5));
 
-    let samples = std::mem::take(&mut *cap.buffer.lock().unwrap());
+    let samples = std::mem::take(&mut cap.buffer.lock().unwrap().samples);
     let result = CaptureResult {
         duration_secs: samples.len() as f32 / CAPTURE_SAMPLE_RATE as f32,
         sample_count: samples.len(),

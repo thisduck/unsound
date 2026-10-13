@@ -48,14 +48,21 @@ fn backend() -> Result<&'static LlamaBackend, String> {
         .map_err(|e| e.clone())
 }
 
-/// Caches the most recently used LLM so repeated cleanups are fast.
+/// Caches recently used LLMs so switching between them is instant — the
+/// cleanup model, the meeting summary model and the assistant model can all
+/// differ, and during a meeting they take turns. How many stay resident
+/// depends on memory (see `model_capacity`).
 #[derive(Default)]
 pub struct LlmState {
-    loaded: Mutex<Option<(String, Arc<LlamaModel>)>>,
+    /// Loaded models, least recently used first.
+    loaded: Mutex<Vec<(String, Arc<LlamaModel>)>>,
     /// Cleanup's long-lived context. Every take's prompt opens with the same
     /// ~1.1k tokens (instructions, style samples, examples); keeping them
     /// processed saves ~0.6 s per take.
     cleanup: Mutex<Option<CachedContext>>,
+    /// Meeting Q&A's context: the meeting's material stays processed, so a
+    /// follow-up question only costs the question.
+    qa: Mutex<Option<CachedContext>>,
 }
 
 /// A context kept between prompts, with the tokens its KV cache holds, so the
@@ -67,27 +74,76 @@ struct CachedContext {
     tokens: Vec<LlamaToken>,
 }
 
-// The context is only ever used by whoever holds `LlmState::cleanup`.
+// The context is only ever used by whoever holds the slot's mutex.
 unsafe impl Send for CachedContext {}
 
+/// Which long-lived context a prompt may reuse.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Slot {
+    Cleanup,
+    Qa,
+}
+
+/// Physical memory in GB (0 when unknown).
+pub fn memory_gb() -> u64 {
+    static MEM: OnceLock<u64> = OnceLock::new();
+    *MEM.get_or_init(|| {
+        std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|b| b / 1_073_741_824)
+            .unwrap_or(0)
+    })
+}
+
+/// Models kept resident at once: generous on big machines, careful on 8-16 GB.
+fn model_capacity() -> usize {
+    match memory_gb() {
+        0..=20 => 1,
+        21..=40 => 2,
+        41..=80 => 3,
+        _ => 4,
+    }
+}
+
 impl LlmState {
-    /// Drop the cached model so its Metal buffers are released before
+    /// Drop the cached models so their Metal buffers are released before
     /// ggml's static destructors run at process exit.
     pub fn clear(&self) {
         *self.cleanup.lock().unwrap() = None;
-        *self.loaded.lock().unwrap() = None;
+        *self.qa.lock().unwrap() = None;
+        self.loaded.lock().unwrap().clear();
+    }
+
+    fn slot(&self, slot: Slot) -> &Mutex<Option<CachedContext>> {
+        match slot {
+            Slot::Cleanup => &self.cleanup,
+            Slot::Qa => &self.qa,
+        }
     }
 
     fn model_for(&self, model_path: &Path) -> Result<Arc<LlamaModel>, String> {
         let key = model_path.to_string_lossy().to_string();
         let mut loaded = self.loaded.lock().unwrap();
-        if let Some((path, model)) = loaded.as_ref() {
-            if *path == key {
-                return Ok(model.clone());
+        if let Some(i) = loaded.iter().position(|(p, _)| *p == key) {
+            let entry = loaded.remove(i);
+            let model = entry.1.clone();
+            loaded.push(entry);
+            return Ok(model);
+        }
+        // Make room first, so the old weights are freed before the new load.
+        while loaded.len() >= model_capacity() {
+            let (_, evicted) = loaded.remove(0);
+            for slot in [&self.cleanup, &self.qa] {
+                let mut c = slot.lock().unwrap();
+                if c.as_ref().is_some_and(|c| Arc::ptr_eq(&c.model, &evicted)) {
+                    *c = None;
+                }
             }
         }
-        // A context on the old model would keep it resident alongside the new.
-        *self.cleanup.lock().unwrap() = None;
         let backend = backend()?;
         // Offload everything to the GPU where one exists (Metal on macOS);
         // harmless on CPU-only builds.
@@ -95,7 +151,7 @@ impl LlmState {
         let model = LlamaModel::load_from_file(backend, model_path, &params)
             .map_err(|e| format!("failed to load LLM: {e}"))?;
         let model = Arc::new(model);
-        *loaded = Some((key, model.clone()));
+        loaded.push((key, model.clone()));
         Ok(model)
     }
 }
@@ -240,20 +296,29 @@ fn render_prompt(model: &LlamaModel, messages: &[(&str, String)]) -> Result<Stri
         .iter()
         .map(|(r, c)| (r.to_string(), c.clone()))
         .collect();
-
-    // 1. The model's embedded template (works for models llama.cpp knows).
-    if let Ok(t) = model.chat_template(None) {
-        if let Some(p) = try_template(model, &t, &msgs) {
-            return Ok(p);
-        }
-    }
-
-    // 2. A built-in family template chosen from the model architecture.
     let arch = model
         .meta_val_str("general.architecture")
         .unwrap_or_default()
         .to_lowercase();
-    let family = if arch.contains("gemma") {
+
+    // Gemma 4 has its own turn format that this llama.cpp's template table
+    // doesn't know; the "gemma" fallback below is Gemma 1-3's and would feed
+    // it foreign markers. Render it natively.
+    if arch == "gemma4" {
+        return Ok(render_gemma4(&msgs));
+    }
+
+    // 1. The model's embedded template (works for models llama.cpp knows).
+    if let Ok(t) = model.chat_template(None) {
+        if let Some(p) = try_template(model, &t, &msgs) {
+            return Ok(skip_harmony_analysis(&arch, p));
+        }
+    }
+
+    // 2. A built-in family template chosen from the model architecture.
+    let family = if arch.contains("gpt-oss") || arch.contains("gptoss") {
+        "gpt-oss"
+    } else if arch.contains("gemma") {
         "gemma"
     } else if arch.contains("llama") {
         "llama3"
@@ -266,12 +331,63 @@ fn render_prompt(model: &LlamaModel, messages: &[(&str, String)]) -> Result<Stri
     for name in [family, "chatml"] {
         if let Ok(t) = LlamaChatTemplate::new(name) {
             if let Some(p) = try_template(model, &t, &msgs) {
-                return Ok(p);
+                return Ok(skip_harmony_analysis(&arch, p));
             }
         }
     }
 
     Err("failed to apply chat template: no compatible template for this model".into())
+}
+
+/// Gemma 4's native chat format (from its embedded Jinja template), with
+/// thinking off: the model turn opens with an empty thought channel. BOS is
+/// added at tokenization, like every other template here.
+fn render_gemma4(messages: &[(String, String)]) -> String {
+    let mut out = String::new();
+    let mut rest = messages;
+    if let Some((role, content)) = messages.first().filter(|(r, _)| r == "system") {
+        let _ = role;
+        out.push_str(&format!("<|turn>system\n{}<turn|>\n", content.trim()));
+        rest = &messages[1..];
+    }
+    for (role, content) in rest {
+        let role = if role == "assistant" { "model" } else { role.as_str() };
+        out.push_str(&format!("<|turn>{role}\n{}<turn|>\n", content.trim()));
+    }
+    out.push_str("<|turn>model\n<|channel>thought\n<channel|>");
+    out
+}
+
+/// gpt-oss (harmony) opens its reply with an analysis channel; go straight
+/// to the final one — we want answers (and valid JSON), not visible reasoning.
+fn skip_harmony_analysis(arch: &str, prompt: String) -> String {
+    if (arch.contains("gpt-oss") || arch.contains("gptoss")) && prompt.ends_with("<|start|>assistant") {
+        return prompt + "<|channel|>final<|message|>";
+    }
+    prompt
+}
+
+/// Remove reasoning a model wrote before its answer (Qwen-style `<think>`,
+/// Gemma 4's thought channel, harmony's analysis channel).
+pub fn strip_reasoning(text: &str) -> String {
+    let mut t = text.to_string();
+    for (open, close) in [
+        ("<think>", "</think>"),
+        ("<|channel>thought", "<channel|>"),
+        ("<|channel|>analysis", "<|end|>"),
+    ] {
+        while let Some(a) = t.find(open) {
+            match t[a..].find(close) {
+                Some(b) => t.replace_range(a..a + b + close.len(), ""),
+                // Unclosed (cut off mid-thought): nothing usable after it.
+                None => t.truncate(a),
+            }
+        }
+    }
+    if let Some(i) = t.find("<|channel|>final<|message|>") {
+        t = t[i + "<|channel|>final<|message|>".len()..].to_string();
+    }
+    t.trim().to_string()
 }
 
 pub fn cleanup_text(
@@ -316,8 +432,13 @@ fn cleanup(
         transliterate,
     )?;
     let tokens = tokenize(&model, &prompt)?;
-    let output = with_prompt(state, backend, &model, &tokens, |ctx, batch| {
-        sample(on_token, &model, ctx, batch, tokens.len(), force_lowercase, 0.2)
+    let gen = Gen {
+        temperature: 0.2,
+        force_lowercase,
+        ..Default::default()
+    };
+    let output = with_prompt(state, Slot::Cleanup, backend, &model, &tokens, MAX_NEW_TOKENS, |ctx, batch| {
+        sample(on_token, &model, ctx, batch, tokens.len(), &gen)
     })?;
 
     // Small models occasionally echo the wrapper tags; strip them.
@@ -348,7 +469,7 @@ pub fn prime_cleanup(
         let (prompt, _) =
             cleanup_prompt(&model, system_prompt, transcript, style, target_lang, transliterate)?;
         let tokens = tokenize(&model, &prompt)?;
-        with_prompt(state, backend, &model, &tokens, |ctx, batch| {
+        with_prompt(state, Slot::Cleanup, backend, &model, &tokens, MAX_NEW_TOKENS, |ctx, batch| {
             if transcript.is_empty() {
                 return Ok(());
             }
@@ -448,39 +569,49 @@ fn tokenize(model: &LlamaModel, prompt: &str) -> Result<Vec<LlamaToken>, String>
         .map_err(|e| format!("tokenization failed: {e}"))
 }
 
-/// Context size for a prompt of `n_prompt` tokens plus the longest reply.
-fn ctx_size(n_prompt: usize) -> usize {
-    (n_prompt + MAX_NEW_TOKENS + 16).max(2048)
+/// Largest context the Q&A slot keeps resident; its KV cache scales with it.
+fn qa_ctx_max() -> usize {
+    match memory_gb() {
+        0..=20 => 16_384,
+        21..=40 => 32_768,
+        _ => 65_536,
+    }
 }
 
 /// Run `f` on a context whose KV cache holds `tokens`, with the batch that
-/// produced the last token's logits. Reuses cleanup's long-lived context,
+/// produced the last token's logits. Reuses the slot's long-lived context,
 /// processing only what differs from the previous prompt; a prompt too long to
 /// keep resident gets a one-off context.
 fn with_prompt<R>(
     state: &LlmState,
+    slot: Slot,
     backend: &LlamaBackend,
     model: &Arc<LlamaModel>,
     tokens: &[LlamaToken],
+    reply_tokens: usize,
     f: impl FnOnce(&mut LlamaContext<'_>, &mut LlamaBatch<'_>) -> Result<R, String>,
 ) -> Result<R, String> {
     if tokens.is_empty() {
         return Err("empty prompt".into());
     }
-    let n_ctx = ctx_size(tokens.len());
+    let n_ctx = (tokens.len() + reply_tokens + 16).max(2048);
+    let max = match slot {
+        Slot::Cleanup => CACHED_CTX_MAX,
+        Slot::Qa => qa_ctx_max(),
+    };
     let new_context = |n_ctx: usize| {
         let params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx as u32));
         model
             .new_context(backend, params)
             .map_err(|e| format!("failed to create LLM context: {e}"))
     };
-    if n_ctx > CACHED_CTX_MAX {
+    if n_ctx > max {
         let mut ctx = new_context(n_ctx)?;
         let mut batch = ingest(&mut ctx, tokens, 0)?;
         return f(&mut ctx, &mut batch);
     }
 
-    let mut cache = state.cleanup.lock().unwrap();
+    let mut cache = state.slot(slot).lock().unwrap();
     let fits = cache
         .as_ref()
         .is_some_and(|c| Arc::ptr_eq(&c.model, model) && c.ctx.n_ctx() as usize >= n_ctx);
@@ -488,7 +619,7 @@ fn with_prompt<R>(
         *cache = None; // free the old KV cache before allocating the next
         // Headroom, so a slightly longer prompt (another style, a longer take)
         // doesn't force a new context and lose the cache.
-        let ctx = new_context(n_ctx.next_multiple_of(2048).min(CACHED_CTX_MAX))?;
+        let ctx = new_context(n_ctx.next_multiple_of(2048).min(max))?;
         // SAFETY: the context borrows the model inside the `Arc` stored beside
         // it, which is dropped after it (field order) and never moves.
         let ctx = unsafe { std::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(ctx) };
@@ -550,59 +681,69 @@ fn ingest<'b>(
     Ok(batch)
 }
 
-/// Shared llama.cpp generation on a one-off context: ingest `prompt`, then
-/// sample to end-of-generation, streaming decoded UTF-8 to the frontend on
-/// `stream_event`. Returns the full generated text, trimmed.
-fn generate(
-    app: &AppHandle,
-    backend: &LlamaBackend,
-    model: &LlamaModel,
-    prompt: &str,
-    force_lowercase: bool,
-    stream_event: &str,
-    temperature: f32,
-) -> Result<String, String> {
-    let tokens = tokenize(model, prompt)?;
-    if tokens.is_empty() {
-        return Ok(String::new());
-    }
-    let ctx_params =
-        LlamaContextParams::default().with_n_ctx(NonZeroU32::new(ctx_size(tokens.len()) as u32));
-    let mut ctx = model
-        .new_context(backend, ctx_params)
-        .map_err(|e| format!("failed to create LLM context: {e}"))?;
-    let mut batch = ingest(&mut ctx, &tokens, 0)?;
-    let emit = &mut |t: &str| {
-        let _ = app.emit(stream_event, t);
-    };
-    sample(emit, model, &mut ctx, &mut batch, tokens.len(), force_lowercase, temperature)
+/// How to sample a reply.
+pub struct Gen<'a> {
+    pub temperature: f32,
+    pub max_tokens: usize,
+    /// GBNF grammar the reply must match (e.g. from a JSON schema).
+    pub grammar: Option<&'a str>,
+    pub force_lowercase: bool,
 }
 
+impl Default for Gen<'_> {
+    fn default() -> Self {
+        Self {
+            temperature: 0.1,
+            max_tokens: MAX_NEW_TOKENS,
+            grammar: None,
+            force_lowercase: false,
+        }
+    }
+}
+
+/// End-of-turn markers some models print as text instead of an EOG token.
+const STOP_TEXT: [&str; 5] = ["<turn|>", "<|im_end|>", "<end_of_turn>", "<|return|>", "<|end|>"];
+
 /// Sample from a context whose prompt (`n_prompt` tokens) is already in, to
-/// end-of-generation, streaming decoded UTF-8 chunks to `on_token`.
+/// end-of-generation, streaming decoded UTF-8 chunks to `on_token`. A leading
+/// reasoning block (`<think>…</think>`) is held back from the stream.
 fn sample(
     on_token: &mut dyn FnMut(&str),
     model: &LlamaModel,
     ctx: &mut LlamaContext<'_>,
     batch: &mut LlamaBatch<'_>,
     n_prompt: usize,
-    force_lowercase: bool,
-    temperature: f32,
+    gen: &Gen,
 ) -> Result<String, String> {
-    let mut sampler = LlamaSampler::chain_simple([
-        LlamaSampler::temp(temperature),
-        LlamaSampler::min_p(0.05, 1),
-        LlamaSampler::dist(42),
-    ]);
+    // Grammar-constrained replies are decoded greedily with a fast path (see
+    // `grammar_pick`); everything else samples through a normal chain.
+    let mut grammar = match gen.grammar {
+        Some(g) => Some(LlamaSampler::grammar(model, g, "root").map_err(|e| format!("bad grammar: {e:?}"))?),
+        None => None,
+    };
+    let mut chain: Vec<LlamaSampler> = Vec::new();
+    if gen.temperature <= 0.0 {
+        chain.push(LlamaSampler::greedy());
+    } else {
+        chain.push(LlamaSampler::temp(gen.temperature));
+        chain.push(LlamaSampler::min_p(0.05, 1));
+        chain.push(LlamaSampler::dist(42));
+    }
+    let mut sampler = LlamaSampler::chain_simple(chain);
 
     let mut utf8 = Utf8Stream::new();
     let mut output = String::new();
+    // How much of `output` has gone to `on_token` (reasoning is held back).
+    let mut emitted = 0usize;
     let mut n_cur = n_prompt as i32;
     let mut generated = 0usize;
 
     loop {
-        let token = sampler.sample(ctx, batch.n_tokens() - 1);
-        sampler.accept(token);
+        // `sample` also accepts the token into every sampler in the chain.
+        let token = match grammar.as_mut() {
+            Some(g) => grammar_pick(ctx, g, batch.n_tokens() - 1)?,
+            None => sampler.sample(ctx, batch.n_tokens() - 1),
+        };
         if model.is_eog_token(token) {
             break;
         }
@@ -613,15 +754,25 @@ fn sample(
             other => other.map_err(|e| e.to_string())?,
         };
         let mut chunk = utf8.push(&bytes);
-        if force_lowercase {
+        if gen.force_lowercase {
             chunk = chunk.to_lowercase();
         }
-        if !chunk.is_empty() {
-            output.push_str(&chunk);
-            on_token(&chunk);
+        output.push_str(&chunk);
+        if let Some(i) = STOP_TEXT.iter().filter_map(|m| output.find(m)).min() {
+            output.truncate(i);
+            break;
+        }
+        // Stream what's safely past any leading reasoning block.
+        let visible_from = visible_start(&output);
+        if let Some(from) = visible_from {
+            let from = from.max(emitted);
+            if from < output.len() {
+                on_token(&output[from..]);
+                emitted = output.len();
+            }
         }
         generated += 1;
-        if generated >= MAX_NEW_TOKENS {
+        if generated >= gen.max_tokens {
             break;
         }
         batch.clear();
@@ -631,121 +782,285 @@ fn sample(
             .map_err(|e| format!("decode failed: {e}"))?;
     }
 
-    Ok(output.trim().to_string())
+    Ok(strip_reasoning(&output))
 }
 
-/// Stage 1 of summarization: pull grounded facts out of the transcript before
-/// writing anything. Summarizing from an extracted fact list (rather than
-/// compressing the raw transcript in one shot) markedly reduces hallucination
-/// on small local models.
-pub const MEETING_EXTRACT_PROMPT: &str = r#"You extract the important content from a meeting transcript. Speakers are labeled "Me" (the user), and "Speaker 1", "Speaker 2", … (or "Them").
-Go through the transcript and list, as terse bullet points grounded ONLY in what was actually said:
-- Decisions that were made
-- Action items / commitments (note who owns each when stated)
-- Key topics and points discussed
-- Questions raised or left open
-Attribute to the speaker when clear. Do NOT invent names, numbers, dates, or commitments. If the transcript is thin, produce fewer bullets. Output only the bullet list, nothing else."#;
+/// Greedy decoding under a grammar without paying for the grammar on every
+/// token: take the most likely token, check just that one against the
+/// grammar, and only when it's invalid run the grammar over the whole
+/// vocabulary (262k tokens for Gemma 4 — the full pass on every step made
+/// JSON replies several times slower). Mirrors llama.cpp's common sampler.
+fn grammar_pick(ctx: &LlamaContext<'_>, grammar: &mut LlamaSampler, idx: i32) -> Result<LlamaToken, String> {
+    use llama_cpp_2::token::data::LlamaTokenData;
+    use llama_cpp_2::token::data_array::LlamaTokenDataArray;
+    let logits = ctx.get_logits_ith(idx);
+    let (best, best_logit) = logits
+        .iter()
+        .enumerate()
+        .fold((0usize, f32::NEG_INFINITY), |acc, (i, &l)| if l > acc.1 { (i, l) } else { acc });
+    let mut one = LlamaTokenDataArray::new(vec![LlamaTokenData::new(LlamaToken(best as i32), best_logit, 0.0)], false);
+    one.apply_sampler(grammar);
+    let token = if one.data[0].logit().is_finite() {
+        LlamaToken(best as i32)
+    } else {
+        let mut all = ctx.token_data_array_ith(idx);
+        all.apply_sampler(grammar);
+        let pick = all
+            .data
+            .iter()
+            .filter(|d| d.logit().is_finite())
+            .max_by(|a, b| a.logit().total_cmp(&b.logit()))
+            .ok_or("the model can't continue the required format")?;
+        pick.id()
+    };
+    grammar.accept(token);
+    Ok(token)
+}
 
-/// Stage 2: compose the final notes from the extracted facts — a broad summary
-/// plus skimmable point-form sections.
-pub const MEETING_SUMMARY_PROMPT: &str = r#"You write up meeting notes from a set of extracted points. "Me" is the user; the others are "Speaker 1", "Speaker 2", … (or "Them").
+/// Where the reply proper starts: after a closed leading `<think>` block, at
+/// 0 when there is none, or `None` while still inside one (or while the
+/// output is too short to tell).
+fn visible_start(output: &str) -> Option<usize> {
+    let lead = output.trim_start();
+    let offset = output.len() - lead.len();
+    if lead.starts_with("<think>") {
+        return lead.find("</think>").map(|i| offset + i + "</think>".len());
+    }
+    if lead.len() < "<think>".len() && "<think>".starts_with(lead) {
+        return None;
+    }
+    Some(0)
+}
+
+/// Tokens for plain text (no template), e.g. to size transcript chunks.
+pub fn count_text_tokens(state: &LlmState, model_path: &Path, text: &str) -> Result<usize, String> {
+    let model = state.model_for(model_path)?;
+    Ok(model
+        .str_to_token(text, AddBos::Never)
+        .map_err(|e| format!("tokenization failed: {e}"))?
+        .len())
+}
+
+/// The longest prompt worth sending this model: what it was trained on, capped
+/// by what this machine's memory comfortably holds, minus room for a reply.
+pub fn prompt_budget(state: &LlmState, model_path: &Path) -> Result<usize, String> {
+    let model = state.model_for(model_path)?;
+    let trained = model.n_ctx_train() as usize;
+    let trained = if trained == 0 { 8192 } else { trained };
+    let memory = match memory_gb() {
+        0..=12 => 12_000,
+        13..=20 => 24_000,
+        21..=40 => 48_000,
+        _ => 96_000,
+    };
+    Ok(trained.min(memory).saturating_sub(MAX_NEW_TOKENS + 256))
+}
+
+/// One chat completion with a local model. `slot` reuses a long-lived context
+/// (the prompt's shared prefix stays processed between calls).
+pub fn chat(
+    state: &LlmState,
+    model_path: &Path,
+    messages: &[(&str, String)],
+    gen: &Gen,
+    slot: Option<Slot>,
+    on_token: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    let backend = backend()?;
+    let model = state.model_for(model_path)?;
+    let prompt = render_prompt(&model, messages)?;
+    let tokens = tokenize(&model, &prompt)?;
+    if tokens.is_empty() {
+        return Ok(String::new());
+    }
+    let mut run = |ctx: &mut LlamaContext<'_>, batch: &mut LlamaBatch<'_>| {
+        sample(on_token, &model, ctx, batch, tokens.len(), gen)
+    };
+    match slot {
+        Some(slot) => with_prompt(state, slot, backend, &model, &tokens, gen.max_tokens, run),
+        None => {
+            let params = LlamaContextParams::default()
+                .with_n_ctx(NonZeroU32::new((tokens.len() + gen.max_tokens + 16).max(2048) as u32));
+            let mut ctx = model
+                .new_context(backend, params)
+                .map_err(|e| format!("failed to create LLM context: {e}"))?;
+            let mut batch = ingest(&mut ctx, &tokens, 0)?;
+            run(&mut ctx, &mut batch)
+        }
+    }
+}
+
+/// A chat completion constrained to JSON matching `schema` (a JSON Schema),
+/// parsed. Grammar-constrained decoding makes even small local models produce
+/// valid, complete structures — no native tool-calling format needed.
+pub fn chat_json(
+    state: &LlmState,
+    model_path: &Path,
+    messages: &[(&str, String)],
+    schema: &serde_json::Value,
+    max_tokens: usize,
+) -> Result<serde_json::Value, String> {
+    let grammar = json_grammar(schema)?;
+    let gen = Gen {
+        temperature: 0.0,
+        max_tokens,
+        grammar: Some(&grammar),
+        force_lowercase: false,
+    };
+    let text = chat(state, model_path, messages, &gen, None, &mut |_| {})?;
+    parse_json_reply(&text)
+}
+
+/// GBNF for a JSON Schema (cached — schemas are fixed per call site).
+pub fn json_grammar(schema: &serde_json::Value) -> Result<String, String> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+    let key = schema.to_string();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(g) = cache.lock().unwrap().get(&key) {
+        return Ok(g.clone());
+    }
+    let g = llama_cpp_2::json_schema_to_grammar(&key).map_err(|e| format!("schema → grammar: {e}"))?;
+    cache.lock().unwrap().insert(key, g.clone());
+    Ok(g)
+}
+
+/// Parse a model's JSON reply, tolerating code fences or chatter around it
+/// (remote models without enforced schemas sometimes add them).
+pub fn parse_json_reply(text: &str) -> Result<serde_json::Value, String> {
+    let t = strip_reasoning(text);
+    if let Ok(v) = serde_json::from_str(t.trim()) {
+        return Ok(v);
+    }
+    let start = t.find(['{', '[']).ok_or_else(|| format!("expected JSON, got: {}", preview(&t)))?;
+    let end = t.rfind(['}', ']']).ok_or_else(|| format!("expected JSON, got: {}", preview(&t)))?;
+    serde_json::from_str(&t[start..=end]).map_err(|e| format!("invalid JSON from model ({e}): {}", preview(&t)))
+}
+
+fn preview(s: &str) -> String {
+    s.chars().take(200).collect()
+}
+
+// ---- meeting prompts --------------------------------------------------------
+
+/// Stage 1 of summarization, run per stretch of the meeting (during it, as the
+/// transcript grows): pull grounded facts out before writing anything.
+/// Summarizing from extracted facts — rather than compressing the raw
+/// transcript in one shot — markedly reduces hallucination on small models,
+/// and working in stretches keeps every part of a long meeting in view.
+pub const MEETING_EXTRACT_PROMPT: &str = r#"You extract the important content from an excerpt of a meeting transcript. Each line is "[m:ss] Speaker: text". "Me" is the user; other speakers are named or "Speaker 1", "Speaker 2", … (or "Them").
+List, as terse bullet points grounded ONLY in what is said in this excerpt:
+- Decisions that were made
+- Action items / commitments (who owns each and any due date, when stated)
+- Key points, facts, numbers and names discussed
+- Questions raised or left open
+Start every action item or commitment bullet with "Action:" — e.g. "- Action: Speaker 2 to fix the login bug by Thursday (0:37)".
+End every bullet with the timestamp of the line that supports it, in parentheses, like (12:34). Attribute points to speakers when clear. Do NOT invent names, numbers, dates, or commitments. Transcripts contain speech-recognition errors; don't repeat obvious garbles. If nothing substantive is said, output exactly: - (nothing substantive)
+Output only the bullet list."#;
+
+/// Stage 2: compose the notes from the extracted facts (plus the user's own
+/// notes and flagged moments, which say what mattered to them).
+pub const MEETING_SUMMARY_PROMPT: &str = r#"You write up meeting notes from points extracted from the transcript. "Me" is the user — keep "Me" (or "I") for things the user said or took on; never reassign them to someone else.
 Write Markdown with these sections, omitting any that don't apply:
 ## Summary
 A 2-4 sentence plain-language overview of what the meeting was about and what was decided.
 ## Key points
-The main topics and points, as bullets.
+The main topics and points, as bullets, grouped logically (not in transcript order).
 ## Decisions
 What was decided, as bullets.
-## Action items
-Concrete follow-ups as a checklist ("- [ ] ..."), naming the owner when it's clear.
 ## Open questions
 Anything left unresolved.
-Base everything ONLY on the provided points — do not add anything new. Keep it tight and skimmable."#;
+Rules:
+- Keep the (m:ss) timestamp at the end of each bullet it supports, copied from the points.
+- If the user's own notes are included, they show what mattered most to them: cover every note, expand it with detail from the points, and lead with those topics.
+- Moments the user flagged are especially important; make sure they're reflected.
+- Do not write an action-items section (those are tracked separately).
+- Base everything ONLY on the provided material — add nothing new.
+- Keep it tight and skimmable: merge related points, drop minor chatter. Even for a long meeting, stay under about 15 key points and 400 words."#;
 
-/// Summarize a meeting: extract grounded facts, then compose the notes from
-/// them. The final compose stage streams to `meeting-summary-token`.
-pub fn summarize_meeting(
-    app: &AppHandle,
-    state: &LlmState,
-    model_path: &Path,
-    transcript: &str,
-) -> Result<String, String> {
-    let backend = backend()?;
-    let model = state.model_for(model_path)?;
+/// Stage 3: structured follow-ups, grammar-constrained.
+pub const MEETING_ACTIONS_PROMPT: &str = r#"From the meeting's commitments (and the user's notes, if any), list the concrete follow-up actions someone committed to or was asked to do. Merge duplicates of the same action.
+- task: a specific, self-contained instruction (what, and enough context to act on it later).
+- owner: the person responsible as named in the points ("Me" for the user); "" if unclear.
+- due: when it's due as stated ("Friday", "next sprint"); "" if not stated.
+- at: the (m:ss) timestamp from the point it comes from, without parentheses; "" if none.
+Only real commitments or requests — not topics that were merely discussed. If there are none, return an empty list."#;
 
-    // Stage 1 — extract (not streamed to the summary view).
-    let extract_prompt = render_prompt(
-        &model,
-        &[
-            ("system", MEETING_EXTRACT_PROMPT.to_string()),
-            ("user", format!("Transcript:\n\n{transcript}")),
-        ],
-    )?;
-    let facts = generate(
-        app,
-        backend,
-        &model,
-        &extract_prompt,
-        false,
-        "meeting-extract-token",
-        0.1,
-    )?;
-    let facts = if facts.trim().is_empty() {
-        transcript.to_string() // fall back to the transcript if extraction was empty
-    } else {
-        facts
-    };
-
-    // Stage 2 — compose the final notes from the extracted points, streamed.
-    let compose_prompt = render_prompt(
-        &model,
-        &[
-            ("system", MEETING_SUMMARY_PROMPT.to_string()),
-            ("user", format!("Extracted points:\n\n{facts}")),
-        ],
-    )?;
-    generate(
-        app,
-        backend,
-        &model,
-        &compose_prompt,
-        false,
-        "meeting-summary-token",
-        0.1,
-    )
+pub fn actions_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "task": {"type": "string"},
+                        "owner": {"type": "string"},
+                        "due": {"type": "string"},
+                        "at": {"type": "string"}
+                    },
+                    "required": ["task", "owner", "due", "at"]
+                }
+            }
+        },
+        "required": ["items"]
+    })
 }
 
-/// Q&A prompt for a single meeting — grounded, refuses to invent.
-pub const MEETING_QA_PROMPT: &str = r#"You answer questions about a single meeting, using only the material provided: its transcript, summary, and the user's own notes.
-"Me" is the user; the other participants are "Speaker 1", "Speaker 2", … (or "Them" when not separated).
-Answer concisely and directly, referencing what was actually said (and who said it) when it helps. If the answer isn't in the material, say you don't see it in this meeting rather than guessing or inventing details."#;
+pub const MEETING_TITLE_PROMPT: &str = "Write a short, specific title (at most 8 words) for the meeting these notes describe. Output only the title — no quotes, no trailing period.";
 
-/// Answer a question about one meeting from its transcript/summary/notes.
-/// Tokens stream to the frontend on `meeting-answer-token`.
-pub fn answer_meeting_question(
-    app: &AppHandle,
-    state: &LlmState,
-    model_path: &Path,
-    context: &str,
-    question: &str,
-) -> Result<String, String> {
-    let backend = backend()?;
-    let model = state.model_for(model_path)?;
-    let prompt = render_prompt(
-        &model,
-        &[
-            ("system", MEETING_QA_PROMPT.to_string()),
-            ("user", format!("{context}\n\nQuestion: {question}")),
-        ],
-    )?;
-    generate(app, backend, &model, &prompt, false, "meeting-answer-token", 0.1)
-}
+/// Q&A over one meeting — grounded, cites, refuses to invent.
+pub const MEETING_QA_PROMPT: &str = r#"You answer questions about a single meeting using only the material provided: its notes, summary, and transcript (lines are "[m:ss] Speaker: text"). "Me" is the user.
+Answer concisely and directly. Say who said what when it helps, and cite the transcript time of supporting lines like (12:34). If the answer isn't in the material, say you don't see it in this meeting — never guess or invent details."#;
+
+/// Q&A across meetings, from retrieved excerpts.
+pub const MEETINGS_QA_PROMPT: &str = r#"You answer questions about the user's past meetings using only the excerpts provided. Each excerpt is labeled with its meeting title and date; transcript lines are "[m:ss] Speaker: text". "Me" is the user.
+Answer concisely. Cite sources as (Meeting title, m:ss). If meetings disagree, say so and prefer the most recent. If the excerpts don't contain the answer, say you couldn't find it — never guess."#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::settings::Style;
     use std::time::Instant;
+
+    fn ctx_size(n_prompt: usize) -> usize {
+        (n_prompt + MAX_NEW_TOKENS + 16).max(2048)
+    }
+
+    #[test]
+    fn strips_reasoning_blocks() {
+        assert_eq!(strip_reasoning("<think>hmm</think>\nAnswer"), "Answer");
+        assert_eq!(strip_reasoning("<think>unfinished"), "");
+        assert_eq!(strip_reasoning("<|channel|>analysis<|message|>x<|end|><|start|>assistant<|channel|>final<|message|>Hi"), "Hi");
+        assert_eq!(strip_reasoning("plain"), "plain");
+    }
+
+    #[test]
+    fn holds_back_a_leading_think_block() {
+        assert_eq!(visible_start("<thi"), None);
+        assert_eq!(visible_start("<think>abc"), None);
+        assert_eq!(visible_start("<think>abc</think>Hi"), Some(18));
+        assert_eq!(visible_start("Hello"), Some(0));
+    }
+
+    #[test]
+    fn renders_gemma4_turns() {
+        let p = render_gemma4(&[
+            ("system".into(), "Be brief.".into()),
+            ("user".into(), "Hi".into()),
+        ]);
+        assert_eq!(
+            p,
+            "<|turn>system\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+        );
+    }
+
+    #[test]
+    fn parses_json_with_chatter() {
+        let v = parse_json_reply("Sure! ```json\n{\"a\": [1]}\n```").unwrap();
+        assert_eq!(v["a"][0], 1);
+    }
 
     /// Cleanup on the long-lived context — reusing whatever prefix the last
     /// prompt left behind — must write what a fresh context writes.
@@ -785,8 +1100,13 @@ mod tests {
             let tokens = tokenize(&model, &prompt).unwrap();
 
             let t = Instant::now();
-            let cached = with_prompt(&state, backend, &model, &tokens, |ctx, batch| {
-                sample(&mut |_| {}, &model, ctx, batch, tokens.len(), lower, 0.2)
+            let gen = Gen {
+                temperature: 0.2,
+                force_lowercase: lower,
+                ..Default::default()
+            };
+            let cached = with_prompt(&state, Slot::Cleanup, backend, &model, &tokens, MAX_NEW_TOKENS, |ctx, batch| {
+                sample(&mut |_| {}, &model, ctx, batch, tokens.len(), &gen)
             })
             .unwrap();
             let cached_ms = t.elapsed().as_millis();
@@ -796,8 +1116,7 @@ mod tests {
                 .with_n_ctx(NonZeroU32::new(ctx_size(tokens.len()) as u32));
             let mut ctx = model.new_context(backend, params).unwrap();
             let mut batch = ingest(&mut ctx, &tokens, 0).unwrap();
-            let fresh = sample(&mut |_| {}, &model, &mut ctx, &mut batch, tokens.len(), lower, 0.2)
-                .unwrap();
+            let fresh = sample(&mut |_| {}, &model, &mut ctx, &mut batch, tokens.len(), &gen).unwrap();
             let fresh_ms = t.elapsed().as_millis();
 
             println!(

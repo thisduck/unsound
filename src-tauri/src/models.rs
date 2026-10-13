@@ -331,6 +331,58 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "English + multilingual",
             false,
         ),
+        // --- Assistant-grade models: follow instructions and fill structured
+        // drafts well (the meeting assistant's picks; also strong summarizers).
+        m(
+            "gemma-4-e4b",
+            "Gemma 4 E4B Instruct (Q4_K_M)",
+            ModelKind::Llm,
+            "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf",
+            4980 * MB,
+            "Assistant for 8-16GB Macs: small and quick, good at drafts and structured output. 128K context.",
+            "Multilingual · 140+ languages",
+            false,
+        ),
+        m(
+            "gemma-4-12b",
+            "Gemma 4 12B Instruct (QAT Q4_0)",
+            ModelKind::Llm,
+            "https://huggingface.co/google/gemma-4-12B-it-qat-q4_0-gguf/resolve/main/gemma-4-12b-it-qat-q4_0.gguf",
+            6980 * MB,
+            "Recommended assistant for 16-32GB Macs: reliable drafts and requests, strong summaries. 256K context.",
+            "Multilingual · 140+ languages",
+            false,
+        ),
+        m(
+            "gemma-4-26b-a4b",
+            "Gemma 4 26B-A4B Instruct (Q4_K_M)",
+            ModelKind::Llm,
+            "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+            16950 * MB,
+            "Best assistant for 32GB+ Macs: mixture-of-experts, so near-4B speed with much stronger reasoning. 256K context.",
+            "Multilingual · 140+ languages",
+            false,
+        ),
+        m(
+            "qwen3.6-35b-a3b",
+            "Qwen3.6 35B-A3B Instruct (Q4_K_M)",
+            ModelKind::Llm,
+            "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            22130 * MB,
+            "Strong agentic model for 48GB+ Macs (3B active per token, so fast). Great at tool use and long context.",
+            QWEN_LANGS,
+            false,
+        ),
+        m(
+            "gpt-oss-20b",
+            "gpt-oss 20B (MXFP4)",
+            ModelKind::Llm,
+            "https://huggingface.co/ggml-org/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-MXFP4.gguf",
+            12110 * MB,
+            "OpenAI's open-weight model, built for tool calling and structured reasoning. Wants 24GB+.",
+            "English-first",
+            false,
+        ),
         // --- Speaker diarization (sherpa-onnx) — meetings "who said what" ---
         // Both are required together; the ids are referenced by name in the
         // diarization command, so keep them stable.

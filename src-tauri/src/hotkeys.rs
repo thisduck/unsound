@@ -18,6 +18,16 @@ use tauri::{AppHandle, Emitter};
 pub enum Mode {
     HandsFree,
     PushToTalk,
+    /// Held like push-to-talk, but speaks a request to the assistant.
+    Command,
+}
+
+/// The press/release events a held binding emits.
+fn held_events(mode: Mode) -> (&'static str, &'static str) {
+    match mode {
+        Mode::Command => ("command-down", "command-up"),
+        _ => ("ptt-down", "ptt-up"),
+    }
 }
 
 /// A key event as the matcher sees it.
@@ -258,10 +268,10 @@ fn on_press(tap: Tap) {
                         drop(m);
                         emit("hotkey-toggle", None);
                     }
-                    Mode::PushToTalk => {
+                    Mode::PushToTalk | Mode::Command => {
                         m.active_ptt = Some(i);
                         drop(m);
-                        emit("ptt-down", None);
+                        emit(held_events(mode).0, None);
                     }
                 }
             }
@@ -276,22 +286,27 @@ fn on_press(tap: Tap) {
             if let Some((i, mode)) = hit {
                 // e.g. bare fn started push-to-talk, then Space arrived making
                 // it fn+space: the key combo wins, the held PTT is abandoned.
-                let cancel = m.active_ptt.take().is_some();
+                let abandoned = m.active_ptt.take().and_then(|j| m.bindings.get(j)).map(|b| b.mode);
+                let cancel_event = match abandoned {
+                    Some(Mode::Command) => Some("command-up"),
+                    Some(_) => Some("ptt-cancel"),
+                    None => None,
+                };
                 match mode {
                     Mode::HandsFree => {
                         drop(m);
-                        if cancel {
-                            emit("ptt-cancel", None);
+                        if let Some(ev) = cancel_event {
+                            emit(ev, None);
                         }
                         emit("hotkey-toggle", None);
                     }
-                    Mode::PushToTalk => {
+                    Mode::PushToTalk | Mode::Command => {
                         m.active_ptt = Some(i);
                         drop(m);
-                        if cancel {
-                            emit("ptt-cancel", None);
+                        if let Some(ev) = cancel_event {
+                            emit(ev, None);
                         }
-                        emit("ptt-down", None);
+                        emit(held_events(mode).0, None);
                     }
                 }
             }
@@ -329,28 +344,28 @@ fn on_release(tap: Tap) {
         Tap::Mod(md) => {
             // Releasing a modifier that an active push-to-talk depends on
             // ends it.
-            let ends_ptt = m
+            let ends = m
                 .active_ptt
                 .and_then(|i| m.bindings.get(i))
-                .map(|b| b.mods.contains(md))
-                .unwrap_or(false);
+                .filter(|b| b.mods.contains(md))
+                .map(|b| b.mode);
             m.mods_down.remove(md);
-            if ends_ptt {
+            if let Some(mode) = ends {
                 m.active_ptt = None;
                 drop(m);
-                emit("ptt-up", None);
+                emit(held_events(mode).1, None);
             }
         }
         Tap::Key(k) => {
-            let ends_ptt = m
+            let ends = m
                 .active_ptt
                 .and_then(|i| m.bindings.get(i))
-                .map(|b| b.key.as_deref() == Some(k))
-                .unwrap_or(false);
-            if ends_ptt {
+                .filter(|b| b.key.as_deref() == Some(k))
+                .map(|b| b.mode);
+            if let Some(mode) = ends {
                 m.active_ptt = None;
                 drop(m);
-                emit("ptt-up", None);
+                emit(held_events(mode).1, None);
             }
         }
     }
