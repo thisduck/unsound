@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, Meeting, ModelInfo, on, Segment, Task } from "./api";
+import { api, Meeting, MeetingWork, ModelInfo, on, Segment, Task } from "./api";
 import { MeetingSetup } from "./MeetingSetup";
 import { DetailView } from "./meetings/DetailView";
 import { ListView } from "./meetings/ListView";
@@ -41,6 +41,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const [focusMs, setFocusMs] = useState<number | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [work, setWork] = useState<MeetingWork[]>([]);
   const [warning, setWarning] = useState<string | null>(null);
   const [detected, setDetected] = useState<{ app: string } | null>(null);
   const [released, setReleased] = useState<string | null>(null);
@@ -72,6 +73,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const phaseRef = useRef<Phase>("idle");
   phaseRef.current = phase;
   const summaryRef = useRef(false);
+  const summarizeAfter = useRef(new Set<string>());
   const liveIdRef = useRef<string | null>(null);
   const selectedIdRef = useRef<string | null>(null);
   selectedIdRef.current = selected?.id ?? null;
@@ -121,7 +123,11 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         if (summaryRef.current) setLiveSummary((s) => (s ?? "") + chunk);
       }),
       // Live transcript: a finalized segment supersedes that channel's partial.
-      on.meetingSegments((segs) => {
+      on.meetingSegments(({ meetingId, segments: segs }) => {
+        if (meetingId === selectedIdRef.current) {
+          api.getMeeting(meetingId).then((m) => { if (m) setSelected((cur) => cur?.id === m.id ? m : cur); }).catch(console.error);
+        }
+        if (meetingId !== liveIdRef.current) return;
         setLiveSegments((cur) => [...cur, ...segs]);
         setPartials((cur) => {
           const next = { ...cur };
@@ -129,10 +135,10 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
           return next;
         });
       }),
-      on.meetingPartial(({ speaker, text }) => setPartials((cur) => ({ ...cur, [speaker]: text }))),
+      on.meetingPartial(({ meetingId, speaker, text }) => { if (meetingId === liveIdRef.current) setPartials((cur) => ({ ...cur, [speaker]: text })); }),
       on.meetingStatus(setStatus),
       on.meetingWarning(setWarning),
-      on.meetingSpeakerNamed(({ speaker, name }) => setLiveNames((n) => ({ ...n, [speaker]: name }))),
+      on.meetingSpeakerNamed(({ meetingId, speaker, name }) => { if (meetingId === liveIdRef.current) setLiveNames((n) => ({ ...n, [speaker]: name })); }),
       on.meetingNotesProgress(({ meetingId, throughMs }) => {
         if (meetingId === liveIdRef.current) setNotesThrough(throughMs);
       }),
@@ -164,6 +170,43 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       subs.forEach((s) => s.then((un) => un()));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    let polling = false;
+    let previousStates = new Map<string, string>();
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const rows = await api.meetingWorkStatus();
+        if (!mounted) return;
+        setWork(rows);
+        const selectedId = selectedIdRef.current;
+        if (selectedId && rows.some((r) => r.meetingId === selectedId && (r.state === "finishing" || (r.state === "complete" && previousStates.get(r.meetingId) !== "complete")))) {
+          const m = await api.getMeeting(selectedId);
+          if (mounted && m) setSelected((cur) => cur?.id === m.id ? m : cur);
+        }
+        previousStates = new Map(rows.map((r) => [r.meetingId, r.state]));
+        const id = liveIdRef.current;
+        const current = rows.find((r) => r.meetingId === id);
+        if (id && phaseRef.current === "recording" && current && !current.recording) {
+          liveIdRef.current = null;
+          setLive(null);
+          setPhase("idle");
+          setLiveSegments([]);
+          setPartials({});
+          const meeting = await api.getMeeting(id);
+          if (mounted && meeting) setSelected(meeting);
+          refresh();
+        }
+      } catch (e) { if (mounted) setError(`Could not read saving status: ${String(e)}`); }
+      finally { polling = false; }
+    };
+    poll();
+    const timer = window.setInterval(poll, 1000);
+    return () => { mounted = false; window.clearInterval(timer); };
   }, []);
 
   const openMeeting = async (id: string, atMs?: number | null) => {
@@ -229,6 +272,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
 
   const summarize = async (id: string) => {
     if (!meetLlm) return;
+    const pending = work.find((w) => w.meetingId === id);
+    if (pending && pending.state !== "complete") { setError("Finish transcription before writing the summary."); return; }
     setPhase("summarizing");
     setLiveSummary(null);
     summaryRef.current = true;
@@ -251,8 +296,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     setPhase("stopping");
     setReleased(null);
     try {
-      // Transcription already happened live; this flushes the tail, settles
-      // speaker labels and records the end.
+      // Capture stops promptly; durable transcription continues in the background.
       const m = await api.meetingStop();
       liveIdRef.current = null;
       setLive(null);
@@ -262,14 +306,24 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       }
       setLiveSegments([]);
       setPartials({});
-      if (meetLlm && m && m.segments.length > 0) await summarize(id);
-      else setPhase("idle");
+      if (meetLlm) summarizeAfter.current.add(id);
+      setPhase("idle");
+      setWork(await api.meetingWorkStatus());
       refresh();
     } catch (e) {
       setError(String(e));
       setPhase("idle");
     }
   };
+
+  useEffect(() => {
+    const id = selected?.id;
+    if (phase === "idle" && id && meetLlm && summarizeAfter.current.has(id)
+      && work.some((w) => w.meetingId === id && w.state === "complete")) {
+      summarizeAfter.current.delete(id);
+      void summarize(id);
+    }
+  }, [work, phase, selected?.id, meetLlm?.id]);
 
   toggleRef.current = () => {
     if (phaseRef.current === "recording") stopMeeting();
@@ -280,6 +334,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const remove = async (id: string) => {
     try {
       await api.deleteMeeting(id);
+      localStorage.removeItem(`unsound.notes-draft.${id}`);
       if (selected?.id === id) setSelected(null);
       refresh();
     } catch (e) {
@@ -299,21 +354,13 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
             ? "writing notes…"
             : "start a meeting";
 
-  if (setupNeeded) {
-    return (
-      <div className="meetings">
-        <MeetingSetup models={models} onModelsChanged={onModelsChanged} />
-      </div>
-    );
-  }
-
   return (
     <div className="meetings">
       <div className="stage">
         <button
           className={"pill" + (phase === "recording" ? " live" : "")}
           onClick={phase === "recording" ? stopMeeting : startMeeting}
-          disabled={busy}
+          disabled={busy || setupNeeded}
         >
           <span className="pill-dot" />
           {pillLabel}
@@ -321,6 +368,21 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         </button>
       </div>
 
+      {setupNeeded && !selected && !live && <MeetingSetup models={models} onModelsChanged={onModelsChanged} />}
+      {work.filter((w) => w.state !== "complete" || w.warning).map((w) => (
+        <div key={w.meetingId} className={"meet-hint " + (w.error ? "meet-error" : "meet-warning")} role={w.error ? "alert" : "status"}>
+          <div>
+            <strong>{meetings.find((m) => m.id === w.meetingId)?.title || "Meeting"}: </strong>
+            {w.state === "recording" ? "recording" : w.state === "finishing" ? "finishing transcript" : w.state === "complete" ? "transcript recovered" : w.state === "paused" ? "transcription paused" : "needs attention"}
+            {` · ${w.pending} audio ranges remaining · mic saved through ${(w.micSamples / 16000).toFixed(1)}s · system saved through ${(w.systemSamples / 16000).toFixed(1)}s`}
+            {w.error && <p>{w.error}</p>}
+            {w.warning && <p>{w.warning}</p>}
+          </div>
+          {!w.recording && <button className="quiet" onClick={() => openMeeting(w.meetingId)}>open</button>}
+          {!w.recording && w.state === "finishing" && <button className="quiet" onClick={() => api.meetingPause(w.meetingId).then(() => api.meetingWorkStatus()).then(setWork).catch((e) => setError(String(e)))}>pause</button>}
+          {!w.recording && (w.state === "paused" || w.state === "error") && <button className="quiet" onClick={() => api.meetingRetry(w.meetingId).then(() => api.meetingWorkStatus()).then(setWork).catch((e) => setError(String(e)))}>retry saved audio</button>}
+        </div>
+      ))}
       {!sysSupported && (
         <div className="meet-hint">system audio needs macOS 13+ — meetings will capture your mic only</div>
       )}
@@ -346,7 +408,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
           </button>
         </div>
       )}
-      {warning && phase === "recording" && (
+      {warning && (
         <div className="meet-hint meet-warning">
           {warning}
           <button className="quiet" onClick={() => setWarning(null)}>
@@ -382,6 +444,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         />
       ) : selected ? (
         <DetailView
+          key={selected.id}
           meeting={selected}
           onMeeting={setSelected}
           onBack={() => {

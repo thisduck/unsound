@@ -1,6 +1,6 @@
 //! Fault tests use production SQLite/WAV code and disposable directories.
 //! No microphone, model downloads, network providers, or real profile required.
-use crate::{audio_store, store};
+use crate::{audio_store, meeting_work, store};
 use serde_json::json;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -93,7 +93,17 @@ fn crash_writer_child() {
     let db = store::open_path(&root.join("unsound.db")).unwrap();
     store::create_meeting(&db, &meeting("interrupted")).unwrap();
     store::update_meeting_notes(&db, "interrupted", "committed notes").unwrap();
-    store::add_segments(&db, "interrupted", &[segment("committed transcript")]).unwrap();
+    meeting_work::begin(&db, "interrupted", "test-model", None, "").unwrap();
+    meeting_work::enqueue(&db, "interrupted", "system", "them", 0, 16_000, false).unwrap();
+    meeting_work::enqueue(&db, "interrupted", "system", "them", 16_000, 32_000, false).unwrap();
+    let first = meeting_work::next(&db, "interrupted").unwrap().unwrap();
+    meeting_work::complete(
+        &db,
+        "interrupted",
+        first.id,
+        &[segment("committed transcript")],
+    )
+    .unwrap();
     let mut wav = audio_store::WavWriter::create(&root.join("interrupted.wav")).unwrap();
     wav.append(&vec![0.25; 48_000]).unwrap(); // header still says zero samples
                                               // Leave a real uncommitted transaction behind as well.
@@ -115,7 +125,7 @@ impl Drop for KillOnDrop {
 }
 
 #[test]
-fn killed_process_recovers_commits_and_audio_but_not_unfinished_transcription() {
+fn killed_process_recovers_commits_and_requeues_unfinished_and_unqueued_audio() {
     let dir = tempfile::tempdir().unwrap();
     let mut child = KillOnDrop(
         Command::new(std::env::current_exe().unwrap())
@@ -158,17 +168,34 @@ fn killed_process_recovers_commits_and_audio_but_not_unfinished_transcription() 
     let samples = crate::audiofile::decode_to_samples(&wav).unwrap();
     assert_eq!(samples.len(), 48_000);
     assert!(samples.iter().all(|s| (*s - 0.25).abs() < 0.001));
-    // Recovery is repeatable. The two seconds without transcript are audio
-    // only: the app does not yet resume unfinished transcription at launch.
+    // A queued second and an unqueued VAD tail both survive. The committed
+    // first second is never transcribed again, including on a second restart.
+    meeting_work::recover_channel(&db, "interrupted", "system", 48_000).unwrap();
+    meeting_work::state(&db, "interrupted", "finishing", "").unwrap();
+    for (start, end, text) in [
+        (16_000, 32_000, "queued"),
+        (32_000, 48_000, "unqueued tail"),
+    ] {
+        let job = meeting_work::next(&db, "interrupted").unwrap().unwrap();
+        assert_eq!((job.start, job.end), (start, end));
+        let input = audio_store::read_samples(&wav, start, end).unwrap();
+        assert_eq!(input.len(), 16_000);
+        assert!(input.iter().all(|s| (*s - 0.25).abs() < 0.001));
+        meeting_work::complete(&db, "interrupted", job.id, &[segment(text)]).unwrap();
+    }
+    drop(db);
+    let db = store::open_path(&dir.path().join("unsound.db")).unwrap();
+    meeting_work::recover_channel(&db, "interrupted", "system", 48_000).unwrap();
+    assert!(meeting_work::next(&db, "interrupted").unwrap().is_none());
     assert!(store::recover_open_meetings(&db).unwrap().is_empty());
-    audio_store::repair(&wav).unwrap();
     assert_eq!(
         store::get_meeting(&db, "interrupted")
             .unwrap()
             .unwrap()
             .segments
             .len(),
-        1
+        3
     );
+    audio_store::repair(&wav).unwrap();
     assert_eq!(std::fs::read(&wav).unwrap()[44..], before[44..]);
 }

@@ -12,6 +12,7 @@ mod frontapp;
 mod hotkeys;
 mod llm;
 mod meeting;
+mod meeting_work;
 mod models;
 mod permissions;
 #[allow(dead_code)]
@@ -658,21 +659,33 @@ async fn meeting_start(
     .map_err(|e| e.to_string())?
 }
 
-/// Stop the live meeting: flush the tail, finish the transcript, settle
-/// speaker labels, record the end time, and release requests that were
-/// waiting for the meeting to end. Returns the finished meeting.
+/// Stop capture and flush saved audio. Return the current meeting immediately;
+/// durable transcription, speaker finalization, and end-of-meeting requests
+/// continue in the background. Query meeting_work_status for completion.
 #[tauri::command]
 async fn meeting_stop(app: AppHandle) -> Result<Option<Meeting>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let Some(id) = meeting::stop(&app)? else {
             return Ok(None);
         };
-        agent::on_meeting_ended(&app, &id);
         let db = app.state::<Db>();
         full_meeting(&app, &db, &id).map(Some)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn meeting_work_status(app: AppHandle) -> Result<Vec<meeting_work::Status>, String> {
+    meeting::statuses(&app)
+}
+
+#[tauri::command]
+fn meeting_pause(app: AppHandle, id: String) -> Result<(), String> { meeting::pause(&app,&id) }
+
+#[tauri::command]
+async fn meeting_retry(app: AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || meeting::retry(&app,&id)).await.map_err(|e|e.to_string())?
 }
 
 /// Re-detect a meeting's remote speakers from its saved audio, optionally
@@ -1307,9 +1320,11 @@ pub fn run() {
             // The UI harness uses real IPC and storage, without global shortcuts,
             // background assistants, meeting detection, or microphone capture.
             if cfg!(feature = "automation") {
+                meeting::start_recovery(handle.clone());
                 return Ok(());
             }
             agent::start(&handle);
+            meeting::start_recovery(handle.clone());
             // The command key (from either shortcut path) is handled here,
             // not in the frontend: it must work with the window hidden.
             for (event, down) in [("command-down", true), ("command-up", false)] {
@@ -1382,6 +1397,9 @@ pub fn run() {
             search_meetings,
             meeting_start,
             meeting_stop,
+            meeting_work_status,
+            meeting_pause,
+            meeting_retry,
             diarize_meeting,
             meeting_clip,
             add_mark,

@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useNotesSave } from "./useNotesSave";
+import { useLayoutEffect, useRef, useState } from "react";
 import { api, clock, formatShortcut, Segment, Task } from "../api";
 import { speakerClass, speakerLabel } from "./format";
 import { TaskCard, mergeTask } from "./TaskCard";
@@ -28,7 +29,7 @@ export function LiveView(p: Props) {
   const notesRef = useRef<HTMLTextAreaElement>(null);
   const [ask, setAsk] = useState("");
   const [holding, setHolding] = useState(false);
-  const saveTimer = useRef<number | undefined>(undefined);
+  const notesSave = useNotesSave(p.meetingId, p.onNotes);
 
   // Follow the transcript unless the user has scrolled up to read.
   useLayoutEffect(() => {
@@ -42,12 +43,8 @@ export function LiveView(p: Props) {
 
   const setNotes = (text: string) => {
     p.onNotes(text);
-    window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => {
-      api.updateMeetingNotes(p.meetingId, text).catch((e) => console.error("save notes failed", e));
-    }, 700);
+    notesSave.save(text);
   };
-  useEffect(() => () => window.clearTimeout(saveTimer.current), []);
 
   /// Flag this moment: a mark (for the summary) and a timestamp in the notes.
   const mark = async () => {
@@ -129,6 +126,8 @@ export function LiveView(p: Props) {
               ⚑ mark moment
             </button>
           </div>
+          {notesSave.error && <div className="meet-error" role="alert">{notesSave.error} <button onClick={notesSave.flush}>retry saving notes</button></div>}
+          {notesSave.saving && <span role="status">saving notes…</span>}
           <textarea
             ref={notesRef}
             className="meet-notes live-notes"

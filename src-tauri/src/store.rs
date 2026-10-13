@@ -230,6 +230,7 @@ pub(crate) fn open_path(path: &std::path::Path) -> Result<Db, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "synchronous", "FULL").map_err(|e| e.to_string())?;
     conn.pragma_update(None, "foreign_keys", "ON")
         .map_err(|e| e.to_string())?;
     migrate(&conn).map_err(|e| e.to_string())?;
@@ -414,6 +415,23 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
         conn.pragma_update(None, "user_version", 3)?;
     }
+    if version < 4 {
+        conn.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE meeting_work (
+                meeting_id TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+                state TEXT NOT NULL, embedding_model TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', warning TEXT NOT NULL DEFAULT '',
+                mic_samples INTEGER NOT NULL DEFAULT 0, system_samples INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE transcription_jobs (
+                id INTEGER PRIMARY KEY, meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                source TEXT NOT NULL, speaker TEXT NOT NULL, start_sample INTEGER NOT NULL,
+                end_sample INTEGER NOT NULL, done INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(meeting_id,source,start_sample,end_sample));
+            CREATE INDEX transcription_pending ON transcription_jobs(meeting_id,done,start_sample);
+            CREATE TABLE transcription_exclusions (
+                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                start_ms INTEGER NOT NULL, end_ms INTEGER, PRIMARY KEY(meeting_id,start_ms));
+            PRAGMA user_version=4; COMMIT;")?;
+    }
     Ok(())
 }
 
@@ -540,6 +558,7 @@ pub fn create_meeting(db: &Db, m: &Meeting) -> Result<(), String> {
 }
 
 /// Append transcribed utterances to an in-progress meeting.
+#[cfg(test)]
 pub fn add_segments(db: &Db, meeting_id: &str, segs: &[Segment]) -> Result<(), String> {
     let mut conn = db.0.lock().unwrap();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -576,11 +595,12 @@ pub fn recover_open_meetings(db: &Db) -> Result<Vec<String>, String> {
 
 pub fn update_meeting_notes(db: &Db, id: &str, notes: &str) -> Result<(), String> {
     let conn = db.0.lock().unwrap();
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE meetings SET notes = ?2 WHERE id = ?1",
         params![id, notes],
     )
     .map_err(|e| e.to_string())?;
+    if changed == 0 { return Err("meeting no longer exists; notes were not saved".into()); }
     Ok(())
 }
 

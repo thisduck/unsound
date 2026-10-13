@@ -90,12 +90,22 @@ impl Sink {
     }
 
     fn push(&mut self, pts: Option<f64>, samples: &[f32]) {
+        const MAX_BUFFER: usize = CAPTURE_SAMPLE_RATE as usize * 30;
+        if self.stopped.is_some() { return; }
+        if self.samples.len().saturating_add(samples.len()) > MAX_BUFFER {
+            self.stopped = Some("system audio exceeded the 30-second capture buffer".into());
+            return;
+        }
         if let Some(pts) = pts {
             let first = *self.first_pts.get_or_insert(pts);
             let at = ((pts - first) * CAPTURE_SAMPLE_RATE as f64).round() as i64;
             let gap = at - self.end() as i64;
             // Fill real gaps (>50 ms); ignore jitter and small overlaps.
             if gap > (CAPTURE_SAMPLE_RATE / 20) as i64 && gap < CAPTURE_SAMPLE_RATE as i64 * 3600 {
+                if self.samples.len().saturating_add(gap as usize).saturating_add(samples.len()) > MAX_BUFFER {
+                    self.stopped = Some("system audio resumed after a long gap; resetting its capture clock".into());
+                    return;
+                }
                 self.samples.resize(self.samples.len() + gap as usize, 0.0);
             }
         }
@@ -482,4 +492,19 @@ pub fn write_wav_16(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()
         buf.extend_from_slice(&v.to_le_bytes());
     }
     std::fs::write(path, buf).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+    #[test]
+    fn long_audio_gap_reports_interruption_without_allocating_the_gap() {
+        let mut sink = Sink::default();
+        sink.push(Some(0.0), &[0.25;160]);
+        sink.push(Some(600.0), &[0.5;160]);
+        assert_eq!(sink.samples.len(),160);
+        assert!(sink.stopped.as_deref().unwrap().contains("long gap"));
+        sink.push(Some(600.01), &[0.5;160]);
+        assert_eq!(sink.samples.len(),160);
+    }
 }

@@ -1,27 +1,14 @@
-//! Live meeting recording: capture mic ("me") + system audio ("them") and
-//! transcribe them *as the meeting happens*, so when it stops the transcript
-//! is complete, the notes are mostly extracted, and only the final summary
-//! remains.
-//!
-//! Three threads per meeting:
-//!   • **capture** drains both channels, writes them to disk (so nothing is
-//!     held in memory and a crash loses seconds, not the meeting), runs Silero
-//!     VAD, and queues each finished speech segment — cutting on natural
-//!     pauses so words are never split;
-//!   • **transcription** drains the queue: spoken commands first, then
-//!     segments (batched when it has fallen behind), labels remote speakers
-//!     live from voice embeddings, applies the user's dictionary, and hands
-//!     "unsound, …" requests to the assistant;
-//!   • **notes** extracts each completed five-minute stretch in the
-//!     background while the transcriber is idle (see summary.rs).
-//! Both channels share one clock — the mic's — so "them" lines interleave
-//! correctly with what they answer.
+//! Live capture writes checkpointed audio and durable transcription ranges.
+//! Capture never waits for inference. A single supervised worker reads bounded
+//! ranges from disk; a result and its completion marker commit atomically.
+//! Startup requeues saved ranges that were still inside VAD when the app stopped.
 
 use crate::audio_store::{self, WavWriter};
+use crate::meeting_work;
 use crate::store::{self, Db, Segment};
 use crate::{agent, asr, audio, models, settings, speakers, stt, summary, AppState};
 use sherpa_rs::silero_vad::{SileroVad, SileroVadConfig};
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc;
@@ -48,15 +35,11 @@ const ARMED_MS: i64 = 12_000;
 
 /// A unit of work for the transcription thread.
 enum Job {
-    /// A finished segment: persisted and shown as a real line.
-    Final {
-        samples: Vec<f32>,
-        base_ms: i64,
-        speaker: &'static str,
-        source: &'static str,
-    },
     /// The in-progress utterance, shown tentatively and not persisted.
-    Partial { samples: Vec<f32>, speaker: &'static str },
+    Partial {
+        samples: Vec<f32>,
+        speaker: &'static str,
+    },
     /// A request spoken while holding the command key.
     Command { samples: Vec<f32>, at_ms: i64 },
 }
@@ -66,6 +49,15 @@ pub struct MeetingState {
     active: Mutex<Option<Handle>>,
     /// Whether a meeting is currently recording — drives the tray label.
     pub recording: Mutex<bool>,
+    worker: Mutex<Option<Worker>>,
+    faults: Mutex<HashMap<String, String>>,
+}
+
+struct Worker {
+    id: String,
+    cancel: Arc<AtomicBool>,
+    progress: Arc<Mutex<Instant>>,
+    join: JoinHandle<()>,
 }
 
 impl MeetingState {
@@ -87,10 +79,10 @@ struct Handle {
     meeting_id: String,
     stop: Arc<AtomicBool>,
     capture: Option<JoinHandle<()>>,
-    transcribe: Option<JoinHandle<()>>,
+    rx: Option<mpsc::Receiver<Job>>,
     /// Outstanding jobs in the queue (throttles partials; "is it idle?").
     depth: Arc<AtomicI64>,
-    tx: mpsc::Sender<Job>,
+    tx: mpsc::SyncSender<Job>,
     /// Mic-timeline windows (ms) claimed by dictation or the command key,
     /// kept out of the transcript. `i64::MAX` end = still open.
     exclusions: Arc<Mutex<Vec<(i64, i64)>>>,
@@ -115,7 +107,13 @@ pub fn start_with_options(app: &AppHandle, opts: StartOptions) -> Result<(), Str
     // Surface a missing speech model early; the engine itself is built on the
     // transcription thread (sherpa recognizers are !Send).
     models::downloaded_model_path(app, &opts.stt_model)?;
-    start(app, opts, vad_path)
+    let id = opts.meeting_id.clone();
+    start(app, opts, vad_path).map_err(|e| {
+        if active_meeting(app).as_deref() != Some(&id) {
+            fail(app, &id, &e);
+        }
+        e
+    })
 }
 
 fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), String> {
@@ -126,22 +124,29 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
     }
     let s = settings::load(app);
 
-    // Bias recognition toward the user's vocabulary and the assistant's name.
-    let mut seen = std::collections::HashSet::new();
-    let mut vocab: Vec<String> = Vec::new();
-    if s.assistant.enabled && s.assistant.listen_for_wake_word && !s.assistant.wake_word.trim().is_empty() {
-        vocab.push(s.assistant.wake_word.trim().to_string());
-    }
-    vocab.extend(s.dictionary.iter().map(|e| e.to.trim().to_string()));
-    vocab.retain(|t| !t.is_empty() && seen.insert(t.to_lowercase()));
-    let initial_prompt = (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
-
     let mic_file = audio_store::mic_path(app, &opts.meeting_id)?;
     let sys_file = audio_store::system_path(app, &opts.meeting_id)?;
 
+    meeting_work::begin(
+        &app.state::<Db>(),
+        &opts.meeting_id,
+        &opts.stt_model,
+        opts.language.as_deref(),
+        opts.embedding_model
+            .as_deref()
+            .unwrap_or(&s.meetings.embedding_model),
+    )?;
+    let mic_writer = WavWriter::create(&mic_file)?;
+    let sys_writer = WavWriter::create(&sys_file)?;
+
     // The mic defines the meeting clock; system audio starts a moment later
     // and is offset onto it.
-    audio::start_recording(app.clone(), &st.audio, s.mic_device.clone(), audio::Owner::Meeting)?;
+    audio::start_recording(
+        app.clone(),
+        &st.audio,
+        s.mic_device.clone(),
+        audio::Owner::Meeting,
+    )?;
     let mic_started = Instant::now();
     #[cfg(target_os = "macos")]
     let sys_ok = match crate::syscapture::start(&st.sys) {
@@ -162,7 +167,7 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
     let stop = Arc::new(AtomicBool::new(false));
     let depth = Arc::new(AtomicI64::new(0));
     let exclusions: Arc<Mutex<Vec<(i64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
-    let (tx, rx) = mpsc::channel::<Job>();
+    let (tx, rx) = mpsc::sync_channel::<Job>(4);
 
     let capture = {
         let app = app.clone();
@@ -170,24 +175,12 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
         let depth = depth.clone();
         let exclusions = exclusions.clone();
         let tx = tx.clone();
+        let id = opts.meeting_id.clone();
         std::thread::spawn(move || {
-            run_capture(app, vad_path, stop, tx, depth, exclusions, mic_file, sys_file, sys_ok, sys_offset)
-        })
-    };
-    let transcribe = {
-        let app = app.clone();
-        let depth = depth.clone();
-        let meeting_id = opts.meeting_id.clone();
-        let stt_model = opts.stt_model.clone();
-        let language = opts.language.clone();
-        let emb_model = opts
-            .embedding_model
-            .clone()
-            .filter(|m| !m.is_empty())
-            .or_else(|| Some(s.meetings.embedding_model.clone()).filter(|m| !m.is_empty()))
-            .unwrap_or_else(|| "diarize-embedding".into());
-        std::thread::spawn(move || {
-            run_transcribe(app, meeting_id, stt_model, language, initial_prompt, emb_model, rx, depth)
+            run_capture(
+                app, id, vad_path, stop, tx, depth, exclusions, mic_writer, sys_writer, sys_ok,
+                sys_offset,
+            )
         })
     };
     // Background notes: detached; it exits on `stop` and the final summary
@@ -206,7 +199,7 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
         meeting_id: opts.meeting_id,
         stop,
         capture: Some(capture),
-        transcribe: Some(transcribe),
+        rx: Some(rx),
         depth,
         tx,
         exclusions,
@@ -218,26 +211,263 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
     Ok(())
 }
 
-/// Stop capture (final VAD flush), wait for the queue to drain so the
-/// transcript is complete, record the end time, and settle speaker labels.
-/// Returns the meeting id that was recording.
+/// Release capture promptly. Durable work continues in the single background worker.
 pub fn stop(app: &AppHandle) -> Result<Option<String>, String> {
     let st = app.state::<AppState>();
-    let handle = st.meeting.release_capture();
+    let Some(h) = st.meeting.release_capture() else {
+        return Ok(None);
+    };
     crate::tray::refresh_menu(app);
-    let mut id = None;
-    if let Some(mut h) = handle {
-        // The transcription thread drains what's left and exits once
-        // every sender is gone.
-        drop(h.tx);
-        if let Some(j) = h.transcribe.take() {
-            let _ = j.join();
-        }
-        let db = app.state::<Db>();
-        let _ = store::set_meeting_ended(&db, &h.meeting_id, &crate::util::now_iso());
-        id = Some(h.meeting_id);
+    let id = h.meeting_id.clone();
+    drop(h);
+    let db = app.state::<Db>();
+    if let Err(e) = store::set_meeting_ended(&db, &id, &crate::util::now_iso())
+        .and_then(|_| recover_audio(app, &id))
+    {
+        fail(
+            app,
+            &id,
+            &format!("Recording stopped, but recovery could not finish: {e}"),
+        );
     }
-    Ok(id)
+    if !st.meeting.faults.lock().unwrap().contains_key(&id) {
+        if let Err(e) = meeting_work::state(&db, &id, "finishing", "") {
+            fail(app, &id, &e);
+        }
+    }
+    Ok(Some(id))
+}
+
+pub fn statuses(app: &AppHandle) -> Result<Vec<meeting_work::Status>, String> {
+    let mut rows = meeting_work::statuses(&app.state::<Db>())?;
+    let st = app.state::<AppState>();
+    let active_id = active_meeting(app);
+    let faults = st.meeting.faults.lock().unwrap();
+    for row in &mut rows {
+        row.recording = active_id.as_deref() == Some(&row.meeting_id);
+        if let Some(error) = faults.get(&row.meeting_id) {
+            row.error = error.clone();
+            row.state = "error".into();
+        }
+    }
+    Ok(rows)
+}
+
+fn fail(app: &AppHandle, id: &str, error: &str) {
+    app.state::<AppState>()
+        .meeting
+        .faults
+        .lock()
+        .unwrap()
+        .insert(id.into(), error.into());
+    let _ = meeting_work::state(&app.state::<Db>(), id, "error", error);
+    let _ = app.emit("meeting-work-changed", id);
+    eprintln!("[meeting {id}] {error}");
+}
+
+fn recover_audio(app: &AppHandle, id: &str) -> Result<(), String> {
+    let mut total = 0;
+    for (source, path) in [
+        ("mic", audio_store::mic_path(app, id)?),
+        ("system", audio_store::system_path(app, id)?),
+    ] {
+        audio_store::repair(&path)?;
+        let samples = audio_store::sample_count(&path)?;
+        total = total.max(samples);
+        meeting_work::recover_channel(&app.state::<Db>(), id, source, samples)?;
+    }
+    if let Some(m) = store::get_meeting(&app.state::<Db>(), id)? {
+        if let Some(start) = crate::util::unix_ms_from_iso(&m.started_at) {
+            let saved_end = start + total / 16;
+            let old_end = m
+                .ended_at
+                .as_deref()
+                .and_then(crate::util::unix_ms_from_iso)
+                .unwrap_or(start);
+            if saved_end > old_end {
+                store::set_meeting_ended(
+                    &app.state::<Db>(),
+                    id,
+                    &crate::util::iso_from_unix_ms(saved_end),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn pause(app: &AppHandle, id: &str) -> Result<(), String> {
+    if active_meeting(app).as_deref() == Some(id) {
+        return Err("Stop recording before pausing transcription.".into());
+    }
+    // The database gate prevents a late result from committing, even if its
+    // native model cannot immediately honor cancellation.
+    meeting_work::state(&app.state::<Db>(), id, "paused", "")?;
+    if let Some(w) = app
+        .state::<AppState>()
+        .meeting
+        .worker
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|w| w.id == id)
+    {
+        w.cancel.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+pub fn retry(app: &AppHandle, id: &str) -> Result<(), String> {
+    if active_meeting(app).as_deref() == Some(id) {
+        return Err("Stop recording before retrying transcription.".into());
+    }
+    let st = app.state::<AppState>();
+    if st
+        .meeting
+        .worker
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|w| w.id == id && !w.join.is_finished())
+    {
+        return Err("The previous inference call is still stopping. If it remains stuck, restart the app; saved audio will remain available.".into());
+    }
+    recover_audio(app, id)?;
+    if let Some(row) = statuses(app)?
+        .into_iter()
+        .find(|r| r.meeting_id == id && !r.error.is_empty())
+    {
+        meeting_work::warning(
+            &app.state::<Db>(),
+            id,
+            &format!(
+                "Earlier interruption: {} Recovery covers only audio saved on disk.",
+                row.error
+            ),
+        )?;
+    }
+    meeting_work::state(&app.state::<Db>(), id, "finishing", "")?;
+    st.meeting.faults.lock().unwrap().remove(id);
+    Ok(())
+}
+
+/// One meeting transcription worker for the app. A non-cooperative native call can
+/// occupy this slot, but cannot spawn an unbounded number of replacement calls.
+/// Capture and stop never join this worker.
+pub fn start_recovery(app: AppHandle) {
+    if let Ok(rows) = meeting_work::statuses(&app.state::<Db>()) {
+        for row in rows.into_iter().filter(|r| r.state != "complete") {
+            if let Err(e) = recover_audio(&app, &row.meeting_id) {
+                fail(&app, &row.meeting_id, &e);
+                continue;
+            }
+            if row.state == "recording" {
+                let _ = meeting_work::warning(&app.state::<Db>(),&row.meeting_id,
+                        "Recording was interrupted. Saved audio is being recovered; audio after the last save may be missing.");
+                let _ = meeting_work::state(&app.state::<Db>(), &row.meeting_id, "finishing", "");
+            }
+        }
+    }
+    std::thread::spawn(move || {
+        loop {
+            let st = app.state::<AppState>();
+            let stopped = st
+                .meeting
+                .active
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|h| h.capture.as_ref().is_some_and(|t| t.is_finished()));
+            if stopped {
+                let _ = stop(&app);
+            }
+            {
+                let mut slot = st.meeting.worker.lock().unwrap();
+                if slot.as_ref().is_some_and(|w| w.join.is_finished()) {
+                    let worker = slot.take().unwrap();
+                    if worker.join.join().is_err() {
+                        fail(
+                            &app,
+                            &worker.id,
+                            "Transcription crashed. Saved audio can be retried.",
+                        );
+                    }
+                }
+                if let Some(w) = slot.as_ref() {
+                    if !w.cancel.load(Ordering::Relaxed)
+                        && w.progress.lock().unwrap().elapsed() > Duration::from_secs(90)
+                    {
+                        w.cancel.store(true, Ordering::Relaxed);
+                        fail(&app,&w.id,"Transcription made no progress for 90 seconds. Recording can continue. Stop recording, then retry; restart the app if the model cannot stop.");
+                    }
+                } else if let Ok(rows) = meeting_work::statuses(&app.state::<Db>()) {
+                    for row in rows {
+                        // If SQLite could not persist the error, the in-memory
+                        // fault must still prevent an automatic retry loop.
+                        if st.meeting.faults.lock().unwrap().contains_key(&row.meeting_id) { continue; }
+                        if row.state != "recording" && row.state != "finishing" {
+                            continue;
+                        }
+                        if row.state == "finishing" && row.pending == 0 {
+                            if meeting_work::state(
+                                &app.state::<Db>(),
+                                &row.meeting_id,
+                                "complete",
+                                "",
+                            )
+                            .is_ok()
+                            {
+                                if !cfg!(feature = "automation") {
+                                    agent::on_meeting_ended(&app, &row.meeting_id);
+                                }
+                                let _ = app.emit("meeting-work-changed", &row.meeting_id);
+                            }
+                            continue;
+                        }
+                        let id = row.meeting_id;
+                        let (rx, depth) = {
+                            let mut active = st.meeting.active.lock().unwrap();
+                            if let Some(h) = active.as_mut().filter(|h| h.meeting_id == id) {
+                                if let Some(rx) = h.rx.take() {
+                                    (rx, h.depth.clone())
+                                } else {
+                                    // Only needed if a previous consumer exited while capture remained active.
+                                    let (tx, rx) = mpsc::sync_channel(4);
+                                    h.tx = tx;
+                                    h.depth.store(0, Ordering::Relaxed);
+                                    (rx, h.depth.clone())
+                                }
+                            } else {
+                                let (_, rx) = mpsc::sync_channel(4);
+                                (rx, Arc::new(AtomicI64::new(0)))
+                            }
+                        };
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        let progress = Arc::new(Mutex::new(Instant::now()));
+                        let (a, i, c, p) =
+                            (app.clone(), id.clone(), cancel.clone(), progress.clone());
+                        let join = std::thread::spawn(move || {
+                            let result =
+                                run_transcribe(a.clone(), i.clone(), rx, depth, c.clone(), p);
+                            if let Err(e) = result {
+                                if !c.load(Ordering::Relaxed) {
+                                    fail(&a, &i, &e);
+                                }
+                            }
+                        });
+                        *slot = Some(Worker {
+                            id,
+                            cancel,
+                            progress,
+                            join,
+                        });
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
 }
 
 pub fn is_recording(app: &AppHandle) -> bool {
@@ -276,7 +506,18 @@ pub fn position_ms(app: &AppHandle) -> Option<i64> {
 pub fn exclude_from(app: &AppHandle, start_ms: i64) -> bool {
     let st = app.state::<AppState>();
     let active = st.meeting.active.lock().unwrap();
-    let Some(h) = active.as_ref() else { return false };
+    let Some(h) = active.as_ref() else {
+        return false;
+    };
+    if let Err(e) = meeting_work::exclusion(&app.state::<Db>(), &h.meeting_id, start_ms, None) {
+        fail(
+            app,
+            &h.meeting_id,
+            &format!("Could not save the dictation exclusion: {e}"),
+        );
+        h.stop.store(true, Ordering::Relaxed);
+        return false;
+    }
     h.exclusions.lock().unwrap().push((start_ms, i64::MAX));
     true
 }
@@ -286,6 +527,16 @@ pub fn exclude_until(app: &AppHandle, start_ms: i64, end_ms: i64) {
     let st = app.state::<AppState>();
     let active = st.meeting.active.lock().unwrap();
     if let Some(h) = active.as_ref() {
+        if let Err(e) =
+            meeting_work::exclusion(&app.state::<Db>(), &h.meeting_id, start_ms, Some(end_ms))
+        {
+            fail(
+                app,
+                &h.meeting_id,
+                &format!("Could not save the dictation exclusion: {e}"),
+            );
+            h.stop.store(true, Ordering::Relaxed);
+        }
         for w in h.exclusions.lock().unwrap().iter_mut() {
             if w.0 == start_ms && w.1 == i64::MAX {
                 w.1 = end_ms;
@@ -327,8 +578,18 @@ pub fn command_end(app: &AppHandle) -> Result<(), String> {
         return Err("that was too short to hear a request".into());
     }
     depth.fetch_add(1, Ordering::Relaxed);
-    tx.send(Job::Command { samples, at_ms: end })
-        .map_err(|_| "the meeting is ending".to_string())
+    if samples.len() > BATCH_MAX_SAMPLES {
+        depth.fetch_sub(1, Ordering::Relaxed);
+        return Err("Keep spoken requests under 25 seconds.".into());
+    }
+    tx.try_send(Job::Command {
+        samples,
+        at_ms: end,
+    })
+    .map_err(|_| {
+        depth.fetch_sub(1, Ordering::Relaxed);
+        "Transcription is busy; try the request again later.".to_string()
+    })
 }
 
 pub fn command_active(app: &AppHandle) -> bool {
@@ -376,33 +637,29 @@ struct Channel {
     offset: u64,
     speaker: &'static str,
     source: &'static str,
+    fed: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
 fn run_capture(
     app: AppHandle,
+    meeting_id: String,
     vad_path: PathBuf,
     stop: Arc<AtomicBool>,
-    tx: mpsc::Sender<Job>,
+    tx: mpsc::SyncSender<Job>,
     depth: Arc<AtomicI64>,
     exclusions: Arc<Mutex<Vec<(i64, i64)>>>,
-    mic_file: PathBuf,
-    sys_file: PathBuf,
+    mut mic_writer: WavWriter,
+    mut sys_writer: WavWriter,
     #[allow(unused_mut)] mut sys_ok: bool,
     sys_offset: u64,
 ) {
     let st = app.state::<AppState>();
-    let open = |p: &PathBuf| {
-        WavWriter::create(p)
-            .map_err(|e| eprintln!("[meeting] can't save audio to {p:?}: {e}"))
-            .ok()
-    };
-    let mut mic_w = open(&mic_file);
-    #[allow(unused_mut)]
-    let mut sys_w = if sys_ok { open(&sys_file) } else { None };
+    let mut storage_failed = false;
     let mut mic = Channel {
         vad: make_vad(&vad_path),
         pending: Vec::new(),
+        fed: 0,
         offset: 0,
         speaker: "me",
         source: "mic",
@@ -411,10 +668,16 @@ fn run_capture(
     let mut sys = Channel {
         vad: make_vad(&vad_path),
         pending: Vec::new(),
+        fed: 0,
         offset: sys_offset,
         speaker: "them",
         source: "system",
     };
+    if mic.vad.is_none() || (sys_ok && sys.vad.is_none()) {
+        let warning = "Live speech detection is unavailable. Audio is still being saved and will be transcribed after recording stops.";
+        let _ = meeting_work::warning(&app.state::<Db>(), &meeting_id, warning);
+        let _ = app.emit("meeting-warning", warning);
+    }
     let mut mic_pos: u64 = 0;
     #[allow(unused_mut, unused_variables)]
     let mut sys_fed: u64 = 0;
@@ -426,6 +689,10 @@ fn run_capture(
             std::thread::sleep(Duration::from_millis(100));
             waited += 1;
         }
+        if let Some(error) = st.audio.capture_error.lock().unwrap().take() {
+            fail(&app,&meeting_id,&format!("Microphone capture was interrupted: {error}. Recording has stopped; saved audio is available for recovery."));
+            stop.store(true, Ordering::Relaxed);
+        }
         let stopping = stop.load(Ordering::Relaxed);
 
         // Mic: on the final pass, stopping the device also returns the tail
@@ -435,23 +702,102 @@ fn run_capture(
         } else {
             audio::drain_16k(&st.audio)
         };
-        if let Some(w) = mic_w.as_mut() {
-            let _ = w.append(&new_mic);
+        if !storage_failed {
+            let save = mic_writer
+                .append(&new_mic)
+                .and_then(|_| mic_writer.checkpoint())
+                .and_then(|n| {
+                    meeting_work::saved(&app.state::<Db>(), &meeting_id, "mic", n as i64)
+                });
+            if let Err(e) = save {
+                fail(
+                    &app,
+                    &meeting_id,
+                    &format!("Microphone audio stopped saving: {e}"),
+                );
+                storage_failed = true;
+                stop.store(true, Ordering::Relaxed);
+            }
         }
         mic_pos += new_mic.len() as u64;
         let excluded = exclusions.lock().unwrap().clone();
-        handle_channel(&tx, &depth, &mut mic, new_mic, stopping, &excluded);
+        if !storage_failed {
+            if let Err(e) = handle_channel(
+                &app.state::<Db>(),
+                &meeting_id,
+                &tx,
+                &depth,
+                &mut mic,
+                new_mic,
+                stopping,
+                &excluded,
+            ) {
+                fail(
+                    &app,
+                    &meeting_id,
+                    &format!("Transcription work stopped saving: {e}"),
+                );
+                storage_failed = true;
+                stop.store(true, Ordering::Relaxed);
+            }
+        }
 
         #[cfg(target_os = "macos")]
         if sys_ok {
-            let new_sys = crate::syscapture::drain(&st.sys);
-            if let Some(w) = sys_w.as_mut() {
-                // Written on the meeting clock: lead-in and gaps as silence.
-                let _ = w.pad_to(sys.offset + sys_fed);
-                let _ = w.append(&new_sys);
+            let new_sys = if stopping {
+                match crate::syscapture::stop(&st.sys) {
+                    Ok(_) => std::mem::take(&mut *st.sys.last.lock().unwrap()),
+                    Err(e) => {
+                        fail(
+                            &app,
+                            &meeting_id,
+                            &format!("System capture did not stop cleanly: {e}"),
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                crate::syscapture::drain(&st.sys)
+            };
+            if !storage_failed {
+                let save = sys_writer
+                    .pad_to(sys.offset + sys_fed)
+                    .and_then(|_| sys_writer.append(&new_sys))
+                    .and_then(|_| sys_writer.checkpoint())
+                    .and_then(|n| {
+                        meeting_work::saved(&app.state::<Db>(), &meeting_id, "system", n as i64)
+                    });
+                if let Err(e) = save {
+                    fail(
+                        &app,
+                        &meeting_id,
+                        &format!("System audio stopped saving: {e}"),
+                    );
+                    storage_failed = true;
+                    stop.store(true, Ordering::Relaxed);
+                }
             }
             sys_fed += new_sys.len() as u64;
-            handle_channel(&tx, &depth, &mut sys, new_sys, stopping, &[]);
+            if !storage_failed {
+                if let Err(e) = handle_channel(
+                    &app.state::<Db>(),
+                    &meeting_id,
+                    &tx,
+                    &depth,
+                    &mut sys,
+                    new_sys,
+                    stopping,
+                    &[],
+                ) {
+                    fail(
+                        &app,
+                        &meeting_id,
+                        &format!("Transcription work stopped saving: {e}"),
+                    );
+                    storage_failed = true;
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
 
             // macOS can stop the stream on its own (display change, sleep):
             // restart it and carry on at the current point of the meeting.
@@ -467,6 +813,7 @@ fn run_capture(
                             sys = Channel {
                                 vad: make_vad(&vad_path),
                                 pending: Vec::new(),
+                                fed: 0,
                                 offset: mic_pos,
                                 speaker: "them",
                                 source: "system",
@@ -483,9 +830,6 @@ fn run_capture(
                     }
                 }
             }
-            if stopping {
-                let _ = crate::syscapture::stop(&st.sys);
-            }
         }
 
         if last_status.elapsed() >= Duration::from_secs(2) || stopping {
@@ -494,7 +838,7 @@ fn run_capture(
                 "meeting-status",
                 serde_json::json!({
                     "positionMs": mic_pos as i64 * 1000 / RATE,
-                    "pending": depth.load(Ordering::Relaxed).max(0),
+                    "pending": meeting_work::statuses(&app.state::<Db>()).ok().and_then(|rows| rows.into_iter().find(|r| r.meeting_id == meeting_id)).map(|r| r.pending).unwrap_or(0),
                     "systemAudio": sys_ok,
                 }),
             );
@@ -503,11 +847,14 @@ fn run_capture(
             break;
         }
     }
-    if let Some(w) = mic_w {
-        let _ = w.finish();
-    }
-    if let Some(w) = sys_w {
-        let _ = w.finish();
+    for (source, writer) in [("microphone", mic_writer), ("system", sys_writer)] {
+        if let Err(e) = writer.finish() {
+            fail(
+                &app,
+                &meeting_id,
+                &format!("Could not finish saving {source} audio: {e}"),
+            );
+        }
     }
     // `tx` drops here; the handle's clone goes in `stop`, ending transcription.
 }
@@ -517,15 +864,20 @@ fn run_capture(
 /// Mic segments mostly inside an exclusion window (dictation, command key)
 /// are dropped.
 fn handle_channel(
-    tx: &mpsc::Sender<Job>,
+    db: &Db,
+    meeting_id: &str,
+    tx: &mpsc::SyncSender<Job>,
     depth: &Arc<AtomicI64>,
     ch: &mut Channel,
     new: Vec<f32>,
     stopping: bool,
     exclusions: &[(i64, i64)],
-) {
-    let Some(vad) = ch.vad.as_mut() else { return };
+) -> Result<(), String> {
+    let Some(vad) = ch.vad.as_mut() else {
+        return Ok(());
+    };
     if !new.is_empty() {
+        ch.fed += new.len() as u64;
         ch.pending.extend_from_slice(&new);
         // Partials are disposable previews. Keep their memory bounded even
         // during long silence or uninterrupted speech; VAD owns final audio.
@@ -551,21 +903,20 @@ fn handle_channel(
             .iter()
             .map(|(a, b)| (end_ms.min(*b) - base_ms.max(*a)).max(0))
             .sum();
-        if hidden * 2 >= dur {
-            continue;
-        }
-        depth.fetch_add(1, Ordering::Relaxed);
-        let _ = tx.send(Job::Final {
-            samples: seg.samples,
-            base_ms,
-            speaker: ch.speaker,
-            source: ch.source,
-        });
+        meeting_work::enqueue(
+            db,
+            meeting_id,
+            ch.source,
+            ch.speaker,
+            start,
+            (start + seg.samples.len() as i64).min((ch.offset + ch.fed) as i64),
+            hidden * 2 >= dur,
+        )?;
     }
 
     if had_final {
         ch.pending.clear();
-        return;
+        return Ok(());
     }
 
     // Only emit a partial when the transcriber is idle (keeps partials fresh
@@ -579,14 +930,29 @@ fn handle_channel(
     {
         enqueue_partial(tx, depth, &ch.pending, ch.speaker);
     }
+    Ok(())
 }
 
-fn enqueue_partial(tx: &mpsc::Sender<Job>, depth: &AtomicI64, samples: &[f32], speaker: &'static str) -> bool {
-    if depth.compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+fn enqueue_partial(
+    tx: &mpsc::SyncSender<Job>,
+    depth: &AtomicI64,
+    samples: &[f32],
+    speaker: &'static str,
+) -> bool {
+    if depth
+        .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
         return false;
     }
     let start = samples.len().saturating_sub(BATCH_MAX_SAMPLES);
-    if tx.send(Job::Partial { samples: samples[start..].to_vec(), speaker }).is_err() {
+    if tx
+        .try_send(Job::Partial {
+            samples: samples[start..].to_vec(),
+            speaker,
+        })
+        .is_err()
+    {
         depth.fetch_sub(1, Ordering::Relaxed);
         return false;
     }
@@ -597,7 +963,9 @@ fn enqueue_partial(tx: &mpsc::Sender<Job>, depth: &AtomicI64, samples: &[f32], s
 fn complete_partial<T>(depth: &AtomicI64, infer: impl FnOnce() -> T) -> T {
     struct Completion<'a>(&'a AtomicI64);
     impl Drop for Completion<'_> {
-        fn drop(&mut self) { self.0.fetch_sub(1, Ordering::Relaxed); }
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Relaxed);
+        }
     }
     let _completion = Completion(depth);
     infer()
@@ -631,22 +999,32 @@ struct Live {
     armed_until: Option<i64>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_transcribe(
     app: AppHandle,
     meeting_id: String,
-    model_id: String,
-    language: Option<String>,
-    initial_prompt: Option<String>,
-    emb_model: String,
     rx: mpsc::Receiver<Job>,
     depth: Arc<AtomicI64>,
-) {
+    cancel: Arc<AtomicBool>,
+    progress: Arc<Mutex<Instant>>,
+) -> Result<(), String> {
+    let meeting =
+        store::get_meeting(&app.state::<Db>(), &meeting_id)?.ok_or("meeting was deleted")?;
+    let model_id = meeting.stt_model;
+    let language = meeting.lang;
+    let settings = settings::load(&app);
+    let emb_model = meeting_work::embedding_model(&app.state::<Db>(), &meeting_id)?;
+    let initial_prompt = Some(format!(
+        "Glossary: {}",
+        settings
+            .dictionary
+            .iter()
+            .map(|e| e.to.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    let recovering = active_meeting(&app).as_deref() != Some(&meeting_id);
     // Build the engine on this thread (sherpa recognizers are !Send).
-    let mut engine = asr::resolve(&app, &model_id).unwrap_or_else(|e| {
-        eprintln!("[meeting] speech engine unavailable: {e}");
-        asr::Engine::None
-    });
+    let mut engine = asr::resolve(&app, &model_id)?;
     // Warm the model up front so the first segment of the meeting isn't slow.
     let mut detect_with = None;
     if let asr::Engine::Whisper(path) = &engine {
@@ -668,10 +1046,14 @@ fn run_transcribe(
             embedding: speakers::decode(&v.embedding),
         })
         .collect();
-    let embedder = models::downloaded_model_path(&app, &emb_model)
-        .and_then(|p| speakers::Embedder::new(&p))
-        .map_err(|e| eprintln!("[meeting] live speaker labels unavailable: {e}"))
-        .ok();
+    let embedder = if recovering {
+        None
+    } else {
+        models::downloaded_model_path(&app, &emb_model)
+            .and_then(|p| speakers::Embedder::new(&p))
+            .map_err(|e| eprintln!("[meeting] live speaker labels unavailable: {e}"))
+            .ok()
+    };
     // Each embedding model has its own tuned thresholds.
     let tracker = match embedder.as_ref() {
         Some(e) => speakers::SpeakerTracker::with_params(voiceprints, e.params()),
@@ -692,98 +1074,123 @@ fn run_transcribe(
             .filter(|e| !e.from.trim().is_empty() && !e.to.trim().is_empty())
             .map(|e| (e.from.trim().to_string(), e.to.trim().to_string()))
             .collect(),
-        wake_word: (s.assistant.enabled && s.assistant.listen_for_wake_word)
+        wake_word: (!recovering && s.assistant.enabled && s.assistant.listen_for_wake_word)
             .then(|| s.assistant.wake_word.trim().to_string())
             .filter(|w| !w.is_empty()),
         armed_until: None,
     };
     let prompt = initial_prompt.as_deref();
 
-    let mut queue: VecDeque<Job> = VecDeque::new();
     loop {
-        if queue.is_empty() {
-            match rx.recv() {
-                Ok(j) => queue.push_back(j),
-                Err(_) => break,
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        *progress.lock().unwrap() = Instant::now();
+        let row = meeting_work::statuses(&db)?
+            .into_iter()
+            .find(|r| r.meeting_id == meeting_id);
+        let Some(row) = row else { return Ok(()) };
+        if row.state != "recording" && row.state != "finishing" {
+            return Ok(());
+        }
+        // At most four disposable previews/commands are in memory. Durable
+        // final work is fetched in bounded batches, never as the whole backlog.
+        if let Ok(job) = rx.try_recv() {
+            match job {
+                Job::Command { samples, at_ms } => {
+                    let text = complete_partial(&depth, || {
+                        asr::transcribe_preview(
+                            &app,
+                            &mut engine,
+                            &samples,
+                            live.language.as_deref(),
+                            prompt,
+                            cancel.clone(),
+                        )
+                    })?;
+                    let text = apply_dictionary(&text, &live.dictionary);
+                    if !text.trim().is_empty()
+                        && !cancel.load(Ordering::Relaxed)
+                        && active_meeting(&app).as_deref() == Some(&meeting_id)
+                    {
+                        agent::on_request(
+                            &app,
+                            Some(meeting_id.clone()),
+                            Some(at_ms),
+                            &text,
+                            "hotkey",
+                        );
+                    }
+                }
+                Job::Partial { samples, speaker } => {
+                    let text = complete_partial(&depth, || {
+                        asr::transcribe_preview(
+                            &app,
+                            &mut engine,
+                            &samples,
+                            live.language.as_deref(),
+                            prompt,
+                            cancel.clone(),
+                        )
+                    })?;
+                    if !cancel.load(Ordering::Relaxed) {
+                        let _ = app.emit("meeting-partial",serde_json::json!({"meetingId":meeting_id,"speaker":speaker,"text":text}));
+                    }
+                }
             }
         }
-        while let Ok(j) = rx.try_recv() {
-            queue.push_back(j);
-        }
-        // Spoken commands jump the queue.
-        let job = match queue.iter().position(|j| matches!(j, Job::Command { .. })) {
-            Some(i) => queue.remove(i).expect("index from position"),
-            None => queue.pop_front().expect("queue is non-empty"),
-        };
-        match job {
-            Job::Command { samples, at_ms } => {
-                let text = transcribe_all(&app, &mut engine, &samples, live.language.as_deref(), prompt);
-                depth.fetch_sub(1, Ordering::Relaxed);
-                let text = apply_dictionary(&text, &live.dictionary);
-                if text.trim().is_empty() {
-                    crate::overlay_toast(&app, "Didn't catch that — hold the key and try again.");
+        let jobs = meeting_work::next_batch(
+            &db,
+            &meeting_id,
+            matches!(engine, asr::Engine::Whisper(_)),
+            GAP_SAMPLES as i64,
+        )?;
+        if !jobs.is_empty() {
+            let mut pieces = Vec::new();
+            let mut ids = Vec::new();
+            for job in jobs {
+                let path = if job.source == "mic" {
+                    audio_store::mic_path(&app, &meeting_id)?
                 } else {
-                    agent::on_request(&app, Some(meeting_id.clone()), Some(at_ms), &text, "hotkey");
-                }
-            }
-            Job::Partial { samples, speaker } => {
-                // Stale if a final for that channel is already waiting.
-                let superseded = queue
-                    .iter()
-                    .any(|j| matches!(j, Job::Final { speaker: s, .. } if *s == speaker));
-                let text = complete_partial(&depth, || {
-                    if superseded { String::new() } else {
-                        transcribe_all(&app, &mut engine, &samples, live.language.as_deref(), prompt)
-                    }
+                    audio_store::system_path(&app, &meeting_id)?
+                };
+                let mut samples = audio_store::read_samples(&path, job.start, job.end)?;
+                meeting_work::mask_private_audio(
+                    &db,
+                    &meeting_id,
+                    &job.source,
+                    job.start,
+                    &mut samples,
+                )?;
+                let source = if job.source == "mic" { "mic" } else { "system" };
+                let speaker = if job.speaker == "me" { "me" } else { "them" };
+                pieces.push(Piece {
+                    samples,
+                    base_ms: job.start / 16,
+                    speaker,
+                    source,
                 });
-                if !text.trim().is_empty() {
-                    let _ = app.emit(
-                        "meeting-partial",
-                        serde_json::json!({ "speaker": speaker, "text": text }),
-                    );
-                }
+                ids.push(job.id);
             }
-            Job::Final { samples, base_ms, speaker, source } => {
-                let mut batch = vec![Piece { samples, base_ms, speaker, source }];
-                // Behind? Take the following segments of the same channel too
-                // (Whisper only — the sherpa models are fast enough alone).
-                if matches!(engine, asr::Engine::Whisper(_)) {
-                    let mut total = batch[0].samples.len();
-                    while let Some(Job::Final { samples, source: s, .. }) = queue.front() {
-                        if *s != source || total + samples.len() + GAP_SAMPLES > BATCH_MAX_SAMPLES {
-                            break;
-                        }
-                        total += samples.len() + GAP_SAMPLES;
-                        if let Some(Job::Final { samples, base_ms, speaker, source }) = queue.pop_front() {
-                            batch.push(Piece { samples, base_ms, speaker, source });
-                        }
-                    }
-                }
-                let n = batch.len() as i64;
-                process_finals(&app, &mut engine, &mut live, batch, prompt);
-                depth.fetch_sub(n, Ordering::Relaxed);
-            }
+            depth.fetch_add(1, Ordering::Relaxed);
+            complete_partial(&depth, || {
+                process_finals(
+                    &app,
+                    &mut engine,
+                    &mut live,
+                    pieces,
+                    prompt,
+                    &ids,
+                    cancel.clone(),
+                )
+            })?;
+        } else if row.state == "finishing" {
+            finish_speakers(&app, &mut live);
+            return Ok(()); // scheduler publishes completion on its next pass
+        } else {
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
-    finish_speakers(&app, &mut live);
-}
-
-fn transcribe_all(
-    app: &AppHandle,
-    engine: &mut asr::Engine,
-    samples: &[f32],
-    lang: Option<&str>,
-    prompt: Option<&str>,
-) -> String {
-    let mut padded = vec![0.0; GAP_SAMPLES];
-    padded.extend_from_slice(samples);
-    asr::transcribe_parts(app, engine, &padded, lang, prompt)
-        .into_iter()
-        .map(|(_, _, t)| t)
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string()
 }
 
 /// Transcribe a batch of segments (one Whisper pass), then label, correct,
@@ -794,7 +1201,9 @@ fn process_finals(
     live: &mut Live,
     batch: Vec<Piece>,
     prompt: Option<&str>,
-) {
+    job_ids: &[i64],
+    cancel: Arc<AtomicBool>,
+) -> Result<(), String> {
     maybe_lock_language(app, live, &batch);
 
     // Lay the batch out on one buffer: [gap][piece 0][gap][piece 1]…
@@ -806,7 +1215,17 @@ fn process_finals(
         buf.extend_from_slice(&p.samples);
         spans.push((off, p.samples.len() as i64 * 1000 / RATE));
     }
-    let parts = asr::transcribe_parts(app, engine, &buf, live.language.as_deref(), prompt);
+    let parts = asr::transcribe_parts_checked(
+        app,
+        engine,
+        &buf,
+        live.language.as_deref(),
+        prompt,
+        cancel.clone(),
+    )?;
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(());
+    }
 
     // Speaker per piece (remote channel), from its voice.
     let labels: Vec<String> = batch
@@ -845,16 +1264,7 @@ fn process_finals(
         let p = &batch[i];
         let start_ms = p.base_ms + (s - off).clamp(0, len);
         let end_ms = p.base_ms + (e - off).clamp(0, len);
-        let mut text = apply_dictionary(&text, &live.dictionary);
-        if p.source == "mic" {
-            match scan_wake(app, live, &text, end_ms) {
-                Some(rest) => text = rest,
-                None => continue,
-            }
-            if text.trim().is_empty() {
-                continue;
-            }
-        }
+        let text = apply_dictionary(&text, &live.dictionary);
         segs.push(Segment {
             id: 0,
             speaker: labels[i].clone(),
@@ -864,14 +1274,26 @@ fn process_finals(
             text,
         });
     }
-    if segs.is_empty() {
-        return;
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(());
     }
     let db = app.state::<Db>();
-    if let Err(e) = store::add_segments(&db, &live.meeting_id, &segs) {
-        eprintln!("[meeting] failed to persist segments: {e}");
+    if meeting_work::complete_batch(&db, &live.meeting_id, job_ids, &segs)? {
+        let _ = app.emit(
+            "meeting-segments",
+            serde_json::json!({"meetingId":live.meeting_id,"segments":segs}),
+        );
+        // Only a newly committed live result may trigger the assistant. Replay
+        // after restart must never repeat an external action.
+        if active_meeting(app).as_deref() == Some(&live.meeting_id) {
+            for s in &segs {
+                if s.source == "mic" {
+                    scan_wake(app, live, &s.text, s.end_ms);
+                }
+            }
+        }
     }
-    let _ = app.emit("meeting-segments", &segs);
+    Ok(())
 }
 
 /// Handle the wake word in one of the user's lines. Returns the text to keep
@@ -884,7 +1306,13 @@ fn scan_wake(app: &AppHandle, live: &mut Live, text: &str, end_ms: i64) -> Optio
     // The line right after a bare "unsound" is the request.
     if let Some(until) = live.armed_until.take() {
         if end_ms <= until && !text.trim().is_empty() {
-            agent::on_request(app, Some(live.meeting_id.clone()), Some(end_ms), text, "wake");
+            agent::on_request(
+                app,
+                Some(live.meeting_id.clone()),
+                Some(end_ms),
+                text,
+                "wake",
+            );
             return None;
         }
     }
@@ -892,7 +1320,13 @@ fn scan_wake(app: &AppHandle, live: &mut Live, text: &str, end_ms: i64) -> Optio
         return Some(text.to_string());
     };
     if hit.request.split_whitespace().count() >= 2 {
-        agent::on_request(app, Some(live.meeting_id.clone()), Some(end_ms), &hit.request, "wake");
+        agent::on_request(
+            app,
+            Some(live.meeting_id.clone()),
+            Some(end_ms),
+            &hit.request,
+            "wake",
+        );
     } else {
         live.armed_until = Some(end_ms + ARMED_MS);
         crate::overlay_toast(app, "Listening…");
@@ -901,7 +1335,9 @@ fn scan_wake(app: &AppHandle, live: &mut Live, text: &str, end_ms: i64) -> Optio
 }
 
 fn maybe_lock_language(app: &AppHandle, live: &mut Live, batch: &[Piece]) {
-    let Some(path) = live.detect_with.clone() else { return };
+    let Some(path) = live.detect_with.clone() else {
+        return;
+    };
     for p in batch {
         live.detect_buf.extend_from_slice(&p.samples);
     }
@@ -942,7 +1378,7 @@ fn note_voice_name(app: &AppHandle, live: &mut Live, key: usize) {
             let _ = store::set_speaker_name(&db, &live.meeting_id, &speaker, &name);
             let _ = app.emit(
                 "meeting-speaker-named",
-                serde_json::json!({ "speaker": speaker, "name": name }),
+                serde_json::json!({ "meetingId": live.meeting_id, "speaker": speaker, "name": name }),
             );
         }
     }
@@ -968,7 +1404,15 @@ fn finish_speakers(app: &AppHandle, live: &mut Live) {
         .tracker
         .centroids()
         .into_iter()
-        .map(|(k, c, n, ms)| (format!("them:{k}"), live.emb_model.clone(), speakers::encode(&c), n as i64, ms))
+        .map(|(k, c, n, ms)| {
+            (
+                format!("them:{k}"),
+                live.emb_model.clone(),
+                speakers::encode(&c),
+                n as i64,
+                ms,
+            )
+        })
         .collect();
     let _ = store::set_meeting_speakers(&db, &live.meeting_id, &rows);
 }
@@ -987,15 +1431,29 @@ fn apply_dictionary(text: &str, dict: &[(String, String)]) -> String {
 
 /// Extract each five-minute stretch soon after it completes, in the gaps
 /// between transcription work, so the final summary has little left to do.
-fn run_notes(app: AppHandle, meeting_id: String, model: PathBuf, stop: Arc<AtomicBool>, depth: Arc<AtomicI64>) {
+fn run_notes(
+    app: AppHandle,
+    meeting_id: String,
+    model: PathBuf,
+    stop: Arc<AtomicBool>,
+    depth: Arc<AtomicI64>,
+) {
     let mut next_check = Instant::now() + Duration::from_secs(60);
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(500));
-        if Instant::now() < next_check || depth.load(Ordering::Relaxed) > 0 {
+        if Instant::now() < next_check
+            || depth.load(Ordering::Relaxed) > 0
+            || meeting_work::next(&app.state::<Db>(), &meeting_id)
+                .ok()
+                .flatten()
+                .is_some()
+        {
             continue;
         }
         next_check = Instant::now() + Duration::from_secs(30);
-        let Some(pos) = position_ms(&app) else { continue };
+        let Some(pos) = position_ms(&app) else {
+            continue;
+        };
         if pos < summary::CHUNK_MS {
             continue;
         }
@@ -1024,7 +1482,11 @@ pub fn redetect_speakers(
         return Err("no system audio was saved for this meeting".into());
     }
     let samples = crate::audiofile::decode_to_samples(&path)?;
-    let system: Vec<&Segment> = meeting.segments.iter().filter(|s| s.source == "system").collect();
+    let system: Vec<&Segment> = meeting
+        .segments
+        .iter()
+        .filter(|s| s.source == "system")
+        .collect();
     if system.is_empty() {
         return Ok(());
     }
@@ -1037,7 +1499,8 @@ pub fn redetect_speakers(
         })
         .collect();
     let mut embedder = speakers::Embedder::new(&models::downloaded_model_path(app, emb_model)?)?;
-    let (keys, centroids) = speakers::cluster_offline(&mut embedder, &samples, &spans, num_speakers, &voiceprints);
+    let (keys, centroids) =
+        speakers::cluster_offline(&mut embedder, &samples, &spans, num_speakers, &voiceprints);
     let updates: Vec<(i64, String)> = system
         .iter()
         .zip(&keys)
@@ -1045,12 +1508,24 @@ pub fn redetect_speakers(
         .collect();
     store::update_segment_speakers(&db, &updates)?;
     // Old names referred to old clusters; keep only names matched by voice.
-    for sp in meeting.speaker_names.keys().filter(|k| k.starts_with("them")) {
+    for sp in meeting
+        .speaker_names
+        .keys()
+        .filter(|k| k.starts_with("them"))
+    {
         let _ = store::set_speaker_name(&db, meeting_id, sp, "");
     }
     let rows: Vec<store::SpeakerCentroid> = centroids
         .iter()
-        .map(|(k, c, n, ms)| (format!("them:{k}"), emb_model.to_string(), speakers::encode(c), *n as i64, *ms))
+        .map(|(k, c, n, ms)| {
+            (
+                format!("them:{k}"),
+                emb_model.to_string(),
+                speakers::encode(c),
+                *n as i64,
+                *ms,
+            )
+        })
         .collect();
     store::set_meeting_speakers(&db, meeting_id, &rows)?;
     for (k, c, _, _) in &centroids {
@@ -1063,7 +1538,12 @@ pub fn redetect_speakers(
 
 /// Remember a named speaker's voice (from this meeting's centroid), so future
 /// meetings label them automatically. False when no voice was captured.
-pub fn remember_voice(app: &AppHandle, meeting_id: &str, speaker: &str, name: &str) -> Result<bool, String> {
+pub fn remember_voice(
+    app: &AppHandle,
+    meeting_id: &str,
+    speaker: &str,
+    name: &str,
+) -> Result<bool, String> {
     let db = app.state::<Db>();
     let Some((_, model, emb, segs, _)) = store::meeting_speaker(&db, meeting_id, speaker)? else {
         return Ok(false);
@@ -1091,7 +1571,6 @@ pub fn remember_voice(app: &AppHandle, meeting_id: &str, speaker: &str, name: &s
     Ok(true)
 }
 
-
 #[cfg(test)]
 mod reliability_tests {
     use super::*;
@@ -1101,7 +1580,7 @@ mod reliability_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stalled.wav");
         let mut wav = WavWriter::create(&path).unwrap();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(4);
         let depth = Arc::new(AtomicI64::new(0));
         let samples = vec![0.25; BATCH_MAX_SAMPLES * 2];
         assert!(enqueue_partial(&tx, &depth, &samples, "me"));
@@ -1109,7 +1588,10 @@ mod reliability_tests {
         let (resume, wait_resume) = mpsc::channel();
         let worker_depth = depth.clone();
         let worker = std::thread::spawn(move || {
-            let Job::Partial { samples: queued, .. } = rx.recv_timeout(Duration::from_secs(1)).unwrap() else {
+            let Job::Partial {
+                samples: queued, ..
+            } = rx.recv_timeout(Duration::from_secs(1)).unwrap()
+            else {
                 panic!("expected partial");
             };
             assert_eq!(queued.len(), BATCH_MAX_SAMPLES);
@@ -1126,7 +1608,10 @@ mod reliability_tests {
         }
         assert_eq!(depth.load(Ordering::Relaxed), 1);
         assert_eq!(wav.finish().unwrap(), 192_000);
-        assert_eq!(audio_store::read_range(&path, 0, 12_000).unwrap().len(), 192_000);
+        assert_eq!(
+            audio_store::read_range(&path, 0, 12_000).unwrap().len(),
+            192_000
+        );
         // Model returns; previews can resume.
         resume.send(()).unwrap();
         let rx = worker.join().unwrap();
@@ -1137,7 +1622,7 @@ mod reliability_tests {
 
     #[test]
     fn disconnected_inference_worker_releases_partial_reservation() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(4);
         let depth = AtomicI64::new(0);
         drop(rx);
         assert!(!enqueue_partial(&tx, &depth, &[0.25; 1600], "me"));
@@ -1145,11 +1630,16 @@ mod reliability_tests {
     }
 
     fn handle(id: &str) -> Handle {
-        let (tx, _) = mpsc::channel();
+        let (tx, _) = mpsc::sync_channel(4);
         Handle {
-            meeting_id: id.into(), stop: Arc::new(AtomicBool::new(false)),
-            capture: None, transcribe: None, depth: Arc::new(AtomicI64::new(0)), tx,
-            exclusions: Default::default(), command_tap: None,
+            meeting_id: id.into(),
+            stop: Arc::new(AtomicBool::new(false)),
+            capture: None,
+            rx: None,
+            depth: Arc::new(AtomicI64::new(0)),
+            tx,
+            exclusions: Default::default(),
+            command_tap: None,
         }
     }
 
@@ -1163,17 +1653,17 @@ mod reliability_tests {
         old.capture = Some(std::thread::spawn(move || {
             wait_capture.recv_timeout(Duration::from_secs(5)).unwrap();
         }));
-        old.transcribe = Some(std::thread::spawn(move || {
+        let inference = std::thread::spawn(move || {
             wait_inference.recv_timeout(Duration::from_secs(5)).unwrap();
-        }));
+        });
         *state.active.lock().unwrap() = Some(old);
         *state.recording.lock().unwrap() = true;
         let (released, wait_released) = mpsc::channel();
         let stopping = state.clone();
         let finalizer = std::thread::spawn(move || {
-            let mut old = stopping.release_capture().unwrap();
+            let old = stopping.release_capture().unwrap();
             released.send(()).unwrap();
-            old.transcribe.take().unwrap().join().unwrap();
+            inference.join().unwrap();
             // Mirrors stop: after release, only the old meeting's metadata
             // can change, never the shared recorder or recording flag.
             old.meeting_id
@@ -1183,7 +1673,10 @@ mod reliability_tests {
             assert!(Instant::now() < deadline);
             std::thread::yield_now();
         }
-        assert!(state.active.try_lock().is_err(), "capture still owns the recorder slot");
+        assert!(
+            state.active.try_lock().is_err(),
+            "capture still owns the recorder slot"
+        );
         capture_done.send(()).unwrap();
         wait_released.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(!*state.recording.lock().unwrap());
@@ -1194,7 +1687,10 @@ mod reliability_tests {
         inference_done.send(()).unwrap();
         assert_eq!(finalizer.join().unwrap(), "old");
         assert!(*state.recording.lock().unwrap());
-        assert_eq!(state.active.lock().unwrap().as_ref().unwrap().meeting_id, "new");
+        assert_eq!(
+            state.active.lock().unwrap().as_ref().unwrap().meeting_id,
+            "new"
+        );
         state.release_capture();
     }
 }

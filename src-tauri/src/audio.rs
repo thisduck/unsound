@@ -52,6 +52,7 @@ pub struct AudioState {
     pub last_recording: Mutex<Vec<f32>>,
     /// A dictation take running as a tap on a meeting's recording.
     pub dictation_tap: Mutex<Option<u64>>,
+    pub capture_error: Arc<Mutex<Option<String>>>,
 }
 
 /// A continuous downmix + resample to 16 kHz mono. Input that doesn't fill a
@@ -136,6 +137,8 @@ pub fn start_recording(
     let (config_tx, config_rx) = mpsc::channel::<Result<(u32, u16), String>>();
 
     let thread_buffer = buffer.clone();
+    let failure = state.capture_error.clone();
+    *failure.lock().unwrap() = None;
     std::thread::spawn(move || {
         let build = || -> Result<(cpal::Stream, u32, u16), String> {
             let host = cpal::default_host();
@@ -144,7 +147,8 @@ pub fn start_recording(
             let config = device.default_input_config().map_err(|e| e.to_string())?;
             let sample_rate = config.sample_rate();
             let channels = config.channels();
-            let err_fn = |e| eprintln!("audio stream error: {e}");
+            let failure = failure.clone();
+            let err_fn = move |e| { *failure.lock().unwrap() = Some(format!("{e}")); };
 
             // Emit a level event roughly every 50 ms so the UI can show a meter.
             let emit_every = (sample_rate as usize * channels as usize) / 20;
@@ -253,6 +257,10 @@ pub fn drain_16k(state: &AudioState) -> Vec<f32> {
     let Some(rec) = active.as_mut() else {
         return Vec::new();
     };
+    drain_recording(rec)
+}
+
+fn drain_recording(rec: &mut ActiveRecording) -> Vec<f32> {
     let mut raw = rec.buffer.lock().unwrap();
     let end = rec.base + raw.len();
     if end <= rec.drained {
@@ -438,18 +446,21 @@ pub fn stop_meeting_recording(state: &AudioState) -> Vec<f32> {
     if owner(state) != Some(Owner::Meeting) {
         return Vec::new();
     }
-    let mut tail = drain_16k(state);
-    if let Some(rest) = flush_stream(state) {
-        tail.extend(rest);
+    let mut tail = Vec::new();
+    if state.dictation_tap.lock().unwrap().is_some() {
+        tail = drain_16k(state);
+        if let Some(rest) = flush_stream(state) { tail.extend(rest); }
+        if hand_over_to_dictation(state) { return tail; }
     }
-    if hand_over_to_dictation(state) {
-        return tail;
-    }
-    let rec = state.active.lock().unwrap().take();
-    if let Some(rec) = rec {
-        let _ = rec.stop_tx.send(());
-        let _ = rec.done_rx.recv_timeout(std::time::Duration::from_secs(5));
-    }
+    let mut active = state.active.lock().unwrap();
+    let Some(rec) = active.as_mut().filter(|r|r.owner == Owner::Meeting) else { return tail };
+    let _ = rec.stop_tx.send(());
+    let _ = rec.done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    // Drain AFTER the producer stops: its final callback may arrive while
+    // shutdown is in progress. Keep the recorder slot reserved through this.
+    tail.extend(drain_recording(rec));
+    if let Some(rest) = flush_recording(rec) { tail.extend(rest); }
+    active.take();
     tail
 }
 
@@ -469,6 +480,28 @@ mod reliability_tests {
             owner: Owner::Meeting, taps: Vec::new(), next_tap: 0,
         });
         buffer
+    }
+
+    #[test]
+    fn shutdown_keeps_samples_from_the_final_device_callback() {
+        let state = AudioState::default();
+        let buffer = disconnected(&state);
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        {
+            let mut active = state.active.lock().unwrap();
+            let rec = active.as_mut().unwrap();
+            rec.stop_tx = stop_tx;
+            rec.done_rx = done_rx;
+        }
+        let producer = std::thread::spawn(move || {
+            stop_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+            buffer.lock().unwrap().extend([0.75; 160]);
+            done_tx.send(()).unwrap();
+        });
+        assert_eq!(stop_meeting_recording(&state), vec![0.75;160]);
+        producer.join().unwrap();
+        assert!(stop_meeting_recording(&state).is_empty());
     }
 
     #[test]
@@ -519,9 +552,13 @@ mod reliability_tests {
 
 /// Push the resampler's held-back input through (zero-padded) at the end.
 fn flush_stream(state: &AudioState) -> Option<Vec<f32>> {
-    use rubato::Resampler;
     let mut active = state.active.lock().unwrap();
     let rec = active.as_mut()?;
+    flush_recording(rec)
+}
+
+fn flush_recording(rec: &mut ActiveRecording) -> Option<Vec<f32>> {
+    use rubato::Resampler;
     let rate = rec.sample_rate;
     let stream = rec.stream.as_mut()?;
     let pending = std::mem::take(&mut stream.pending);

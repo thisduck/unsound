@@ -84,8 +84,6 @@ pub enum Engine {
     Whisper(PathBuf),
     Moonshine(Moonshine),
     Parakeet(Parakeet),
-    /// Failed to initialize — callers produce no transcript.
-    None,
 }
 
 /// Resolve the selected STT model id into a ready engine. For sherpa models
@@ -121,25 +119,17 @@ fn text_part(text: String, n_samples: usize) -> Vec<(i64, i64, String)> {
 
 /// Transcribe a chunk to timestamped `(start_ms, end_ms, text)` parts (used by
 /// the meeting pipeline, which needs a timeline).
-pub fn transcribe_parts(
-    app: &AppHandle,
-    engine: &mut Engine,
-    samples: &[f32],
-    language: Option<&str>,
-    initial_prompt: Option<&str>,
-) -> Vec<(i64, i64, String)> {
+/// Durable work must distinguish inference errors from successfully recognized silence.
+pub fn transcribe_parts_checked(
+    app: &AppHandle, engine: &mut Engine, samples: &[f32], language: Option<&str>,
+    prompt: Option<&str>, cancel: Arc<AtomicBool>,
+) -> Result<Vec<(i64, i64, String)>, String> {
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err("transcription paused".into()); }
     match engine {
-        Engine::Whisper(path) => {
-            let st = app.state::<AppState>();
-            stt::transcribe_segments(&st.stt, path, samples, language, initial_prompt)
-                .unwrap_or_else(|e| {
-                    eprintln!("[asr] transcription failed: {e}");
-                    Vec::new()
-                })
-        }
-        Engine::Moonshine(m) => text_part(m.transcribe(samples), samples.len()),
-        Engine::Parakeet(p) => text_part(p.transcribe(samples), samples.len()),
-        Engine::None => Vec::new(),
+        Engine::Whisper(path) => stt::transcribe_segments_until(&app.state::<AppState>().stt,
+            path, samples, language, prompt, Some(cancel)),
+        Engine::Moonshine(m) => Ok(text_part(m.transcribe(samples), samples.len())),
+        Engine::Parakeet(p) => Ok(text_part(p.transcribe(samples), samples.len())),
     }
 }
 
@@ -177,6 +167,5 @@ pub fn transcribe_text(
         }
         Engine::Moonshine(m) => Ok(m.transcribe(samples)),
         Engine::Parakeet(p) => Ok(p.transcribe(samples)),
-        Engine::None => Ok(String::new()),
     }
 }

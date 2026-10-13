@@ -228,13 +228,11 @@ pub fn transcribe_until(
 /// meeting transcript needs so the two channels (mic/system) can be interleaved
 /// on a timeline. Returns `(start_ms, end_ms, text)` per non-empty segment. An
 /// empty/near-silent channel yields an empty vec rather than an error.
-pub fn transcribe_segments(
-    state: &SttState,
-    model_path: &Path,
-    samples: &[f32],
-    language: Option<&str>,
-    initial_prompt: Option<&str>,
+pub fn transcribe_segments_until(
+    state: &SttState, model_path: &Path, samples: &[f32], language: Option<&str>,
+    initial_prompt: Option<&str>, stop: Option<Arc<AtomicBool>>,
 ) -> Result<Vec<(i64, i64, String)>, String> {
+    if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) { return Err("transcription paused".into()); }
     if samples.len() < 1600 {
         return Ok(Vec::new());
     }
@@ -264,6 +262,13 @@ pub fn transcribe_segments(
     params.set_suppress_blank(true);
     if let Some(p) = initial_prompt {
         params.set_initial_prompt(p);
+    }
+
+    if let Some(stop) = stop.as_ref() {
+        unsafe {
+            params.set_abort_callback(Some(abort_when_set));
+            params.set_abort_callback_user_data(Arc::as_ptr(stop) as *mut std::ffi::c_void);
+        }
     }
 
     ws.full(params, samples)

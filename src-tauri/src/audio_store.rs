@@ -92,7 +92,13 @@ impl WavWriter {
         for &s in samples {
             buf.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
         }
-        self.file.write_all(&buf).map_err(|e| e.to_string())?;
+        let length = HEADER + self.samples * 2;
+        if let Err(e) = self.file.write_all(&buf) {
+            // A short write must not shift every later timestamp. Stop capture
+            // on error and restore the last complete append when possible.
+            let rollback = self.file.set_len(length).and_then(|_| self.file.seek(SeekFrom::End(0)));
+            return Err(format!("{e}; rollback: {rollback:?}"));
+        }
         self.samples += samples.len() as u64;
         self.since_header += samples.len() as u64;
         if self.since_header >= HEADER_EVERY_SAMPLES {
@@ -104,9 +110,10 @@ impl WavWriter {
     /// Pad with silence up to `total` samples — keeps a channel that went
     /// quiet (or stopped delivering) aligned with the meeting clock.
     pub fn pad_to(&mut self, total: u64) -> Result<(), String> {
-        if total > self.samples {
-            let n = (total - self.samples) as usize;
-            self.append(&vec![0.0; n])?;
+        let silence = [0.0; RATE as usize];
+        while total > self.samples {
+            let n = (total - self.samples).min(silence.len() as u64) as usize;
+            self.append(&silence[..n])?;
         }
         Ok(())
     }
@@ -118,6 +125,12 @@ impl WavWriter {
         self.file.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
         self.since_header = 0;
         Ok(())
+    }
+
+    pub fn checkpoint(&mut self) -> Result<u64, String> {
+        self.write_header()?;
+        self.file.sync_all().map_err(|e| e.to_string())?;
+        Ok(self.samples)
     }
 
     pub fn finish(mut self) -> Result<u64, String> {
@@ -166,6 +179,26 @@ pub fn read_range(path: &Path, start_ms: i64, end_ms: i64) -> Result<Vec<f32>, S
         .chunks_exact(2)
         .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
         .collect())
+}
+
+/// Exact sample ranges for durable transcription jobs, including sub-ms tails.
+pub fn read_samples(path: &Path, start: i64, end: i64) -> Result<Vec<f32>, String> {
+    if start < 0 || end < start || end - start > crate::meeting_work::MAX_SAMPLES {
+        return Err("invalid or oversized transcription range".into());
+    }
+    let mut f = File::open(path).map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(HEADER + start as u64 * 2)).map_err(|e|e.to_string())?;
+    let mut bytes = vec![0; (end-start) as usize * 2];
+    f.read_exact(&mut bytes).map_err(|e| format!("saved audio is incomplete: {e}"))?;
+    Ok(bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0],b[1]]) as f32 / 32768.0).collect())
+}
+
+pub fn sample_count(path: &Path) -> Result<i64, String> {
+    match path.metadata() {
+        Ok(m) => Ok(m.len().saturating_sub(HEADER) as i64 / 2),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// A playable WAV (both channels mixed) of a stretch of a meeting.

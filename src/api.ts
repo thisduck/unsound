@@ -199,6 +199,17 @@ export interface Meeting {
   hasAudio?: boolean;
 }
 
+export interface MeetingWork {
+  meetingId: string;
+  state: "recording" | "finishing" | "paused" | "error" | "complete";
+  error: string;
+  warning: string;
+  micSamples: number;
+  systemSamples: number;
+  pending: number;
+  recording: boolean;
+}
+
 export interface SearchHit {
   meetingId: string;
   title: string;
@@ -366,6 +377,9 @@ export const api = {
       llmModelId: llmModelId ?? null,
       embeddingModelId: embeddingModelId ?? null,
     }),
+  meetingWorkStatus: () => invoke<MeetingWork[]>("meeting_work_status"),
+  meetingPause: (id: string) => invoke<void>("meeting_pause", { id }),
+  meetingRetry: (id: string) => invoke<void>("meeting_retry", { id }),
   meetingStop: () => invoke<Meeting | null>("meeting_stop"),
   diarizeMeeting: (meetingId: string, embeddingModelId?: string, numSpeakers?: number) =>
     invoke<Meeting>("diarize_meeting", {
@@ -448,10 +462,10 @@ export const on = {
     listen<string>("meeting-summary-token", (e) => cb(e.payload)),
   meetingAnswerToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
     listen<string>("meeting-answer-token", (e) => cb(e.payload)),
-  meetingSegments: (cb: (segs: Segment[]) => void): Promise<UnlistenFn> =>
-    listen<Segment[]>("meeting-segments", (e) => cb(e.payload)),
-  meetingPartial: (cb: (p: { speaker: string; text: string }) => void): Promise<UnlistenFn> =>
-    listen<{ speaker: string; text: string }>("meeting-partial", (e) => cb(e.payload)),
+  meetingSegments: (cb: (p: { meetingId: string; segments: Segment[] }) => void): Promise<UnlistenFn> =>
+    listen<{ meetingId: string; segments: Segment[] }>("meeting-segments", (e) => cb(e.payload)),
+  meetingPartial: (cb: (p: { meetingId: string; speaker: string; text: string }) => void): Promise<UnlistenFn> =>
+    listen<{ meetingId: string; speaker: string; text: string }>("meeting-partial", (e) => cb(e.payload)),
   meetingToggle: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("meeting-toggle", () => cb()),
   meetingsAnswerToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
@@ -464,8 +478,8 @@ export const on = {
     ),
   meetingWarning: (cb: (msg: string) => void): Promise<UnlistenFn> =>
     listen<string>("meeting-warning", (e) => cb(e.payload)),
-  meetingSpeakerNamed: (cb: (p: { speaker: string; name: string }) => void): Promise<UnlistenFn> =>
-    listen<{ speaker: string; name: string }>("meeting-speaker-named", (e) => cb(e.payload)),
+  meetingSpeakerNamed: (cb: (p: { meetingId: string; speaker: string; name: string }) => void): Promise<UnlistenFn> =>
+    listen<{ meetingId: string; speaker: string; name: string }>("meeting-speaker-named", (e) => cb(e.payload)),
   meetingNotesChanged: (cb: (p: { meetingId: string; notes: string }) => void): Promise<UnlistenFn> =>
     listen<{ meetingId: string; notes: string }>("meeting-notes-changed", (e) => cb(e.payload)),
   meetingNotesProgress: (

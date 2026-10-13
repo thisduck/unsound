@@ -33,6 +33,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:reliability
+      - run: npm run test:notes
 
   native-ui:
     if: github.event_name == 'workflow_dispatch' && inputs.native_ui

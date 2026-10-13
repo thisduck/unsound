@@ -47,12 +47,19 @@ describe("native meeting persistence", () => {
     let meeting = await invoke("get_meeting", { id });
     assert.equal(meeting.notes, "Decision: ship the recovery tests.");
     assert.equal(meeting.endedAt, null, "a webview reload does not finalize recording metadata");
+    await $(".nav button*=meetings").click();
+    await $(".meet-row-title=E2E interrupted meeting").click();
+    const notes = $("textarea.meet-notes");
+    await notes.setValue("Decision: edited in the native notes UI.");
+    await browser.waitUntil(async () => (await invoke("get_meeting", { id })).notes === "Decision: edited in the native notes UI.", {
+      timeoutMsg: "Notes typed in the native UI did not reach SQLite",
+    });
     // Delete/new WebDriver session restarts the native application. Startup
     // recovery closes unfinished metadata, unlike a mere webview refresh.
     await browser.reloadSession();
     await openApp();
     meeting = await invoke("get_meeting", { id });
-    assert.equal(meeting.notes, "Decision: ship the recovery tests.");
+    assert.equal(meeting.notes, "Decision: edited in the native notes UI.");
     assert.ok(meeting.endedAt, "native startup should recover the open meeting");
     assert.deepEqual(meeting.segments, []);
   });

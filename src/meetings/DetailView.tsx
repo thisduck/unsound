@@ -1,3 +1,4 @@
+import { useNotesSave } from "./useNotesSave";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ActionItem, api, clock, Meeting, on, Segment, Task } from "../api";
 import { Markdown } from "../Markdown";
@@ -43,6 +44,7 @@ export function DetailView(p: Props) {
   const m = p.meeting;
   const player = usePlayer(m.hasAudio ? m.id : null);
   const [notes, setNotes] = useState(m.notes);
+  const notesSave = useNotesSave(m.id, setNotes, (text) => p.onMeeting({ ...m, notes: text }));
   const [editingSummary, setEditingSummary] = useState(false);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
@@ -55,7 +57,11 @@ export function DetailView(p: Props) {
   const [rememberVoice, setRememberVoice] = useState(true);
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
-  useEffect(() => setNotes(m.notes), [m.id, m.notes]);
+  useEffect(() => {
+    if (notesSave.saving || notesSave.error) return;
+    try { setNotes(localStorage.getItem(`unsound.notes-draft.${m.id}`) ?? m.notes); }
+    catch { setNotes(m.notes); }
+  }, [m.id, m.notes]);
 
   // Stream this meeting's Q&A answer.
   const askingRef = useRef(false);
@@ -356,16 +362,13 @@ export function DetailView(p: Props) {
 
       <section className="meet-section">
         <h3>my notes</h3>
+        {notesSave.error && <div className="meet-error" role="alert">{notesSave.error} <button onClick={notesSave.flush}>retry saving notes</button></div>}
+        {notesSave.saving && <span role="status">saving notes…</span>}
         <textarea
           className="meet-notes"
           value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          onBlur={() => {
-            if (notes !== m.notes) {
-              api.updateMeetingNotes(m.id, notes).catch(console.error);
-              p.onMeeting({ ...m, notes });
-            }
-          }}
+          onChange={(e) => { setNotes(e.target.value); notesSave.save(e.target.value); }}
+          onBlur={notesSave.flush}
           placeholder="jot anything down — saved with this meeting, and used by the summary"
         />
       </section>

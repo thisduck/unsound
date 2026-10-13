@@ -1,90 +1,120 @@
-# Reliability checks
-
-Run the deterministic fault suite without models, microphone permissions, provider
-credentials, or the native UI driver:
+# Meeting reliability
 
 ```sh
 npm run test:reliability
+npm run test:notes
 ```
 
-The tests use disposable directories, the production SQLite/WAV code, and narrow
-injection points in the recorder and transcription queue. The crash test launches
-a separate test process, waits until it has written its fixtures, kills it without
-cleanup, and opens the files again through the app's recovery functions.
+These suites need no microphone, models, cloud credentials, or UI driver. The
+notes tests use Node 24's TypeScript support. CI runs both suites on pull requests.
 
-| Failure | What the test checks |
+## Saved audio and durable work
+
+Capture checkpoints each channel's WAV before publishing its sample ranges to
+SQLite. Final transcription jobs contain sample offsets, not audio buffers. One
+meeting transcription worker reads at most 25 seconds per batch, plus leading silence; its disposable
+preview/command channel holds at most four jobs, each capped at 25 seconds. Long
+backlogs stay on disk. Whisper still batches short turns from the same channel;
+all completion markers in a batch commit with its transcript. Silence padding uses a fixed-size buffer.
+
+Transcript rows and their job completion marker commit in one transaction. A
+failed commit leaves the job pending. Successfully recognized silence completes a
+job too. Inference errors no longer masquerade as successful empty transcripts.
+
+Stopping releases capture without joining inference. The UI shows “finishing
+transcript” while queued audio is processed, and allows another recording. Final
+results, previews, and speaker events carry meeting IDs so an older session cannot
+update the new meeting's transcript. Summaries wait for transcript completion.
+
+Startup repairs unfinished WAV headers and queues uncovered ranges, including the
+last utterance that was still inside VAD. Completed ranges and persisted
+command/dictation exclusions are not replayed. Recovery does not execute spoken
+assistant requests from an earlier session. Recovered speaker labels are generic
+rather than overwriting previously assigned speakers.
+
+This recovery applies to meetings recorded with the durable queue. Older meetings
+without a `meeting_work` row are not automatically re-transcribed.
+
+## Failures and controls
+
+Audio/queue storage failures stop capture and retain an error in the UI. Status
+shows each channel's last saved position. Errors are persisted when SQLite remains
+writable, with an in-memory fallback when it does not. The warning records a prior
+interruption after retry; recovery cannot restore audio that never reached disk.
+
+An interrupted microphone reports an error instead of only logging it. Shutdown
+drains the microphone after its last callback and preserves the system-audio tail.
+A long ScreenCaptureKit gap reports an interruption rather than allocating a large
+silence buffer in memory.
+
+“Pause” prevents an in-flight result from committing and requests native
+cancellation. The supervisor also cancels after 90 seconds without progress.
+Whisper has an abort callback; other native model calls may need to return on their
+own. A stuck call keeps the single meeting-worker slot, so retry does not create
+unbounded replacement threads. If it cannot stop, restart the app; pending work
+remains on disk. Capture and its stop control do not wait for that inference call.
+
+Notes edits retain a local draft, report failed database saves, and flush when an
+editor closes. Writes from the live and archive editors run in order. Local draft
+storage failures are visible too; the user must keep the window open until a
+successful database save in that case.
+
+## Fault coverage
+
+| Injection | Assertion |
 | --- | --- |
-| Process killed with SQLite and WAV open | Committed notes and transcript survive; an uncommitted update does not. All 48,000 written PCM samples survive despite the stale WAV header. Recovery is repeatable. |
-| Storage rejects the second insert in a batch | The entire batch rolls back; previously saved transcript survives; an explicit retry writes exactly one copy. |
-| Database becomes read-only | Updates return errors and leave the last saved notes intact after reopening. Writes work after storage is restored. |
-| WAV writes/finalization fail | Errors reach the caller, failed samples are not counted, and already written audio can be repaired. |
-| WAV ends with half a sample | Repair removes the incomplete sample, preserves complete samples, and is repeatable. |
-| Partial inference stalls | The production queue reservation stays held during blocked inference. More previews are refused, their payload is capped at 25 seconds, and independent WAV writes continue. |
-| Inference consumer disconnects | A rejected preview releases its queue reservation. |
-| Audio producer disconnects | Already buffered audio and the tail drain once; stop releases the recorder; an active dictation tap keeps its audio. |
-| Previous session still finalizes | Capture retains the recorder slot until it stops. A new session can occupy it while old inference finishes; the old completion cannot clear the new recording flag. |
-| Provider rejects credentials | A local HTTP server receives one request with the expired key, then a new request with the replacement key. A 401 does not trigger format-fallback retries. |
+| Kill a separate process with SQLite/WAV open | Committed notes/transcript survive; an uncommitted update rolls back; queued audio and the unqueued VAD tail replay exactly once. |
+| Fail the second transcript insert | Neither partial transcript nor a completion marker commits; retry writes one copy. |
+| Pause while a result is outstanding | The late result cannot commit; its job remains pending for retry. |
+| Reopen with completed work and private tap intervals | Recovery fills only uncovered audio ranges, including sub-window tails. |
+| Create a thousand-job backlog | Each job remains bounded; completed work leaves the pending queue. |
+| Make SQLite read-only | Saves return errors and previously saved notes survive reopening. |
+| Fail WAV writes/finalization; tear a PCM sample | Saved samples remain readable; repair removes the partial sample and is repeatable. |
+| Stall a preview; disconnect its consumer | Capture writes continue; previews do not accumulate; failed enqueue releases its reservation. |
+| Disconnect the audio producer; deliver a final callback during shutdown | Buffered audio drains once, including the shutdown tail and active dictation taps. |
+| Start another session while old inference finalizes | Capture ownership is released first; old completion cannot clear the new recording flag. |
+| Resume system audio after a long gap | The gap is reported without allocating the whole missing interval. |
+| Reject credentials, then supply a replacement | The local HTTP server receives the new key; 401 does not trigger format-fallback retries. |
+| Fail notes saving; edit during an outstanding save; switch editors | Draft survives and older completion cannot erase or overwrite a newer edit. |
 
-These checks deliberately separate existing guarantees from missing ones:
+The process-kill test is not a power-loss test. Storage faults use SQLite triggers,
+read-only mode, and real OS write errors, not a physical full disk. Physical USB
+removal, sleep/wake, real-model stalls, and the full native recording flow still
+need hardware or virtual-device validation. Queue bounds do not claim a bound on
+model memory or every microphone tap buffer. A blocked OS storage call can still
+delay capture shutdown.
 
-- Final transcription jobs still use an unbounded queue. The bound above applies
-  to previews, not the complete pipeline. A durable queue with a memory budget is
-  still needed before promising bounded memory during a long inference stall.
-- Inference cannot yet be canceled or timed out reliably. Stopping a meeting can
-  wait indefinitely for a stuck model. These tests inject a controlled stall at
-  the queue boundary; they do not hang a real model runtime.
-- Startup preserves audio and committed transcript, but does not re-transcribe
-  audio that had not reached the database. The crash test explicitly checks this.
-- Capture still ignores several storage errors. Writer tests prove errors are
-  returned, not that the UI warns or that capture retries them. SQLite failures
-  here use an abort trigger and read-only mode, not a physical full disk.
-- Audio tests disconnect the producer channels. Physical USB removal, macOS
-  ScreenCaptureKit interruption, sleep/wake, and device reconnection still need a
-  virtual-device or hardware test environment.
-- The credential test supplies a replacement key on the next request. It does
-  not claim automatic token refresh or exercise the user's Keychain.
-- Old-session UI events and shared model contention during overlapping
-  finalization still need end-to-end coverage.
-
-# Native Tauri UI tests (macOS)
+## Native Tauri UI tests (macOS)
 
 ```sh
 npm ci
 npm run e2e:build
-# Supply CN_API_KEY_WEBDRIVER through your local environment or CI secret store.
+# Supply CN_API_KEY_WEBDRIVER through the environment or a CI secret.
 npm run test:e2e
 ```
 
 The harness uses WebdriverIO, `tauri-driver`, and CrabNebula's test runner backend.
-`npm run e2e:check` checks the key and the built binary without launching services.
-A missing prerequisite fails the command with a nonzero exit code; no tests are
-silently skipped. The build itself does not require the key.
+`npm run e2e:check` checks prerequisites without launching services. Missing
+credentials fail the command; tests are not silently skipped. The build itself
+does not need a key.
 
-`e2e:build` enables the optional `automation` Cargo feature and uses
-`src-tauri/tauri.e2e.conf.json`. It copies the result to `e2e/bin/unsound-e2e`.
-The app refuses to start an automation build with any identifier other than
-`com.unsound.e2e`. App data and Keychain entries therefore use a separate namespace.
-Global hotkeys, the tray, background assistant, and meeting detection are not
-started. The test does not record audio or download models. Normal builds do not
-include the automation plugin.
+The optional `automation` feature and `src-tauri/tauri.e2e.conf.json` produce
+`e2e/bin/unsound-e2e`. Automation builds refuse the normal app identifier: app data
+and Keychain entries use `com.unsound.e2e`. Global hotkeys, tray, meeting detection,
+and background assistants are disabled. Normal builds omit the automation plugin.
 
-The spec navigates the actual native webview, creates synthetic meeting data over
-real Tauri IPC, checks persistence after a webview reload, then creates a new
-WebDriver session and checks native startup recovery. Metadata is written through
-IPC because the meeting screen requires downloaded models; this is not yet a UI
-test of recording or note editing. Each run uses a unique meeting ID and deletes
-only that fixture. The isolated app profile remains available for inspection.
+The spec navigates the native webview, creates a synthetic meeting through real
+IPC, edits notes through the UI, and checks persistence after webview reload and
+native session restart. The archive stays accessible without downloaded models.
+It does not yet record a real meeting. Each run deletes only its unique fixture.
 
-Ports 3000 and 4444 must be free. Service startup has a 30-second deadline; failures
-and shutdown clean up the child services. Failed specs save screenshots under
-`e2e/artifacts/`. Both binaries and artifacts are gitignored.
-
-The reliability workflow runs the Rust suite and frontend build on pull requests.
-Native UI tests are an explicit workflow-dispatch option and need the
-`CN_API_KEY_WEBDRIVER` repository secret. Do not treat a successful build or
-preflight as a completed native UI test run.
+Ports 3000 and 4444 must be free. Startup has a deadline and cleans up child
+services on failure. WDIO fatal setup errors prevent workers from connecting after
+failed preparation. Failed specs save screenshots in `e2e/artifacts/`; binaries
+and artifacts are gitignored. Native CI is a workflow-dispatch option requiring
+the `CN_API_KEY_WEBDRIVER` repository secret.
 
 Approach informed by Anarlog's [failure-oriented tests](https://github.com/fastrepl/anarlog/blob/4b8e114/crates/listener-core/src/actors/session/supervisor/reliability_tests.rs)
-and [native test configuration](https://github.com/fastrepl/anarlog/blob/4b8e114/e2e/blackbox/wdio.blackbox.conf.ts).
-Setup references: [CrabNebula](https://docs.crabnebula.dev/plugins/tauri-e2e-tests/)
-and [Tauri WebDriver](https://v2.tauri.app/develop/tests/webdriver/).
+and [native configuration](https://github.com/fastrepl/anarlog/blob/4b8e114/e2e/blackbox/wdio.blackbox.conf.ts).
+Driver setup: [CrabNebula](https://docs.crabnebula.dev/plugins/tauri-e2e-tests/) and
+[Tauri WebDriver](https://v2.tauri.app/develop/tests/webdriver/).

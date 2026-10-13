@@ -35,7 +35,6 @@ pub fn iso_from_unix_ms(ms: i64) -> String {
 
 /// Parse the ISO-8601 UTC shapes we write ("…Z", optional fraction) back to
 /// Unix milliseconds. Offsets other than Z aren't produced by us; `None`.
-#[cfg(test)]
 pub fn unix_ms_from_iso(s: &str) -> Option<i64> {
     let s = s.trim();
     let s = s.strip_suffix('Z').unwrap_or(s);
@@ -69,7 +68,6 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-#[cfg(test)]
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
