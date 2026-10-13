@@ -5054,6 +5054,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-automation"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "314d4ba88ce4a5e17c5f1e2dad990edb5956643b6e04a6d127d39aa64d0f2a7d"
+dependencies = [
+ "libloading 0.8.9",
+ "objc2-app-kit",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tauri-plugin-dialog"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5756,9 +5771,11 @@ dependencies = [
  "symphonia",
  "tauri",
  "tauri-build",
+ "tauri-plugin-automation",
  "tauri-plugin-dialog",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-opener",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "whisper-rs",

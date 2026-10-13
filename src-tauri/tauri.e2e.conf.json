@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "unsound E2E",
+  "identifier": "com.unsound.e2e",
+  "bundle": {
+    "active": false
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "unsound E2E",
+        "width": 1060,
+        "height": 720
+      }
+    ]
+  }
+}

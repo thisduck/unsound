@@ -222,7 +222,12 @@ pub struct VoiceprintRow {
 pub fn open(app: &AppHandle) -> Result<Db, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let conn = Connection::open(dir.join("unsound.db")).map_err(|e| e.to_string())?;
+    open_path(&dir.join("unsound.db"))
+}
+
+/// Also used by crash tests: exercise the same WAL and migration settings as launch.
+pub(crate) fn open_path(path: &std::path::Path) -> Result<Db, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| e.to_string())?;
     conn.pragma_update(None, "foreign_keys", "ON")

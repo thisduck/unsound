@@ -2,8 +2,10 @@
 //! macOS Keychain, never in settings.json — that file is plain text and easy
 //! to paste into a bug report.
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "automation")))]
 const SERVICE: &str = "com.unsound.app";
+#[cfg(all(target_os = "macos", feature = "automation"))]
+const SERVICE: &str = "com.unsound.e2e";
 
 /// The stored secret, or `None` when absent (or the Keychain is unavailable).
 #[cfg(target_os = "macos")]

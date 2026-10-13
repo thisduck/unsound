@@ -27,6 +27,8 @@ mod syscapture;
 mod tools;
 mod tray;
 mod util;
+#[cfg(test)]
+mod reliability_tests;
 
 use audio::{AudioState, RecordingResult};
 use llm::LlmState;
@@ -1228,7 +1230,10 @@ fn cancel_shortcut_capture() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "automation")]
+    let builder = builder.plugin(tauri_plugin_automation::init());
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -1269,14 +1274,20 @@ pub fn run() {
         )
         .manage(AppState::default())
         .setup(|app| {
+            #[cfg(feature = "automation")]
+            if app.config().identifier != "com.unsound.e2e" {
+                return Err("automation builds must use the isolated com.unsound.e2e profile".into());
+            }
             // Open the local SQLite store (history + meetings) and manage it.
             app.manage(store::open(app.handle())?);
             let s = settings::load(app.handle());
-            if let Err(e) = apply_shortcuts(app.handle(), &s) {
-                eprintln!("global shortcuts unavailable: {e}");
+            if !cfg!(feature = "automation") {
+                if let Err(e) = apply_shortcuts(app.handle(), &s) {
+                    eprintln!("global shortcuts unavailable: {e}");
+                }
+                tray::init(app.handle())?;
+                create_overlay(app.handle())?;
             }
-            tray::init(app.handle())?;
-            create_overlay(app.handle())?;
             let handle = app.handle().clone();
             // Meetings cut off by a crash or quit: close them out and make
             // their audio files consistent.
@@ -1292,6 +1303,11 @@ pub fn run() {
                     }
                 }
                 Err(e) => eprintln!("[meeting] recovery failed: {e}"),
+            }
+            // The UI harness uses real IPC and storage, without global shortcuts,
+            // background assistants, meeting detection, or microphone capture.
+            if cfg!(feature = "automation") {
+                return Ok(());
             }
             agent::start(&handle);
             // The command key (from either shortcut path) is handled here,

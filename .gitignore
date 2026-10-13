@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Native UI test builds and failure screenshots
+e2e/bin/
+e2e/artifacts/

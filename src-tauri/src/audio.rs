@@ -453,6 +453,70 @@ pub fn stop_meeting_recording(state: &AudioState) -> Vec<f32> {
     tail
 }
 
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+
+    // Inject the same buffer/channels used by CPAL, with its producer gone.
+    // These tests do not pretend to emulate a physical USB device reconnect.
+    fn disconnected(state: &AudioState) -> Arc<Mutex<Vec<f32>>> {
+        let (stop_tx, _) = mpsc::channel();
+        let (_, done_rx) = mpsc::channel();
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        *state.active.lock().unwrap() = Some(ActiveRecording {
+            stop_tx, done_rx, buffer: buffer.clone(), sample_rate: 16_000,
+            channels: 1, base: 0, drained: 0, stream: None,
+            owner: Owner::Meeting, taps: Vec::new(), next_tap: 0,
+        });
+        buffer
+    }
+
+    #[test]
+    fn disconnected_producer_drains_tail_once_and_releases_recording() {
+        let state = AudioState::default();
+        let buffer = disconnected(&state);
+        buffer.lock().unwrap().extend([0.25; 1600]);
+        assert_eq!(drain_16k(&state), vec![0.25; 1600]);
+        buffer.lock().unwrap().extend([0.5; 800]);
+        assert_eq!(stop_meeting_recording(&state), vec![0.5; 800]);
+        assert!(stop_meeting_recording(&state).is_empty());
+        assert_eq!(owner(&state), None);
+        let next = disconnected(&state);
+        next.lock().unwrap().extend([0.75; 400]);
+        assert_eq!(stop_meeting_recording(&state), vec![0.75; 400]);
+    }
+
+    #[test]
+    fn capture_buffer_is_trimmed_and_dictation_cannot_stop_a_meeting() {
+        let state = AudioState::default();
+        let buffer = disconnected(&state);
+        for _ in 0..120 {
+            buffer.lock().unwrap().extend([0.25; 16_000]);
+            assert_eq!(drain_16k(&state).len(), 16_000);
+            assert!(buffer.lock().unwrap().is_empty());
+        }
+        assert_eq!(position_ms(&state), Some(120_000));
+        assert!(stop_recording(&state).is_err());
+        assert_eq!(owner(&state), Some(Owner::Meeting));
+        stop_meeting_recording(&state);
+    }
+
+    #[test]
+    fn meeting_stop_preserves_an_active_dictation_tap_after_disconnect() {
+        let state = AudioState::default();
+        let buffer = disconnected(&state);
+        buffer.lock().unwrap().extend([0.25; 1600]);
+        drain_16k(&state);
+        let (tap, _) = tap_begin(&state).unwrap();
+        *state.dictation_tap.lock().unwrap() = Some(tap);
+        buffer.lock().unwrap().extend([0.5; 800]);
+        assert_eq!(stop_meeting_recording(&state), vec![0.5; 800]);
+        assert_eq!(owner(&state), Some(Owner::Dictation));
+        assert_eq!(stop_recording(&state).unwrap().sample_count, 800);
+        assert_eq!(*state.last_recording.lock().unwrap(), vec![0.5; 800]);
+    }
+}
+
 /// Push the resampler's held-back input through (zero-padded) at the end.
 fn flush_stream(state: &AudioState) -> Option<Vec<f32>> {
     use rubato::Resampler;

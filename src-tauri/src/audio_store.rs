@@ -130,16 +130,22 @@ impl WavWriter {
 /// Make a WAV cut off mid-write (crash, force quit) consistent: its header
 /// sizes are set from the file length.
 pub fn repair(path: &Path) -> Result<(), String> {
-    let Ok(mut file) = OpenOptions::new().read(true).write(true).open(path) else {
-        return Ok(());
+    let mut file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
     };
     let len = file.metadata().map_err(|e| e.to_string())?.len();
     if len < HEADER {
         return Ok(());
     }
-    let data = ((len - HEADER) / 2 * 2).min(u32::MAX as u64 - 36) as u32;
+    let complete_bytes = (len - HEADER) / 2 * 2;
+    let data = complete_bytes.min((u32::MAX as u64 - 36) / 2 * 2) as u32;
+    // A torn write can leave half a PCM sample; never expose it as audio.
+    file.set_len(HEADER + complete_bytes).map_err(|e| e.to_string())?;
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-    file.write_all(&header(data)).map_err(|e| e.to_string())
+    file.write_all(&header(data)).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
 }
 
 /// Read `[start_ms, end_ms)` of a WAV we wrote as f32 samples, seeking
@@ -214,5 +220,47 @@ mod tests {
         let decoded = crate::audiofile::decode_to_samples(&path).unwrap();
         assert_eq!(decoded.len(), 48_000);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+
+    #[test]
+    fn failed_append_and_finalize_do_not_claim_saved_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio.wav");
+        let mut w = WavWriter::create(&path).unwrap();
+        w.append(&vec![0.5; 1600]).unwrap();
+        drop(w); // unfinished header
+        let before = std::fs::read(&path).unwrap();
+        // Real OS write errors, even when tests run as an administrator.
+        let mut w = WavWriter {
+            file: File::open(&path).unwrap(), samples: 1600, since_header: 1600,
+        };
+        assert!(w.append(&[0.75; 100]).is_err());
+        assert_eq!(w.samples, 1600);
+        assert!(w.finish().is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        repair(&path).unwrap();
+        assert_eq!(read_range(&path, 0, 1000).unwrap().len(), 1600);
+    }
+
+    #[test]
+    fn torn_pcm_sample_is_removed_and_repair_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio.wav");
+        let mut w = WavWriter::create(&path).unwrap();
+        w.append(&[0.25, -0.5]).unwrap();
+        drop(w);
+        OpenOptions::new().append(true).open(&path).unwrap().write_all(&[0xff]).unwrap();
+        repair(&path).unwrap();
+        let repaired = std::fs::read(&path).unwrap();
+        assert_eq!(repaired.len(), 48);
+        assert_eq!(u32::from_le_bytes(repaired[40..44].try_into().unwrap()), 4);
+        repair(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), repaired);
+        assert_eq!(crate::audiofile::decode_to_samples(&path).unwrap().len(), 2);
     }
 }

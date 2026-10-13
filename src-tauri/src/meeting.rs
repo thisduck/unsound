@@ -68,6 +68,21 @@ pub struct MeetingState {
     pub recording: Mutex<bool>,
 }
 
+impl MeetingState {
+    /// Reserve the recorder until capture has released the devices. The old
+    /// transcriber may finish later, but must no longer change recording state.
+    fn release_capture(&self) -> Option<Handle> {
+        let mut active = self.active.lock().unwrap();
+        let mut handle = active.take()?;
+        handle.stop.store(true, Ordering::Relaxed);
+        if let Some(capture) = handle.capture.take() {
+            let _ = capture.join();
+        }
+        *self.recording.lock().unwrap() = false;
+        Some(handle)
+    }
+}
+
 struct Handle {
     meeting_id: String,
     stop: Arc<AtomicBool>,
@@ -208,15 +223,11 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
 /// Returns the meeting id that was recording.
 pub fn stop(app: &AppHandle) -> Result<Option<String>, String> {
     let st = app.state::<AppState>();
-    let handle = st.meeting.active.lock().unwrap().take();
+    let handle = st.meeting.release_capture();
+    crate::tray::refresh_menu(app);
     let mut id = None;
     if let Some(mut h) = handle {
-        h.stop.store(true, Ordering::Relaxed);
-        // Capture finishes first (final flush, stops the devices)…
-        if let Some(j) = h.capture.take() {
-            let _ = j.join();
-        }
-        // …then the transcription thread drains what's left and exits once
+        // The transcription thread drains what's left and exits once
         // every sender is gone.
         drop(h.tx);
         if let Some(j) = h.transcribe.take() {
@@ -226,8 +237,6 @@ pub fn stop(app: &AppHandle) -> Result<Option<String>, String> {
         let _ = store::set_meeting_ended(&db, &h.meeting_id, &crate::util::now_iso());
         id = Some(h.meeting_id);
     }
-    *st.meeting.recording.lock().unwrap() = false;
-    crate::tray::refresh_menu(app);
     Ok(id)
 }
 
@@ -518,6 +527,10 @@ fn handle_channel(
     let Some(vad) = ch.vad.as_mut() else { return };
     if !new.is_empty() {
         ch.pending.extend_from_slice(&new);
+        // Partials are disposable previews. Keep their memory bounded even
+        // during long silence or uninterrupted speech; VAD owns final audio.
+        let excess = ch.pending.len().saturating_sub(BATCH_MAX_SAMPLES);
+        ch.pending.drain(..excess);
         vad.accept_waveform(new);
     }
     if stopping {
@@ -564,12 +577,30 @@ fn handle_channel(
         && vad.is_speech()
         && !claimed
     {
-        depth.fetch_add(1, Ordering::Relaxed);
-        let _ = tx.send(Job::Partial {
-            samples: ch.pending.clone(),
-            speaker: ch.speaker,
-        });
+        enqueue_partial(tx, depth, &ch.pending, ch.speaker);
     }
+}
+
+fn enqueue_partial(tx: &mpsc::Sender<Job>, depth: &AtomicI64, samples: &[f32], speaker: &'static str) -> bool {
+    if depth.compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        return false;
+    }
+    let start = samples.len().saturating_sub(BATCH_MAX_SAMPLES);
+    if tx.send(Job::Partial { samples: samples[start..].to_vec(), speaker }).is_err() {
+        depth.fetch_sub(1, Ordering::Relaxed);
+        return false;
+    }
+    true
+}
+
+/// Keep the queue reservation throughout inference, including error unwinding.
+fn complete_partial<T>(depth: &AtomicI64, infer: impl FnOnce() -> T) -> T {
+    struct Completion<'a>(&'a AtomicI64);
+    impl Drop for Completion<'_> {
+        fn drop(&mut self) { self.0.fetch_sub(1, Ordering::Relaxed); }
+    }
+    let _completion = Completion(depth);
+    infer()
 }
 
 // ---- transcription thread (consumer) ---------------------------------------
@@ -696,15 +727,15 @@ fn run_transcribe(
                 }
             }
             Job::Partial { samples, speaker } => {
-                depth.fetch_sub(1, Ordering::Relaxed);
                 // Stale if a final for that channel is already waiting.
                 let superseded = queue
                     .iter()
                     .any(|j| matches!(j, Job::Final { speaker: s, .. } if *s == speaker));
-                if superseded {
-                    continue;
-                }
-                let text = transcribe_all(&app, &mut engine, &samples, live.language.as_deref(), prompt);
+                let text = complete_partial(&depth, || {
+                    if superseded { String::new() } else {
+                        transcribe_all(&app, &mut engine, &samples, live.language.as_deref(), prompt)
+                    }
+                });
                 if !text.trim().is_empty() {
                     let _ = app.emit(
                         "meeting-partial",
@@ -1058,4 +1089,112 @@ pub fn remember_voice(app: &AppHandle, meeting_id: &str, speaker: &str, name: &s
         },
     )?;
     Ok(true)
+}
+
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+
+    #[test]
+    fn stalled_partial_inference_does_not_block_audio_or_accumulate_previews() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stalled.wav");
+        let mut wav = WavWriter::create(&path).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let depth = Arc::new(AtomicI64::new(0));
+        let samples = vec![0.25; BATCH_MAX_SAMPLES * 2];
+        assert!(enqueue_partial(&tx, &depth, &samples, "me"));
+        let (entered, wait_entered) = mpsc::channel();
+        let (resume, wait_resume) = mpsc::channel();
+        let worker_depth = depth.clone();
+        let worker = std::thread::spawn(move || {
+            let Job::Partial { samples: queued, .. } = rx.recv_timeout(Duration::from_secs(1)).unwrap() else {
+                panic!("expected partial");
+            };
+            assert_eq!(queued.len(), BATCH_MAX_SAMPLES);
+            complete_partial(&worker_depth, || {
+                entered.send(()).unwrap();
+                wait_resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+            rx
+        });
+        wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        for _ in 0..120 {
+            wav.append(&[0.25; 1600]).unwrap();
+            assert!(!enqueue_partial(&tx, &depth, &samples, "me"));
+        }
+        assert_eq!(depth.load(Ordering::Relaxed), 1);
+        assert_eq!(wav.finish().unwrap(), 192_000);
+        assert_eq!(audio_store::read_range(&path, 0, 12_000).unwrap().len(), 192_000);
+        // Model returns; previews can resume.
+        resume.send(()).unwrap();
+        let rx = worker.join().unwrap();
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert_eq!(depth.load(Ordering::Relaxed), 0);
+        assert!(enqueue_partial(&tx, &depth, &[0.5; 1600], "me"));
+    }
+
+    #[test]
+    fn disconnected_inference_worker_releases_partial_reservation() {
+        let (tx, rx) = mpsc::channel();
+        let depth = AtomicI64::new(0);
+        drop(rx);
+        assert!(!enqueue_partial(&tx, &depth, &[0.25; 1600], "me"));
+        assert_eq!(depth.load(Ordering::Relaxed), 0);
+    }
+
+    fn handle(id: &str) -> Handle {
+        let (tx, _) = mpsc::channel();
+        Handle {
+            meeting_id: id.into(), stop: Arc::new(AtomicBool::new(false)),
+            capture: None, transcribe: None, depth: Arc::new(AtomicI64::new(0)), tx,
+            exclusions: Default::default(), command_tap: None,
+        }
+    }
+
+    #[test]
+    fn next_session_waits_for_capture_but_not_previous_transcription() {
+        let state = Arc::new(MeetingState::default());
+        let mut old = handle("old");
+        let stop = old.stop.clone();
+        let (capture_done, wait_capture) = mpsc::channel();
+        let (inference_done, wait_inference) = mpsc::channel();
+        old.capture = Some(std::thread::spawn(move || {
+            wait_capture.recv_timeout(Duration::from_secs(5)).unwrap();
+        }));
+        old.transcribe = Some(std::thread::spawn(move || {
+            wait_inference.recv_timeout(Duration::from_secs(5)).unwrap();
+        }));
+        *state.active.lock().unwrap() = Some(old);
+        *state.recording.lock().unwrap() = true;
+        let (released, wait_released) = mpsc::channel();
+        let stopping = state.clone();
+        let finalizer = std::thread::spawn(move || {
+            let mut old = stopping.release_capture().unwrap();
+            released.send(()).unwrap();
+            old.transcribe.take().unwrap().join().unwrap();
+            // Mirrors stop: after release, only the old meeting's metadata
+            // can change, never the shared recorder or recording flag.
+            old.meeting_id
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !stop.load(Ordering::Relaxed) {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(state.active.try_lock().is_err(), "capture still owns the recorder slot");
+        capture_done.send(()).unwrap();
+        wait_released.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!*state.recording.lock().unwrap());
+        // Install the next session while old inference is deliberately held.
+        *state.active.lock().unwrap() = Some(handle("new"));
+        *state.recording.lock().unwrap() = true;
+        assert!(!finalizer.is_finished());
+        inference_done.send(()).unwrap();
+        assert_eq!(finalizer.join().unwrap(), "old");
+        assert!(*state.recording.lock().unwrap());
+        assert_eq!(state.active.lock().unwrap().as_ref().unwrap().meeting_id, "new");
+        state.release_capture();
+    }
 }
