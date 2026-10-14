@@ -1,0 +1,125 @@
+{
+  "recordedAt": "2026-10-14T04:41:44.236Z",
+  "host": {
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Max",
+    "logicalCpus": 18,
+    "memoryBytes": 137438953472
+  },
+  "workload": {
+    "minutesPerChannel": 60,
+    "channels": 2,
+    "speed": 20,
+    "restart": true
+  },
+  "mode": "accelerated",
+  "model": "ggml-tiny.bin",
+  "recording": {
+    "stopped": {
+      "inference": {
+        "count": 358,
+        "p50Ms": 149,
+        "p95Ms": 270,
+        "maxMs": 817,
+        "totalMs": 59403
+      },
+      "queueToCommit": {
+        "count": 358,
+        "p50Ms": 272,
+        "p95Ms": 530,
+        "maxMs": 1456,
+        "totalMs": 108322
+      },
+      "checkpoint": {
+        "count": 360,
+        "p50Ms": 17,
+        "p95Ms": 31,
+        "maxMs": 218,
+        "totalMs": 7097
+      },
+      "processedAudioMs": 7160000,
+      "realTimeFactor": 0.008296508379888268,
+      "peakBacklogJobs": 3,
+      "peakBacklogAudioMs": 60000,
+      "modelReadyMs": 207,
+      "stopMs": 122,
+      "drainMs": null,
+      "recoveryMs": null
+    },
+    "peakRssBytes": 388743168,
+    "rssGrowthAfter30sBytes": -66600960
+  },
+  "recovery": {
+    "report": {
+      "channels": 2,
+      "metrics": {
+        "checkpoint": {
+          "count": 0,
+          "maxMs": 0,
+          "p50Ms": null,
+          "p95Ms": null,
+          "totalMs": 0
+        },
+        "drainMs": null,
+        "inference": {
+          "count": 2,
+          "maxMs": 123,
+          "p50Ms": 116,
+          "p95Ms": 123,
+          "totalMs": 239
+        },
+        "modelReadyMs": 117,
+        "peakBacklogAudioMs": 40000,
+        "peakBacklogJobs": 2,
+        "processedAudioMs": 40000,
+        "queueToCommit": {
+          "count": 2,
+          "maxMs": 775,
+          "p50Ms": 675,
+          "p95Ms": 775,
+          "totalMs": 1450
+        },
+        "realTimeFactor": 0.005975,
+        "recoveryMs": 516,
+        "stopMs": null
+      },
+      "minutesPerChannel": 60,
+      "recovered": true,
+      "speed": 20,
+      "transcriptRows": 902,
+      "wallSeconds": 0.514202666
+    },
+    "peakRssBytes": null,
+    "rssGrowthAfter30sBytes": null
+  },
+  "limitations": [
+    "Accelerated synthetic PCM repeated into both channels with real Whisper inference.",
+    "Measures no hardware capture, VAD latency, real-conversation accuracy, or hour-long thermal behavior.",
+    "RSS excludes some GPU allocations; the model may benefit from OS file caches."
+  ],
+  "syntheticSpeakerEvaluation": {
+    "model": "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+    "voices": [
+      "Samantha",
+      "Daniel",
+      "Karen",
+      "Moira",
+      "Rishi"
+    ],
+    "turns": 60,
+    "trueSpeakers": 5,
+    "live": {
+      "predictedSpeakers": 4,
+      "adjustedRandIndex": 0.51,
+      "purity": 0.7
+    },
+    "offlineAutomatic": {
+      "predictedSpeakers": 4,
+      "adjustedRandIndex": 0.55,
+      "purity": 0.72
+    },
+    "limitation": "Synthetic TTS voices; not a real-human diarization accuracy estimate."
+  }
+}

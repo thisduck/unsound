@@ -9,6 +9,7 @@ export function speakerLabel(speaker: string, names?: Record<string, string>): s
   if (speaker === "me") return "You";
   const m = speaker.match(/^them:(\d+)$/);
   if (m) return `Speaker ${Number(m[1]) + 1}`;
+  if (speaker.startsWith("manual:")) return `Participant ${speaker.slice(7)}`;
   return "Them";
 }
 

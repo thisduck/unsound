@@ -7,7 +7,9 @@ use std::time::Duration;
 
 #[derive(Default)]
 pub struct Fixture {
-    audio: Mutex<VecDeque<Vec<f32>>>,
+    audio: Mutex<VecDeque<(Vec<f32>, Vec<f32>)>>,
+    #[cfg(feature = "automation")]
+    pub system_audio: AtomicBool,
     #[cfg(feature = "automation")]
     pub disconnected: AtomicBool,
     pub fail_audio: AtomicBool,
@@ -23,13 +25,13 @@ impl Fixture {
         if queue.len() == 4 {
             return Err("fixture audio buffer is full".into());
         }
-        queue.push_back(vec![0.25; 16_000]);
+        queue.push_back((vec![0.25; 16_000], Vec::new()));
         Ok(())
     }
 
     #[cfg(test)]
     pub fn drain(&self) -> Vec<f32> {
-        self.audio.lock().unwrap().drain(..).flatten().collect()
+        self.audio.lock().unwrap().drain(..).flat_map(|(mic,_)|mic).collect()
     }
 
     #[cfg(feature = "automation")]
@@ -38,16 +40,26 @@ impl Fixture {
         if queue.len() == 4 {
             return Err("fixture audio buffer is full".into());
         }
-        queue.push_back(vec![0.25; 16_000]);
+        queue.push_back((vec![0.25; 16_000], Vec::new()));
         self.disconnected.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     #[cfg(feature = "automation")]
-    pub fn capture_input(&self) -> (bool, Vec<f32>) {
+    pub fn capture_input(&self) -> (bool, Vec<f32>, Vec<f32>) {
         let mut queue = self.audio.lock().unwrap();
         let disconnected = self.disconnected.swap(false, Ordering::SeqCst);
-        (disconnected, queue.drain(..).flatten().collect())
+        let (mut mic,mut system)=(Vec::new(),Vec::new());
+        for (m,s) in queue.drain(..) {mic.extend(m);system.extend(s);}
+        (disconnected, mic, system)
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn feed_pcm(&self,mic:Vec<f32>,system:Vec<f32>)->Result<(),String> {
+        if mic.len()>crate::meeting_work::MAX_SAMPLES as usize || system.len()>crate::meeting_work::MAX_SAMPLES as usize {return Err("benchmark frame exceeds 25 seconds".into());}
+        let mut queue=self.audio.lock().unwrap();
+        if queue.len()>=4 {return Err("fixture audio buffer is full".into());}
+        queue.push_back((mic,system));Ok(())
     }
 
     pub fn check_save(&self) -> Result<(), String> {

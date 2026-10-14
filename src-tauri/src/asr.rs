@@ -95,6 +95,10 @@ pub fn resolve(app: &AppHandle, model_id: &str) -> Result<Engine, String> {
     if let Some(fixture) = crate::meeting_fixture::for_model(app, model_id) {
         return Ok(Engine::Fixture(fixture));
     }
+    #[cfg(feature = "automation")]
+    if let Some(path)=model_id.strip_prefix("e2e-real:") {
+        return Ok(Engine::Whisper(PathBuf::from(path)));
+    }
     let info = models::find_model(app, model_id)?;
     let path = models::downloaded_model_path(app, model_id)?;
     if info.files.is_empty() {

@@ -144,6 +144,31 @@ describe("native recording failure recovery", () => {
     await complete(id, 2);
   });
 
+  it("keeps a speaker correction after reopening the native app", async () => {
+    const id = await create();
+    await start(id);
+    await feed(id, 1);
+    await invoke("meeting_stop");
+    await complete(id, 1);
+    await browser.refresh();
+    await openApp();
+    await $(".nav button*=meetings").click();
+    await $(`.meet-row-title=${id}`).click();
+    await $("button[title='Correct speaker']").click();
+    await $("input[aria-label='New speaker name']").setValue("Priya");
+    await $(".speaker-correction button=save").click();
+    await until(async () => {
+      const m = await meeting(id);
+      return m.speakerNames[m.segments[0].speaker] === "Priya";
+    }, "Speaker correction did not reach SQLite");
+    await browser.reloadSession();
+    await openApp();
+    const m = await meeting(id);
+    assert.equal(m.speakerNames[m.segments[0].speaker], "Priya");
+    assert.equal(m.segments[0].source, "mic");
+    assert.equal(m.segments[0].startMs, 0);
+  });
+
   it("recovers committed notes, transcript, and pending audio after an abrupt process kill", async () => {
     const id = await create();
     await start(id);

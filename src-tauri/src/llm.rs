@@ -911,7 +911,7 @@ pub fn chat_json(
     parse_json_reply(&text)
 }
 
-/// GBNF for a JSON Schema (cached — schemas are fixed per call site).
+/// GBNF for a JSON Schema. Bound the cache because evidence schemas vary by transcript.
 pub fn json_grammar(schema: &serde_json::Value) -> Result<String, String> {
     static CACHE: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
     let key = schema.to_string();
@@ -920,7 +920,9 @@ pub fn json_grammar(schema: &serde_json::Value) -> Result<String, String> {
         return Ok(g.clone());
     }
     let g = llama_cpp_2::json_schema_to_grammar(&key).map_err(|e| format!("schema → grammar: {e}"))?;
-    cache.lock().unwrap().insert(key, g.clone());
+    let mut cache=cache.lock().unwrap();
+    if cache.len()>=16 {cache.clear();}
+    cache.insert(key, g.clone());
     Ok(g)
 }
 
@@ -941,72 +943,6 @@ fn preview(s: &str) -> String {
 }
 
 // ---- meeting prompts --------------------------------------------------------
-
-/// Stage 1 of summarization, run per stretch of the meeting (during it, as the
-/// transcript grows): pull grounded facts out before writing anything.
-/// Summarizing from extracted facts — rather than compressing the raw
-/// transcript in one shot — markedly reduces hallucination on small models,
-/// and working in stretches keeps every part of a long meeting in view.
-pub const MEETING_EXTRACT_PROMPT: &str = r#"You extract the important content from an excerpt of a meeting transcript. Each line is "[m:ss] Speaker: text". "Me" is the user; other speakers are named or "Speaker 1", "Speaker 2", … (or "Them").
-List, as terse bullet points grounded ONLY in what is said in this excerpt:
-- Decisions that were made
-- Action items / commitments (who owns each and any due date, when stated)
-- Key points, facts, numbers and names discussed
-- Questions raised or left open
-Start every action item or commitment bullet with "Action:" — e.g. "- Action: Speaker 2 to fix the login bug by Thursday (0:37)".
-End every bullet with the timestamp of the line that supports it, in parentheses, like (12:34). Attribute points to speakers when clear. Do NOT invent names, numbers, dates, or commitments. Transcripts contain speech-recognition errors; don't repeat obvious garbles. If nothing substantive is said, output exactly: - (nothing substantive)
-Output only the bullet list."#;
-
-/// Stage 2: compose the notes from the extracted facts (plus the user's own
-/// notes and flagged moments, which say what mattered to them).
-pub const MEETING_SUMMARY_PROMPT: &str = r#"You write up meeting notes from points extracted from the transcript. "Me" is the user — keep "Me" (or "I") for things the user said or took on; never reassign them to someone else.
-Write Markdown with these sections, omitting any that don't apply:
-## Summary
-A 2-4 sentence plain-language overview of what the meeting was about and what was decided.
-## Key points
-The main topics and points, as bullets, grouped logically (not in transcript order).
-## Decisions
-What was decided, as bullets.
-## Open questions
-Anything left unresolved.
-Rules:
-- Keep the (m:ss) timestamp at the end of each bullet it supports, copied from the points.
-- If the user's own notes are included, they show what mattered most to them: cover every note, expand it with detail from the points, and lead with those topics.
-- Moments the user flagged are especially important; make sure they're reflected.
-- Do not write an action-items section (those are tracked separately).
-- Base everything ONLY on the provided material — add nothing new.
-- Keep it tight and skimmable: merge related points, drop minor chatter. Even for a long meeting, stay under about 15 key points and 400 words."#;
-
-/// Stage 3: structured follow-ups, grammar-constrained.
-pub const MEETING_ACTIONS_PROMPT: &str = r#"From the meeting's commitments (and the user's notes, if any), list the concrete follow-up actions someone committed to or was asked to do. Merge duplicates of the same action.
-- task: a specific, self-contained instruction (what, and enough context to act on it later).
-- owner: the person responsible as named in the points ("Me" for the user); "" if unclear.
-- due: when it's due as stated ("Friday", "next sprint"); "" if not stated.
-- at: the (m:ss) timestamp from the point it comes from, without parentheses; "" if none.
-Only real commitments or requests — not topics that were merely discussed. If there are none, return an empty list."#;
-
-pub fn actions_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "items": {
-                "type": "array",
-                "maxItems": 30,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "task": {"type": "string"},
-                        "owner": {"type": "string"},
-                        "due": {"type": "string"},
-                        "at": {"type": "string"}
-                    },
-                    "required": ["task", "owner", "due", "at"]
-                }
-            }
-        },
-        "required": ["items"]
-    })
-}
 
 pub const MEETING_TITLE_PROMPT: &str = "Write a short, specific title (at most 8 words) for the meeting these notes describe. Output only the title — no quotes, no trailing period.";
 

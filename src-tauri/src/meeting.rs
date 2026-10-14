@@ -51,6 +51,7 @@ pub struct MeetingState {
     pub recording: Mutex<bool>,
     worker: Mutex<Option<Worker>>,
     faults: Mutex<HashMap<String, String>>,
+    pub metrics: crate::meeting_metrics::Metrics,
 }
 
 struct Worker {
@@ -122,6 +123,13 @@ pub fn start_with_options(app: &AppHandle, opts: StartOptions) -> Result<(), Str
     })
 }
 
+#[cfg(feature="automation")]
+pub fn start_benchmark(app:&AppHandle,id:&str,model:&str)->Result<(),String> {
+    if app.config().identifier!="com.unsound.e2e" || !crate::meeting_fixture::valid_id(id) {return Err("benchmark requires an isolated fixture".into());}
+    crate::meeting_fixture::get(app,id).system_audio.store(true,Ordering::SeqCst);
+    start(app,StartOptions{meeting_id:id.into(),stt_model:format!("e2e-real:{model}"),language:Some("en".into()),llm_model:None,embedding_model:Some(String::new())},PathBuf::new())
+}
+
 fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), String> {
     let st = app.state::<AppState>();
     let mut active = st.meeting.active.lock().unwrap();
@@ -129,6 +137,7 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
         return Err("a meeting is already recording".into());
     }
     let s = settings::load(app);
+    st.meeting.metrics.begin(&opts.meeting_id,false);
 
     let mic_file = audio_store::mic_path(app, &opts.meeting_id)?;
     let sys_file = audio_store::system_path(app, &opts.meeting_id)?;
@@ -146,7 +155,7 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
     let sys_writer = WavWriter::create(&sys_file)?;
 
     #[cfg(feature = "automation")]
-    let fixture = crate::meeting_fixture::for_model(app, &opts.stt_model);
+    let fixture = if vad_path.as_os_str().is_empty() { Some(crate::meeting_fixture::get(app,&opts.meeting_id)) } else { None };
     #[cfg(feature = "automation")]
     let synthetic = fixture.is_some();
     #[cfg(not(feature = "automation"))]
@@ -165,7 +174,10 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
     let mic_started = Instant::now();
     #[cfg(target_os = "macos")]
     let sys_ok = if synthetic {
-        false
+        #[cfg(feature = "automation")]
+        { fixture.as_ref().is_some_and(|f|f.system_audio.load(Ordering::SeqCst)) }
+        #[cfg(not(feature = "automation"))]
+        { false }
     } else {
         match crate::syscapture::start(&st.sys) {
             Ok(()) => true,
@@ -181,7 +193,7 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
     };
     #[cfg(not(target_os = "macos"))]
     let sys_ok = false;
-    let sys_offset = (mic_started.elapsed().as_millis() as i64 * RATE / 1000) as u64;
+    let sys_offset = if synthetic {0} else {(mic_started.elapsed().as_millis() as i64 * RATE / 1000) as u64};
 
     let stop = Arc::new(AtomicBool::new(false));
     let depth = Arc::new(AtomicI64::new(0));
@@ -234,6 +246,7 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
 
 /// Release capture promptly. Durable work continues in the single background worker.
 pub fn stop(app: &AppHandle) -> Result<Option<String>, String> {
+    let started=Instant::now();
     let st = app.state::<AppState>();
     let Some(h) = st.meeting.release_capture() else {
         return Ok(None);
@@ -251,6 +264,7 @@ pub fn stop(app: &AppHandle) -> Result<Option<String>, String> {
             &format!("Recording stopped, but recovery could not finish: {e}"),
         );
     }
+    st.meeting.metrics.stopped(&id,started.elapsed().as_millis() as u64);
     if !st.meeting.faults.lock().unwrap().contains_key(&id) {
         if let Err(e) = meeting_work::state(&db, &id, "finishing", "") {
             fail(app, &id, &e);
@@ -389,6 +403,7 @@ fn stall_timeout(_app: &AppHandle, _id: &str) -> Duration {
 pub fn start_recovery(app: AppHandle) {
     if let Ok(rows) = meeting_work::statuses(&app.state::<Db>()) {
         for row in rows.into_iter().filter(|r| r.state != "complete") {
+            app.state::<AppState>().meeting.metrics.begin(&row.meeting_id,true);
             if let Err(e) = recover_audio(&app, &row.meeting_id) {
                 fail(&app, &row.meeting_id, &e);
                 continue;
@@ -413,6 +428,12 @@ pub fn start_recovery(app: AppHandle) {
             if stopped {
                 let _ = stop(&app);
             }
+            let rows=meeting_work::statuses(&app.state::<Db>()).ok();
+            if let Some(rows)=&rows {
+                for row in rows.iter().filter(|r|r.state=="recording" || r.state=="finishing") {
+                    st.meeting.metrics.backlog(&row.meeting_id,row.pending,row.pending_audio_ms);
+                }
+            }
             {
                 let mut slot = st.meeting.worker.lock().unwrap();
                 if slot.as_ref().is_some_and(|w| w.join.is_finished()) {
@@ -432,7 +453,7 @@ pub fn start_recovery(app: AppHandle) {
                         w.cancel.store(true, Ordering::Relaxed);
                         fail(&app,&w.id,"Transcription stopped making progress. Recording can continue. Stop recording, then retry; restart the app if the model cannot stop.");
                     }
-                } else if let Ok(rows) = meeting_work::statuses(&app.state::<Db>()) {
+                } else if let Some(rows) = rows {
                     for row in rows {
                         // If SQLite could not persist the error, the in-memory
                         // fault must still prevent an automatic retry loop.
@@ -449,6 +470,7 @@ pub fn start_recovery(app: AppHandle) {
                             )
                             .is_ok()
                             {
+                                st.meeting.metrics.complete(&row.meeting_id);
                                 if !cfg!(feature = "automation") {
                                     agent::on_meeting_ended(&app, &row.meeting_id);
                                 }
@@ -729,7 +751,7 @@ fn run_capture(
         #[cfg(feature = "automation")]
         let fixture_input = fixture.as_ref().map(|f| f.capture_input());
         #[cfg(feature = "automation")]
-        if fixture_input.as_ref().is_some_and(|(disconnected, _)| *disconnected) {
+        if fixture_input.as_ref().is_some_and(|(disconnected, _, _)| *disconnected) {
             *st.audio.capture_error.lock().unwrap() = Some("injected audio disconnect".into());
         }
         if let Some(error) = st.audio.capture_error.lock().unwrap().take() {
@@ -741,7 +763,11 @@ fn run_capture(
         // Mic: on the final pass, stopping the device also returns the tail
         // still inside the resampler.
         #[cfg(feature = "automation")]
-        let synthetic_audio = fixture_input.map(|(_, samples)| samples);
+        let (synthetic_audio,mut synthetic_system) = match fixture_input {
+            Some((_,mic,system))=>(Some(mic),Some(system)),None=>(None,None)
+        };
+        #[cfg(not(feature = "automation"))]
+        let mut synthetic_system:Option<Vec<f32>>=None;
         #[cfg(not(feature = "automation"))]
         let synthetic_audio: Option<Vec<f32>> = None;
         let new_mic = if let Some(samples) = synthetic_audio {
@@ -759,12 +785,14 @@ fn run_capture(
                 .unwrap_or(Ok(()));
             #[cfg(not(feature = "automation"))]
             let writable: Result<(), String> = Ok(());
+            let checkpoint_started=Instant::now();
             let save = writable
                 .and_then(|_| mic_writer.append(&new_mic))
                 .and_then(|_| mic_writer.checkpoint())
                 .and_then(|n| {
                     meeting_work::saved(&app.state::<Db>(), &meeting_id, "mic", n as i64)
                 });
+            if !new_mic.is_empty() { st.meeting.metrics.checkpoint(&meeting_id,checkpoint_started.elapsed().as_millis() as u64); }
             if let Err(e) = save {
                 fail(
                     &app,
@@ -812,7 +840,7 @@ fn run_capture(
 
         #[cfg(target_os = "macos")]
         if sys_ok {
-            let new_sys = if stopping {
+            let new_sys = if let Some(samples)=synthetic_system.take() {samples} else if stopping {
                 match crate::syscapture::stop(&st.sys) {
                     Ok(_) => std::mem::take(&mut *st.sys.last.lock().unwrap()),
                     Err(e) => {
@@ -828,6 +856,7 @@ fn run_capture(
                 crate::syscapture::drain(&st.sys)
             };
             if !storage_failed {
+                let checkpoint_started=Instant::now();
                 let save = sys_writer
                     .pad_to(sys.offset + sys_fed)
                     .and_then(|_| sys_writer.append(&new_sys))
@@ -835,6 +864,7 @@ fn run_capture(
                     .and_then(|n| {
                         meeting_work::saved(&app.state::<Db>(), &meeting_id, "system", n as i64)
                     });
+                if !new_sys.is_empty() {st.meeting.metrics.checkpoint(&meeting_id,checkpoint_started.elapsed().as_millis() as u64);}
                 if let Err(e) = save {
                     fail(
                         &app,
@@ -847,6 +877,12 @@ fn run_capture(
             }
             sys_fed += new_sys.len() as u64;
             if !storage_failed {
+                #[cfg(feature = "automation")]
+                if fixture.is_some() && !new_sys.is_empty() {
+                    if let Err(e)=meeting_work::enqueue(&app.state::<Db>(),&meeting_id,"system","them",(sys.offset+sys_fed-new_sys.len() as u64) as i64,(sys.offset+sys_fed) as i64,false) {
+                        fail(&app,&meeting_id,&e);storage_failed=true;stop.store(true,Ordering::Relaxed);
+                    }
+                }
                 if let Err(e) = handle_channel(
                     &app.state::<Db>(),
                     &meeting_id,
@@ -1075,6 +1111,7 @@ fn run_transcribe(
     cancel: Arc<AtomicBool>,
     progress: Arc<Mutex<Instant>>,
 ) -> Result<(), String> {
+    let model_started=Instant::now();
     let meeting =
         store::get_meeting(&app.state::<Db>(), &meeting_id)?.ok_or("meeting was deleted")?;
     let model_id = meeting.stt_model;
@@ -1147,6 +1184,7 @@ fn run_transcribe(
             .filter(|w| !w.is_empty()),
         armed_until: None,
     };
+    app.state::<AppState>().meeting.metrics.model_ready(&meeting_id,model_started.elapsed().as_millis() as u64);
     let prompt = initial_prompt.as_deref();
 
     loop {
@@ -1214,6 +1252,9 @@ fn run_transcribe(
             GAP_SAMPLES as i64,
         )?;
         if !jobs.is_empty() {
+            let queued_at=jobs.iter().map(|j|j.queued_at_ms).filter(|t|*t>0).min().unwrap_or(0);
+            let audio_ms=jobs.iter().map(|j|(j.end-j.start) as u64/16).sum();
+            let batch_started=Instant::now();
             let mut pieces = Vec::new();
             let mut ids = Vec::new();
             for job in jobs {
@@ -1241,7 +1282,7 @@ fn run_transcribe(
                 ids.push(job.id);
             }
             depth.fetch_add(1, Ordering::Relaxed);
-            complete_partial(&depth, || {
+            let committed=complete_partial(&depth, || {
                 process_finals(
                     &app,
                     &mut engine,
@@ -1252,6 +1293,7 @@ fn run_transcribe(
                     cancel.clone(),
                 )
             })?;
+            if committed { app.state::<AppState>().meeting.metrics.batch(&meeting_id,batch_started.elapsed().as_millis() as u64,audio_ms,queued_at); }
         } else if row.state == "finishing" {
             finish_speakers(&app, &mut live);
             return Ok(()); // scheduler publishes completion on its next pass
@@ -1271,7 +1313,7 @@ fn process_finals(
     prompt: Option<&str>,
     job_ids: &[i64],
     cancel: Arc<AtomicBool>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     maybe_lock_language(app, live, &batch);
 
     // Lay the batch out on one buffer: [gap][piece 0][gap][piece 1]…
@@ -1292,7 +1334,7 @@ fn process_finals(
         cancel.clone(),
     )?;
     if cancel.load(Ordering::Relaxed) {
-        return Ok(());
+        return Ok(false);
     }
 
     // Speaker per piece (remote channel), from its voice.
@@ -1343,10 +1385,11 @@ fn process_finals(
         });
     }
     if cancel.load(Ordering::Relaxed) {
-        return Ok(());
+        return Ok(false);
     }
     let db = app.state::<Db>();
-    if meeting_work::complete_batch(&db, &live.meeting_id, job_ids, &segs)? {
+    let committed=meeting_work::complete_batch(&db, &live.meeting_id, job_ids, &segs)?;
+    if committed {
         let _ = app.emit(
             "meeting-segments",
             serde_json::json!({"meetingId":live.meeting_id,"segments":segs}),
@@ -1361,7 +1404,7 @@ fn process_finals(
             }
         }
     }
-    Ok(())
+    Ok(committed)
 }
 
 /// Handle the wake word in one of the user's lines. Returns the text to keep
@@ -1549,7 +1592,6 @@ pub fn redetect_speakers(
     if !path.exists() {
         return Err("no system audio was saved for this meeting".into());
     }
-    let samples = crate::audiofile::decode_to_samples(&path)?;
     let system: Vec<&Segment> = meeting
         .segments
         .iter()
@@ -1567,8 +1609,14 @@ pub fn redetect_speakers(
         })
         .collect();
     let mut embedder = speakers::Embedder::new(&models::downloaded_model_path(app, emb_model)?)?;
-    let (keys, centroids) =
-        speakers::cluster_offline(&mut embedder, &samples, &spans, num_speakers, &voiceprints);
+    let mut embeddings=Vec::with_capacity(spans.len());
+    for &(start,end) in &spans {
+        // The embedder needs at most ten seconds. Keep long recordings on disk.
+        let end=end.min(start+10_000);
+        let pcm=audio_store::read_samples(&path,start*16,end*16)?;
+        embeddings.push(embedder.embed(&pcm));
+    }
+    let (keys, centroids) = speakers::cluster_embeddings_with(&embeddings,&spans,num_speakers,&voiceprints,embedder.params());
     let updates: Vec<(i64, String)> = system
         .iter()
         .zip(&keys)
@@ -1613,19 +1661,44 @@ pub fn remember_voice(
     name: &str,
 ) -> Result<bool, String> {
     let db = app.state::<Db>();
-    let Some((_, model, emb, segs, _)) = store::meeting_speaker(&db, meeting_id, speaker)? else {
-        return Ok(false);
+    let row = store::meeting_speaker(&db, meeting_id, speaker)?;
+    let (_, model, emb, segs, speech_ms) = match row {
+        Some(row) => row,
+        None if speaker.starts_with("manual:") => {
+            // Rebuild from the corrected utterances, never from the old mixed cluster.
+            let m=store::get_meeting(&db,meeting_id)?.ok_or("meeting not found")?;
+            let model=meeting_work::embedding_model(&db,meeting_id).unwrap_or_else(|_|settings::load(app).meetings.embedding_model);
+            let mut embedder=speakers::Embedder::new(&models::downloaded_model_path(app,&model)?)?;
+            let mut centroid=Vec::new(); let mut count=0; let mut speech=0;
+            for s in m.segments.iter().filter(|s|s.speaker==speaker && s.end_ms-s.start_ms>=2000).take(15) {
+                let end=s.end_ms.min(s.start_ms+10_000);
+                let path=if s.source=="mic" { audio_store::mic_path(app,meeting_id)? } else { audio_store::system_path(app,meeting_id)? };
+                let pcm=audio_store::read_samples(&path,s.start_ms*16,end*16)?;
+                if let Some(embedding)=embedder.embed(&pcm) {
+                    centroid=speakers::blend_weighted(&centroid,count,&embedding,1);
+                    count+=1; speech+=end-s.start_ms;
+                }
+            }
+            (speaker.to_string(),model,speakers::encode(&centroid),count as i64,speech)
+        }
+        None => return Ok(false),
     };
+    if segs<2 || speech_ms<6000 { return Ok(false); }
     let new = speakers::decode(&emb);
-    let existing = store::voiceprints(&db, &model)?
-        .into_iter()
-        .find(|v| v.name.eq_ignore_ascii_case(name));
+    if new.is_empty() || new.iter().any(|x|!x.is_finite()) { return Ok(false); }
+    let existing = store::voiceprints(&db, &model)?.into_iter().find(|v| v.name.eq_ignore_ascii_case(name));
     let (embedding, samples) = match existing {
-        Some(v) => (
-            speakers::blend(&speakers::decode(&v.embedding), v.samples as u32, &new),
-            v.samples + segs.max(1),
-        ),
-        None => (new, segs.max(1)),
+        Some(v) => {
+            let old=speakers::decode(&v.embedding);
+            let similarity=speakers::cosine(&old,&new);
+            // Re-saving an unchanged name must not give one meeting more weight.
+            if similarity>0.9999 { return Ok(true); }
+            if old.len()!=new.len() || similarity<0.55 {
+                return Err("Name saved, but this voice differs from the remembered voice. Forget the old voice in settings before replacing it.".into());
+            }
+            (speakers::blend_weighted(&old,v.samples.max(1) as u32,&new,segs as u32),v.samples+segs)
+        }
+        None => (new,segs),
     };
     store::save_voiceprint(
         &db,

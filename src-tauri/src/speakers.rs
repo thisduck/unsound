@@ -134,7 +134,7 @@ impl Embedder {
     }
 
     /// Clustering thresholds tuned for this embedding model — pass to
-    /// `SpeakerTracker::with_params` (`cluster_offline` uses them itself).
+    /// `SpeakerTracker::with_params` or `cluster_embeddings_with`.
     pub fn params(&self) -> Params {
         self.params
     }
@@ -198,17 +198,19 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 /// Running average of a stored voiceprint (`existing` built from
 /// `existing_count` meetings) with a new centroid, re-normalized.
+#[cfg(test)]
 pub fn blend(existing: &[f32], existing_count: u32, new: &[f32]) -> Vec<f32> {
+    blend_weighted(existing, existing_count, new, 1)
+}
+
+pub fn blend_weighted(existing: &[f32], existing_count: u32, new: &[f32], new_count: u32) -> Vec<f32> {
     if existing.len() != new.len() || existing_count == 0 {
         return normalize(new.to_vec()).unwrap_or_else(|| new.to_vec());
     }
-    let n = existing_count as f32;
-    let mixed: Vec<f32> = existing
-        .iter()
-        .zip(new)
-        .map(|(e, x)| (e * n + x) / (n + 1.0))
-        .collect();
-    normalize(mixed).unwrap_or_else(|| existing.to_vec())
+    if new_count == 0 { return existing.to_vec(); }
+    let (a,b)=(existing_count as f32,new_count as f32);
+    let mixed: Vec<f32> = existing.iter().zip(new).map(|(e,x)| (e*a+x*b)/(a+b)).collect();
+    normalize(mixed).unwrap_or_else(||existing.to_vec())
 }
 
 /// f32 little-endian blob, for SQLite.
@@ -242,27 +244,21 @@ pub fn match_voiceprint(centroid: &[f32], voiceprints: &[Voiceprint]) -> Option<
 /// the same). Single segments are noisier than centroids, so the tracker
 /// uses `SEGMENT_VOICEPRINT_THRESHOLD` for them.
 pub fn match_voiceprint_at(v: &[f32], voiceprints: &[Voiceprint], threshold: f32) -> Option<String> {
-    let mut best: Option<(&str, f32)> = None;
-    let mut second = f32::MIN;
+    // Score people, not individual enrollment rows: duplicate samples for a
+    // person must never become their own runner-up and suppress a good match.
+    let mut people: std::collections::HashMap<String, (&str,f32)> = std::collections::HashMap::new();
     for vp in voiceprints {
-        let s = cosine(v, &vp.embedding);
-        match best {
-            Some((name, b)) if s > b => {
-                if name != vp.name {
-                    second = second.max(b);
-                }
-                best = Some((&vp.name, s));
-            }
-            Some((name, _)) => {
-                if name != vp.name {
-                    second = second.max(s);
-                }
-            }
-            None => best = Some((&vp.name, s)),
-        }
+        if vp.name.trim().is_empty() || vp.embedding.len()!=v.len() { continue; }
+        let score=cosine(v,&vp.embedding);
+        if !score.is_finite() { continue; }
+        let entry=people.entry(vp.name.trim().to_lowercase()).or_insert((vp.name.trim(),score));
+        if score > entry.1 { *entry=(vp.name.trim(),score); }
     }
-    let (name, score) = best?;
-    (score >= threshold && score - second >= VOICEPRINT_MARGIN).then(|| name.to_string())
+    let mut ranked: Vec<_>=people.values().copied().collect();
+    ranked.sort_by(|a,b|b.1.total_cmp(&a.1));
+    let &(name,score)=ranked.first()?;
+    let second=ranked.get(1).map(|(_,s)|*s).unwrap_or(-1.0);
+    (score>=threshold && score-second>=VOICEPRINT_MARGIN).then(||name.to_string())
 }
 
 // ---- online tracker ----------------------------------------------------------
@@ -640,30 +636,7 @@ fn renumber(clusters: &mut Vec<Cluster>) -> Vec<usize> {
 /// neighbor's key, `None` only when nothing in the meeting could be embedded —
 /// plus `(key, centroid, n_segments, speech_ms)` per cluster. Keys are 0..k
 /// by first appearance.
-pub fn cluster_offline(
-    embedder: &mut Embedder,
-    samples: &[f32],
-    spans: &[(i64, i64)],
-    num_speakers: Option<usize>,
-    voiceprints: &[Voiceprint],
-) -> (Vec<Option<usize>>, Vec<(usize, Vec<f32>, usize, i64)>) {
-    let embeddings: Vec<Option<Vec<f32>>> = spans
-        .iter()
-        .map(|&(s, e)| {
-            let a = ms_to_samples(s).min(samples.len());
-            let b = ms_to_samples(e).min(samples.len());
-            if b > a {
-                embedder.embed(&samples[a..b])
-            } else {
-                None
-            }
-        })
-        .collect();
-    cluster_embeddings_with(&embeddings, spans, num_speakers, voiceprints, embedder.params())
-}
-
-/// The embedding-agnostic half of `cluster_offline` (separate for tests and
-/// for callers that already hold embeddings), with default `Params`.
+/// Cluster precomputed embeddings with the default model thresholds.
 #[cfg(test)]
 pub fn cluster_embeddings(
     embeddings: &[Option<Vec<f32>>],
@@ -909,6 +882,16 @@ mod tests {
             })
             .collect();
         normalize(v).unwrap()
+    }
+
+    #[test]
+    fn repeated_enrollments_are_grouped_by_person_and_weighted_by_samples() {
+        let vps=vec![Voiceprint{name:"Priya".into(),embedding:axis(0)},Voiceprint{name:"priya".into(),embedding:axis(0)},Voiceprint{name:"Sam".into(),embedding:axis(1)}];
+        assert_eq!(match_voiceprint(&axis(0),&vps).unwrap().to_lowercase(),"priya");
+        let mixed=blend_weighted(&axis(0),2,&axis(1),8);
+        assert!(cosine(&mixed,&axis(1))>cosine(&mixed,&axis(0)));
+        let ambiguous=vec![Voiceprint{name:"Priya".into(),embedding:axis(0)},Voiceprint{name:"Sam".into(),embedding:axis(0)}];
+        assert!(match_voiceprint(&axis(0),&ambiguous).is_none());
     }
 
     #[test]

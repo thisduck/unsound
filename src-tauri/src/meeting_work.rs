@@ -16,6 +16,7 @@ pub struct Status {
     pub mic_samples: i64,
     pub system_samples: i64,
     pub pending: i64,
+    pub pending_audio_ms: i64,
     pub recording: bool,
 }
 
@@ -25,6 +26,7 @@ pub struct Job {
     pub speaker: String,
     pub start: i64,
     pub end: i64,
+    pub queued_at_ms: i64,
 }
 
 pub fn begin(
@@ -87,7 +89,8 @@ pub fn statuses(db: &Db) -> Result<Vec<Status>, String> {
     let mut q = conn
         .prepare(
             "SELECT w.meeting_id,w.state,w.error,w.warning,w.mic_samples,w.system_samples,
-        (SELECT COUNT(*) FROM transcription_jobs j WHERE j.meeting_id=w.meeting_id AND done=0)
+        (SELECT COUNT(*) FROM transcription_jobs j WHERE j.meeting_id=w.meeting_id AND done=0),
+        (SELECT COALESCE(SUM(end_sample-start_sample),0)/16 FROM transcription_jobs j WHERE j.meeting_id=w.meeting_id AND done=0)
         FROM meeting_work w ORDER BY w.rowid DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -101,6 +104,7 @@ pub fn statuses(db: &Db) -> Result<Vec<Status>, String> {
                 mic_samples: r.get(4)?,
                 system_samples: r.get(5)?,
                 pending: r.get(6)?,
+                pending_audio_ms: r.get(7)?,
                 recording: false,
             })
         })
@@ -141,8 +145,8 @@ pub fn enqueue(
     let mut pos = start;
     while pos < end {
         let next = (pos + MAX_SAMPLES).min(end);
-        tx.execute("INSERT OR IGNORE INTO transcription_jobs(meeting_id,source,speaker,start_sample,end_sample,done)
-            VALUES (?1,?2,?3,?4,?5,?6)", params![id,source,speaker,pos,next,skipped])
+        tx.execute("INSERT OR IGNORE INTO transcription_jobs(meeting_id,source,speaker,start_sample,end_sample,done,queued_at_ms)
+            VALUES (?1,?2,?3,?4,?5,?6,?7)", params![id,source,speaker,pos,next,skipped,crate::meeting_metrics::unix_ms()])
             .map_err(|e|e.to_string())?;
         pos = next;
     }
@@ -153,7 +157,7 @@ pub fn next(db: &Db, id: &str) -> Result<Option<Job>, String> {
     db.0.lock()
         .unwrap()
         .query_row(
-            "SELECT j.id,j.source,j.speaker,j.start_sample,j.end_sample FROM transcription_jobs j
+            "SELECT j.id,j.source,j.speaker,j.start_sample,j.end_sample,j.queued_at_ms FROM transcription_jobs j
          JOIN meeting_work w ON w.meeting_id=j.meeting_id WHERE j.meeting_id=?1 AND j.done=0
          AND w.state IN ('recording','finishing') ORDER BY j.start_sample,j.id LIMIT 1",
             [id],
@@ -164,6 +168,7 @@ pub fn next(db: &Db, id: &str) -> Result<Option<Job>, String> {
                     speaker: r.get(2)?,
                     start: r.get(3)?,
                     end: r.get(4)?,
+                    queued_at_ms: r.get(5)?,
                 })
             },
         )
@@ -177,7 +182,7 @@ pub fn next_batch(db: &Db, id: &str, batch: bool, gap: i64) -> Result<Vec<Job>, 
     let conn = db.0.lock().unwrap();
     let mut q = conn
         .prepare(
-            "SELECT j.id,j.source,j.speaker,j.start_sample,j.end_sample FROM transcription_jobs j
+            "SELECT j.id,j.source,j.speaker,j.start_sample,j.end_sample,j.queued_at_ms FROM transcription_jobs j
         JOIN meeting_work w ON w.meeting_id=j.meeting_id WHERE j.meeting_id=?1 AND done=0
         AND w.state IN ('recording','finishing') ORDER BY j.start_sample,j.id LIMIT 32",
         )
@@ -190,6 +195,7 @@ pub fn next_batch(db: &Db, id: &str, batch: bool, gap: i64) -> Result<Vec<Job>, 
                 speaker: r.get(2)?,
                 start: r.get(3)?,
                 end: r.get(4)?,
+                    queued_at_ms: r.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?;

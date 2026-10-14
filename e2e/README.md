@@ -165,3 +165,96 @@ Approach informed by Anarlog's [failure-oriented tests](https://github.com/fastr
 and [native configuration](https://github.com/fastrepl/anarlog/blob/4b8e114/e2e/blackbox/wdio.blackbox.conf.ts).
 Driver setup: [CrabNebula](https://docs.crabnebula.dev/plugins/tauri-e2e-tests/) and
 [Tauri WebDriver](https://v2.tauri.app/develop/tests/webdriver/).
+
+## Notes quality and speaker corrections
+
+```sh
+npm run test:meeting-quality
+LLM_MODEL=/path/to/model.gguf cargo test --locked --manifest-path src-tauri/Cargo.toml --lib synthetic_notes_on_a_real_model -- --ignored --nocapture
+```
+
+Extraction uses a grammar whose evidence choices are actual transcript lines.
+Source IDs and quotations are checked again before caching. Notes composition
+cites numbered facts; the app supplies their timestamps. Decisions must refer to
+decision facts, and action items must refer to action facts. Unsupported owners
+and due dates are left blank; an explicit first-person commitment can use its
+speaker as owner. Names are substituted at word boundaries, without changing
+words such as “Meeting.” The composer can remove canceled or duplicate actions.
+These checks establish provenance, not semantic truth. The real-model evaluation
+checks accepted tasks and deadlines, rejects treating speculation as a
+commitment or decision, and removes a task canceled in a later extraction
+window. These synthetic cases passed with Qwen3 4B Instruct Q4_K_M locally.
+An earlier Qwen2.5 3B run missed commitments despite valid evidence. Model
+quality still matters; a passing fixture is not a general accuracy guarantee.
+
+Summary text and generated action items save in one transaction. User-edited and
+completed items survive regeneration. Transcript, note, and speaker changes
+advance a persisted revision. A generation based on an older revision cannot
+commit; the UI marks existing notes as stale. Notes generation waits for pending
+transcription to finish. Validated notes appear after composition completes.
+
+Click a transcript speaker to correct a single utterance or the whole group.
+Corrections use stable identities, retain the original audio source/time, and
+survive automatic speaker re-detection and app restart. Naming a completed
+speaker group pins it too. Remembered voices require at least two usable segments
+and six seconds of speech. Corrected voices are rebuilt from their actual audio,
+not their old cluster. Different people still require a clear similarity margin;
+multiple samples of one person are treated as one identity. Offline re-detection
+reads bounded audio windows instead of loading the full recording.
+
+## Long-meeting performance (macOS)
+
+```sh
+npm run e2e:build
+npm run bench:meeting -- --model /path/to/ggml-model.bin --audio /path/to/speech.wav --minutes 60 --speed 20 --restart
+```
+
+Use a 1–60 second spoken clip smaller than 10 MB and an existing local Whisper
+model. The native runner repeats that clip into **both** audio channels, uses the
+real ASR worker, checkpoints WAVs, and persists transcript jobs/results. It checks
+that both channels retain the exact expected sample count and transcription
+finishes. `--restart` kills the app after capture stops, then measures recovery in
+a new process. It does not require the WebDriver key or microphone permission.
+Do not run another automation-profile app at the same time.
+
+`--speed 20` feeds twenty seconds of audio per capture poll: a 60-minute audio
+workload takes roughly three minutes to feed, plus startup and queue drain.
+**This is an accelerated workload, not a one-hour thermal or hardware soak.**
+Use `--speed 1 --minutes 60` (or 90) for wall-clock pacing. Real device changes,
+sleep/wake, VAD, and real conversational recognition quality need separate checks.
+
+The JSON report defaults to `e2e/artifacts/meeting-benchmark.json`; select another
+path with `--report`. It contains no transcript or note content. Diagnostic logs
+are beside it. The fixture recording and transcript are deleted after success;
+a failed run retains its unique fixture for investigation.
+
+Measurements include:
+
+- Successful batch processing p50/p95/max, including PCM reads, inference, speaker
+  work, and result commit; real-time factor divides that time by processed audio
+  across both channels. Model setup/warmup is measured separately.
+- Queue-to-commit p50/p95/max, beginning when a durable job is enqueued. This is
+  not microphone-to-caption latency; it excludes audio waiting inside VAD.
+- WAV/checkpoint bookkeeping times and peak backlog observed by the supervisor.
+- Capture stop time, drain time, and time from startup recovery scheduling until
+  completion. Recovery counters start fresh in the new process.
+- RSS and CPU samples from `ps` each second, peak sampled RSS, and change from the
+  first sample after 30 seconds. RSS does not include all possible GPU allocations.
+
+The same content-free diagnostics are available through `meeting_performance`.
+Quantiles keep only the latest 512 samples and at most 32 meetings in memory;
+maxima and totals cover each retained meeting in the current process. The JSON
+grammar cache is also bounded because evidence schemas vary by transcript.
+
+The [initial local baseline](benchmarks/2026-10-14-apple-m5-max.json) records
+60 minutes per channel at 20× pacing with Whisper tiny on an Apple M5 Max:
+122 ms stop, 516 ms recovery after process termination, 270 ms batch p95,
+530 ms queue-to-commit p95, and about 371 MiB peak sampled RSS. Both complete
+audio tracks survived, and the restarted worker drained the two remaining jobs.
+Recovery finished before the first RSS sample, so its peak is unknown. Compare
+like workloads and hardware; this run can benefit from cached model files.
+
+The baseline also records the synthetic five-voice speaker evaluation. Automatic
+clustering produced four speakers, with live purity 0.70 and offline purity 0.72.
+This exposes a remaining quality gap. Speaker correction is tested; automatic
+diarization still needs evaluation and tuning on labeled conversational audio.

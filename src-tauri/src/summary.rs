@@ -4,18 +4,17 @@
 //! run through the extraction prompt once and cached with a signature of the
 //! exact text it saw — during the meeting, as soon as a stretch is complete,
 //! so by the time the meeting ends almost everything is already extracted and
-//! only the final compose remains (seconds, not minutes). Working in stretches
-//! also keeps every part of a long meeting in view of a small model and never
-//! overflows its context. Edits, re-detected speakers or a changed transcript
+//! only the final compose remains. Working in stretches reduces extraction
+//! context size. Edits, re-detected speakers or a changed transcript
 //! invalidate only the chunks whose text changed.
 //!
 //! Also here: grounded Q&A over one meeting (reusing a cached context so
 //! follow-ups are instant) and across all meetings (full-text retrieval).
 
 use crate::llm::{self, Gen, Slot};
-use crate::store::{self, ActionItem, Chunk, Db, Meeting, Segment};
-use crate::util::{clock, parse_clock};
-use crate::AppState;
+use crate::store::{self, Chunk, Db, Meeting, Segment};
+use crate::util::clock;
+use crate::{AppState, notes_quality};
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -50,6 +49,7 @@ fn default_label(speaker: &str) -> String {
     if let Some(n) = speaker.strip_prefix("them:").and_then(|n| n.parse::<i32>().ok()) {
         return format!("Speaker {}", n + 1);
     }
+    if speaker.starts_with("manual:") { return format!("Participant {}", speaker.trim_start_matches("manual:")); }
     "Them".into()
 }
 
@@ -61,30 +61,20 @@ pub fn render_line(s: &Segment, names: &HashMap<String, String>) -> String {
 /// Replace default speaker labels in model output with the names set since
 /// ("Speaker 2" → "Priya"), without touching "Speaker 12".
 pub fn apply_names(text: &str, names: &HashMap<String, String>) -> String {
-    let mut out = text.to_string();
-    // Longest labels first so "Speaker 12" is handled before "Speaker 1".
-    let mut pairs: Vec<(String, String)> = names
-        .iter()
+    let mut pairs: Vec<(String, String)> = names.iter()
         .filter(|(_, n)| !n.trim().is_empty())
-        .map(|(k, n)| (default_label(k), n.trim().to_string()))
-        .filter(|(label, _)| label != "Them")
-        .collect();
-    pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-    for (label, name) in pairs {
-        let mut result = String::with_capacity(out.len());
-        let mut rest = out.as_str();
-        while let Some(i) = rest.find(&label) {
-            let after = rest[i + label.len()..].chars().next();
-            result.push_str(&rest[..i]);
-            if after.is_some_and(|c| c.is_ascii_digit()) {
-                result.push_str(&label);
-            } else {
-                result.push_str(&name);
-            }
-            rest = &rest[i + label.len()..];
-        }
-        result.push_str(rest);
-        out = result;
+        .map(|(k,n)| (default_label(k), n.trim().to_string()))
+        .filter(|(label,_)| label != "Them").collect();
+    pairs.sort_by(|a,b| b.0.len().cmp(&a.0.len()));
+    let mut out = String::new();
+    let mut pos = 0;
+    while pos < text.len() {
+        let before = text[..pos].chars().next_back();
+        let matched = pairs.iter().find(|(label,_)| text[pos..].starts_with(label)
+            && !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && !text[pos+label.len()..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_'));
+        if let Some((label,name)) = matched { out.push_str(name); pos += label.len(); }
+        else { let c = text[pos..].chars().next().unwrap(); out.push(c); pos += c.len_utf8(); }
     }
     out
 }
@@ -102,13 +92,13 @@ fn plan(segments: &[Segment]) -> BTreeMap<i64, Vec<&Segment>> {
 /// afterwards, so renaming someone doesn't force re-extraction).
 fn chunk_text(segs: &[&Segment]) -> String {
     let none = HashMap::new();
-    segs.iter().map(|s| render_line(s, &none)).collect::<Vec<_>>().join("\n")
+    segs.iter().map(|s| format!("[S{}] {}", s.id, render_line(s, &none))).collect::<Vec<_>>().join("\n")
 }
 
 fn signature(model_path: &Path, text: &str) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     model_path.to_string_lossy().hash(&mut h);
-    llm::MEETING_EXTRACT_PROMPT.hash(&mut h);
+    notes_quality::PROMPT.hash(&mut h);
     text.hash(&mut h);
     format!("{:016x}", h.finish())
 }
@@ -151,7 +141,7 @@ pub fn ensure_chunks(
                 out.push(c);
                 continue;
             }
-            extract(app, model_path, start, end, &text)?
+            extract(app, model_path, segs)?
         };
         let chunk = Chunk {
             idx: *idx,
@@ -175,113 +165,64 @@ pub fn ensure_chunks(
     Ok(out)
 }
 
-fn extract(app: &AppHandle, model_path: &Path, start: i64, end: i64, text: &str) -> Result<String, String> {
-    extract_with(&app.state::<AppState>().llm, model_path, start, end, text)
+fn extract(app: &AppHandle, model_path: &Path, segments: &[&Segment]) -> Result<String, String> {
+    extract_with(&app.state::<AppState>().llm, model_path, segments)
 }
 
-fn extract_with(llm_state: &llm::LlmState, model_path: &Path, start: i64, end: i64, text: &str) -> Result<String, String> {
+fn extract_with(llm_state: &llm::LlmState, model_path: &Path, segments: &[&Segment]) -> Result<String, String> {
     let messages = [
-        ("system", llm::MEETING_EXTRACT_PROMPT.to_string()),
-        (
-            "user",
-            format!("Excerpt ({}–{}):\n\n{text}", clock(start), clock(end)),
-        ),
+        ("system", notes_quality::PROMPT.to_string()),
+        ("user", chunk_text(segments)),
     ];
-    let gen = Gen {
-        max_tokens: 1200,
-        ..Default::default()
-    };
-    let facts = llm::chat(llm_state, model_path, &messages, &gen, None, &mut |_| {})?;
-    Ok(facts.trim().to_string())
+    let mut messages=messages.to_vec();
+    for attempt in 0..2 {
+        let value=llm::chat_json(llm_state, model_path, &messages, &notes_quality::schema(segments), 4000)?;
+        match notes_quality::validate(value.clone(),segments) {
+            Ok(facts)=>return serde_json::to_string(&facts).map_err(|e|e.to_string()),
+            Err(error) if attempt==0 => {
+                messages.push(("assistant",value.to_string()));
+                messages.push(("user",format!("Evidence validation failed: {error} Return a corrected complete object. Copy exact contiguous words from each cited source; do not paraphrase inside quotations. Remove facts you cannot support.")));
+            }
+            Err(error)=>return Err(error),
+        }
+    }
+    unreachable!()
 }
 
 fn is_empty_facts(facts: &str) -> bool {
-    let t = facts.trim();
-    t.is_empty() || t.contains("(nothing substantive)") && t.lines().count() <= 1
-}
-
-/// Everything compose and the action-item pass need, as prompt text.
-fn material(meeting: &Meeting, chunks: &[Chunk]) -> String {
-    let names = &meeting.speaker_names;
-    let mut m = String::new();
-    if !meeting.title.trim().is_empty() {
-        m.push_str(&format!("Meeting: {}\n", meeting.title.trim()));
-    }
-    if !meeting.attendees.is_empty() {
-        m.push_str(&format!("Invited: {}\n", meeting.attendees.join(", ")));
-    }
-    let named: Vec<String> = names
-        .iter()
-        .filter(|(_, n)| !n.trim().is_empty())
-        .map(|(k, n)| format!("{} is {}", default_label(k), n.trim()))
-        .collect();
-    if !named.is_empty() {
-        m.push_str(&format!("Speakers: {}\n", named.join("; ")));
-    }
-    if !meeting.notes.trim().is_empty() {
-        m.push_str(&format!("\nMy own notes:\n{}\n", meeting.notes.trim()));
-    }
-    if !meeting.marks.is_empty() {
-        m.push_str("\nMoments I flagged as important:\n");
-        for mark in &meeting.marks {
-            let label = if mark.label.trim().is_empty() { "(flagged)" } else { mark.label.trim() };
-            m.push_str(&format!("- ({}) {label}\n", clock(mark.at_ms)));
-        }
-    }
-    m.push_str("\nExtracted points:\n");
-    for c in chunks.iter().filter(|c| !is_empty_facts(&c.facts)) {
-        m.push_str(&format!(
-            "\n### {}–{}\n{}\n",
-            clock(c.start_ms),
-            clock(c.end_ms),
-            apply_names(&c.facts, names)
-        ));
-    }
-    m
+    notes_quality::decode(facts).facts.is_empty()
 }
 
 /// Summarize a meeting: bring extractions up to date (usually just the last
-/// stretch), compose the notes (streamed on `meeting-summary-token`), extract
-/// structured action items, and title an untitled meeting. Persists all of it.
+/// stretch), compose and validate notes and action items, then save them together.
+/// Publishes validated text on `meeting-summary-token` and titles untitled meetings.
 pub fn summarize(app: &AppHandle, meeting_id: &str, model_path: &Path) -> Result<String, String> {
     let db = app.state::<Db>();
+    if crate::meeting_work::statuses(&db)?.iter().any(|w| w.meeting_id==meeting_id && (w.pending>0 || w.state=="recording")) {
+        return Err("The transcript is still incomplete. Finish or retry saved audio before writing notes.".into());
+    }
+    let before=store::get_meeting(&db,meeting_id)?.ok_or("meeting not found")?.content_revision;
     let chunks = ensure_chunks(app, meeting_id, model_path, None)?;
     let meeting = store::get_meeting(&db, meeting_id)?.ok_or("meeting not found")?;
+    if meeting.content_revision!=before { return Err("The transcript, speakers, or notes changed during extraction. Generate notes again.".into()); }
     if chunks.iter().all(|c| is_empty_facts(&c.facts)) && meeting.notes.trim().is_empty() {
-        store::set_meeting_summary(&db, meeting_id, "")?;
+        store::save_generated_notes(&db, meeting_id, "", &[],Some(meeting.content_revision))?;
         return Ok(String::new());
     }
-    let material = material(&meeting, &chunks);
+    let facts=notes_quality::Facts { facts:chunks.iter().flat_map(|c|notes_quality::decode(&c.facts).facts).collect() };
     let st = app.state::<AppState>();
     let _turn = LLM_TURN.lock().unwrap_or_else(|p| p.into_inner());
-
-    let messages = [
-        ("system", llm::MEETING_SUMMARY_PROMPT.to_string()),
-        ("user", material.clone()),
-    ];
-    let emitter = app.clone();
-    let summary = llm::chat(
-        &st.llm,
-        model_path,
-        &messages,
-        &Gen::default(),
-        None,
-        &mut |t| {
-            let _ = emitter.emit("meeting-summary-token", t);
-        },
-    )?;
-    store::set_meeting_summary(&db, meeting_id, &summary)?;
-
-    // Structured follow-ups (grammar-constrained, so always well-formed),
-    // from just the commitments the extraction tagged — a short, focused
-    // input is faster and keeps small models from losing them in a long one.
-    let commitments = commitments_material(&meeting, &chunks).unwrap_or_else(|| material.clone());
-    match action_items(app, model_path, &commitments) {
-        Ok(items) => {
-            store::replace_auto_action_items(&db, meeting_id, &items)?;
-        }
-        Err(e) => eprintln!("[summary] action items failed: {e}"),
-    }
+    let (summary,items)=if facts.facts.is_empty() {
+        (format!("## Your notes\n\n{}",meeting.notes.trim()),Vec::new())
+    } else {
+        let messages=[("system",notes_quality::COMPOSE_PROMPT.to_string()),("user",notes_quality::compose_material(&facts,&meeting))];
+        let value=llm::chat_json(&st.llm,model_path,&messages,&notes_quality::compose_schema(&facts),3500)?;
+        notes_quality::compose(value,&facts,&meeting)?
+    };
+    // Publish only after all references have been checked; incomplete JSON or
+    // invalid model evidence must never replace previously saved notes.
+    store::save_generated_notes(&db,meeting_id,&summary,&items,Some(meeting.content_revision))?;
+    let _=app.emit("meeting-summary-token",&summary);
 
     if meeting.title.trim().is_empty() {
         let messages = [
@@ -300,81 +241,6 @@ pub fn summarize(app: &AppHandle, meeting_id: &str, model_path: &Path) -> Result
         }
     }
     Ok(summary)
-}
-
-/// The meeting header, the user's notes, and every fact line tagged
-/// "Action:"; `None` when no chunk has tagged lines (extracted before tags).
-fn commitments_material(meeting: &Meeting, chunks: &[Chunk]) -> Option<String> {
-    let lines: Vec<String> = chunks
-        .iter()
-        .flat_map(|c| c.facts.lines())
-        .filter(|l| l.to_lowercase().contains("action:"))
-        .map(|l| apply_names(l.trim(), &meeting.speaker_names))
-        .collect();
-    let tagged_any = chunks.iter().any(|c| c.facts.to_lowercase().contains("action:"));
-    if !tagged_any && meeting.notes.trim().is_empty() {
-        return None;
-    }
-    let mut m = String::new();
-    let named: Vec<String> = meeting
-        .speaker_names
-        .iter()
-        .filter(|(_, n)| !n.trim().is_empty())
-        .map(|(k, n)| format!("{} is {}", default_label(k), n.trim()))
-        .collect();
-    if !named.is_empty() {
-        m.push_str(&format!("Speakers: {}\n", named.join("; ")));
-    }
-    if !meeting.notes.trim().is_empty() {
-        m.push_str(&format!("\nMy own notes:\n{}\n", meeting.notes.trim()));
-    }
-    m.push_str("\nCommitments from the meeting:\n");
-    if lines.is_empty() {
-        m.push_str("(none tagged)\n");
-    }
-    for l in lines {
-        m.push_str(&l);
-        m.push('\n');
-    }
-    Some(m)
-}
-
-fn action_items(app: &AppHandle, model_path: &Path, material: &str) -> Result<Vec<ActionItem>, String> {
-    action_items_with(&app.state::<AppState>().llm, model_path, material)
-}
-
-fn action_items_with(llm_state: &llm::LlmState, model_path: &Path, material: &str) -> Result<Vec<ActionItem>, String> {
-    let messages = [
-        ("system", llm::MEETING_ACTIONS_PROMPT.to_string()),
-        ("user", material.to_string()),
-    ];
-    let v = llm::chat_json(llm_state, model_path, &messages, &llm::actions_schema(), 2000)?;
-    Ok(parse_action_items(&v))
-}
-
-pub fn parse_action_items(v: &serde_json::Value) -> Vec<ActionItem> {
-    let s = |x: &serde_json::Value, k: &str| x[k].as_str().unwrap_or("").trim().to_string();
-    v["items"]
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter(|it| !s(it, "task").is_empty())
-                .map(|it| ActionItem {
-                    id: 0,
-                    meeting_id: None,
-                    text: s(it, "task"),
-                    owner: s(it, "owner"),
-                    due: s(it, "due"),
-                    at_ms: parse_clock(s(it, "at").trim_matches(['(', ')'])),
-                    done: false,
-                    manual: false,
-                    created_at: String::new(),
-                    meeting_title: String::new(),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 // ---- Q&A --------------------------------------------------------------------
@@ -439,7 +305,7 @@ pub fn ask(app: &AppHandle, meeting_id: &str, model_path: &Path, question: &str)
                     "### {}–{}\n{}\n",
                     clock(c.start_ms),
                     clock(c.end_ms),
-                    apply_names(&c.facts, names)
+                    notes_quality::render(&notes_quality::decode(&c.facts), &meeting.segments, names)
                 ));
             }
         }
@@ -588,6 +454,12 @@ mod tests {
     }
 
     #[test]
+    fn names_do_not_replace_word_fragments_or_rewrite_other_names() {
+        let names=HashMap::from([("me".into(),"Adnan".into()),("them:0".into(),"Speaker 2".into()),("them:1".into(),"Priya".into())]);
+        assert_eq!(apply_names("Meeting: Me met Speaker 1 and Speaker 2. Somewhere else.",&names),"Meeting: Adnan met Speaker 2 and Priya. Somewhere else.");
+    }
+
+    #[test]
     fn keywords_drop_filler() {
         assert_eq!(keywords("What did we decide about the Q3 pricing?"), "decide q3 pricing");
     }
@@ -635,8 +507,7 @@ mod tests {
         names.insert("them:0".to_string(), "Priya".to_string());
         names.insert("them:1".to_string(), "Marcus".to_string());
         let t = std::time::Instant::now();
-        let text = chunk_text(&plan(&segs)[&0]);
-        let facts = extract_with(&state, &model, 0, CHUNK_MS, &text).unwrap();
+        let facts = extract_with(&state, &model, &plan(&segs)[&0]).unwrap();
         println!("--- facts ({:.1}s)\n{facts}", t.elapsed().as_secs_f32());
         let meeting = Meeting {
             id: "x".into(),
@@ -644,6 +515,7 @@ mod tests {
             started_at: String::new(),
             ended_at: None,
             summary: String::new(),
+            content_revision:0, summary_stale:false,
             notes: "- safari logout bug\n- enterprise pricing?".into(),
             stt_model: String::new(),
             llm_model: String::new(),
@@ -656,146 +528,32 @@ mod tests {
             action_items: vec![],
             has_audio: false,
         };
-        let chunk = Chunk { idx: 0, start_ms: 0, end_ms: CHUNK_MS, signature: String::new(), facts };
-        let material = material(&meeting, &[chunk]);
-        let t = std::time::Instant::now();
-        let summary = llm::chat(
-            &state,
-            &model,
-            &[("system", llm::MEETING_SUMMARY_PROMPT.to_string()), ("user", material.clone())],
-            &Gen::default(),
-            None,
-            &mut |_| {},
-        )
-        .unwrap();
-        println!("--- summary ({:.1}s)\n{summary}", t.elapsed().as_secs_f32());
-        let t = std::time::Instant::now();
-        let commitments = commitments_material(&meeting, &[Chunk { idx: 0, start_ms: 0, end_ms: CHUNK_MS, signature: String::new(), facts: material.clone() }])
-            .unwrap_or_else(|| material.clone());
-        let items = action_items_with(&state, &model, &commitments).unwrap();
-        println!("--- action items ({:.1}s)", t.elapsed().as_secs_f32());
-        for i in &items {
-            println!("[ ] {} — owner: {:?}, due: {:?}, at: {:?}", i.text, i.owner, i.due, i.at_ms.map(clock));
-        }
-        assert!(!items.is_empty());
-        assert!(summary.contains("##"));
+        let facts=notes_quality::decode(&facts);
+        let value=llm::chat_json(&state,&model,&[("system",notes_quality::COMPOSE_PROMPT.to_string()),("user",notes_quality::compose_material(&facts,&meeting))],&notes_quality::compose_schema(&facts),3500).unwrap();
+        let (summary,items)=notes_quality::compose(value,&facts,&meeting).unwrap();
+        println!("--- summary\n{summary}");
+        assert!(summary.contains("Safari") || summary.contains("login"));
+        assert!(items.iter().any(|i|i.owner=="Marcus" && i.due.contains("Thursday")),"accepted fix and deadline must survive: {:?}",serde_json::to_value(&items));
+        assert!(items.iter().any(|i|i.owner=="Priya" && i.due.contains("Monday")),"accepted analysis request must survive");
+        assert!(items.iter().all(|i|i.at_ms.is_some_and(|at|meeting.segments.iter().any(|s|s.start_ms==at))));
+        // The same real model must not promote speculation into a commitment.
+        let speculative=vec![seg(0,"me","Maybe we could move the launch to Friday, but this is only an idea. Nobody is assigned and there is no decision or deadline today.")];
+        let facts=notes_quality::decode(&extract_with(&state,&model,&speculative.iter().collect::<Vec<_>>()).unwrap());
+        assert!(facts.facts.iter().all(|f|f.kind!="action" && f.kind!="decision"),"speculation became a decision or action");
+        // Simulate separate extraction windows: a later cancellation must remove
+        // an earlier commitment from the final follow-up list.
+        let mut canceled:Meeting=serde_json::from_value(serde_json::json!({"id":"cancel","startedAt":"2026-10-14","segments":[
+            {"id":1,"speaker":"me","startMs":0,"text":"I will send the draft tomorrow."},
+            {"id":2,"speaker":"me","startMs":600000,"text":"Cancel my plan to send the draft. We no longer need it; do not send it."}]})).unwrap();
+        canceled.notes=String::new();
+        let facts=notes_quality::Facts{facts:vec![
+            notes_quality::Fact{kind:"action".into(),text:"Send the draft tomorrow".into(),owner:"Me".into(),due:"tomorrow".into(),evidence:vec![notes_quality::Evidence{segment_id:1,quote:canceled.segments[0].text.clone()}]},
+            notes_quality::Fact{kind:"decision".into(),text:"The earlier plan to send the draft is canceled; do not send it".into(),owner:String::new(),due:String::new(),evidence:vec![notes_quality::Evidence{segment_id:2,quote:canceled.segments[1].text.clone()}]}
+        ]};
+        let value=llm::chat_json(&state,&model,&[("system",notes_quality::COMPOSE_PROMPT.to_string()),("user",notes_quality::compose_material(&facts,&canceled))],&notes_quality::compose_schema(&facts),2000).unwrap();
+        let (_,items)=notes_quality::compose(value,&facts,&canceled).unwrap();
+        assert!(items.is_empty(),"canceled commitment survived composition");
     }
 
-    /// Before/after timing on a real recorded meeting — numbers only, no
-    /// content printed. `MEETING_DB=/copy/of/unsound.db MEETING_ID=… LLM_MODEL=…`
-    #[test]
-    #[ignore]
-    fn real_meeting_timing() {
-        let model = std::path::PathBuf::from(std::env::var("LLM_MODEL").expect("set LLM_MODEL"));
-        let db = rusqlite::Connection::open(std::env::var("MEETING_DB").expect("set MEETING_DB")).unwrap();
-        let id = std::env::var("MEETING_ID").expect("set MEETING_ID");
-        let mut stmt = db
-            .prepare("SELECT id, speaker, source, start_ms, end_ms, text FROM segments WHERE meeting_id = ?1 ORDER BY start_ms, id")
-            .unwrap();
-        let segs: Vec<Segment> = stmt
-            .query_map([&id], |r| {
-                Ok(Segment { id: r.get(0)?, speaker: r.get(1)?, source: r.get(2)?, start_ms: r.get(3)?, end_ms: r.get(4)?, text: r.get(5)? })
-            })
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        let state = llm::LlmState::default();
-        let none = HashMap::new();
-        state_warm(&state, &model);
 
-        // Old: one pass over the whole transcript, then compose — all after stop.
-        let transcript: String = segs.iter().map(|s| format!("{}: {}\n", speaker_label(&s.speaker, &none), s.text)).collect();
-        let t = std::time::Instant::now();
-        let old_facts = llm::chat(
-            &state,
-            &model,
-            &[("system", llm::MEETING_EXTRACT_PROMPT.to_string()), ("user", format!("Transcript:\n\n{transcript}"))],
-            &Gen::default(),
-            None,
-            &mut |_| {},
-        )
-        .unwrap();
-        let old_extract = t.elapsed().as_secs_f32();
-        let t = std::time::Instant::now();
-        let _ = llm::chat(
-            &state,
-            &model,
-            &[("system", llm::MEETING_SUMMARY_PROMPT.to_string()), ("user", format!("Extracted points:\n\n{old_facts}"))],
-            &Gen::default(),
-            None,
-            &mut |_| {},
-        )
-        .unwrap();
-        let old_compose = t.elapsed().as_secs_f32();
-        println!("OLD after-stop: extract {old_extract:.1}s + compose {old_compose:.1}s = {:.1}s ({} fact lines from {} transcript tokens)",
-            old_extract + old_compose, old_facts.lines().count(), llm::count_text_tokens(&state, &model, &transcript).unwrap());
-
-        // New: per-stretch extraction (during the meeting), compose at stop.
-        let planned = plan(&segs);
-        let mut chunks = Vec::new();
-        let t = std::time::Instant::now();
-        let mut per = Vec::new();
-        for (idx, ss) in &planned {
-            let tc = std::time::Instant::now();
-            let facts = extract_with(&state, &model, idx * CHUNK_MS, (idx + 1) * CHUNK_MS, &chunk_text(ss)).unwrap();
-            per.push(tc.elapsed().as_secs_f32());
-            chunks.push(Chunk { idx: *idx, start_ms: idx * CHUNK_MS, end_ms: (idx + 1) * CHUNK_MS, signature: String::new(), facts });
-        }
-        let live = t.elapsed().as_secs_f32();
-        let meeting = Meeting {
-            id,
-            title: String::new(),
-            started_at: String::new(),
-            ended_at: None,
-            summary: String::new(),
-            notes: String::new(),
-            stt_model: String::new(),
-            llm_model: String::new(),
-            lang: None,
-            segments: vec![],
-            segment_count: 0,
-            speaker_names: none.clone(),
-            attendees: vec![],
-            marks: vec![],
-            action_items: vec![],
-            has_audio: false,
-        };
-        let material = material(&meeting, &chunks);
-        let last = per.last().copied().unwrap_or(0.0);
-        let t = std::time::Instant::now();
-        let summary = llm::chat(&state, &model, &[("system", llm::MEETING_SUMMARY_PROMPT.to_string()), ("user", material.clone())], &Gen::default(), None, &mut |_| {}).unwrap();
-        let compose = t.elapsed().as_secs_f32();
-        let lines: Vec<&str> = summary.lines().filter(|l| !l.trim().is_empty()).collect();
-        let unique: std::collections::HashSet<&str> = lines.iter().map(|l| l.trim()).collect();
-        println!("NEW summary: {} tokens, {} lines ({} unique), {} bullets",
-            llm::count_text_tokens(&state, &model, &summary).unwrap(), lines.len(), unique.len(),
-            lines.iter().filter(|l| l.trim_start().starts_with(['*', '-'])).count());
-        let t = std::time::Instant::now();
-        let commitments = commitments_material(&meeting, &chunks).unwrap_or_else(|| material.clone());
-        let items = action_items_with(&state, &model, &commitments).unwrap();
-        let actions = t.elapsed().as_secs_f32();
-        let distinct: std::collections::HashSet<String> = items.iter().map(|i| i.text.to_lowercase()).collect();
-        println!("NEW items: {} ({} distinct texts), commitments input {} tokens",
-            items.len(), distinct.len(), llm::count_text_tokens(&state, &model, &commitments).unwrap());
-        let fact_lines: usize = chunks.iter().map(|c| c.facts.lines().count()).sum();
-        println!("NEW during meeting: {} stretches, {live:.1}s total ({:.1}s max each)", chunks.len(), per.iter().cloned().fold(0.0, f32::max));
-        println!("NEW after-stop: last stretch {last:.1}s + compose {compose:.1}s + action items {actions:.1}s = {:.1}s ({fact_lines} fact lines, {} action items, material {} tokens)",
-            last + compose + actions, items.len(), llm::count_text_tokens(&state, &model, &material).unwrap());
-    }
-
-    fn state_warm(state: &llm::LlmState, model: &Path) {
-        let _ = llm::chat(state, model, &[("user", "Say OK.".to_string())], &Gen { max_tokens: 4, ..Default::default() }, None, &mut |_| {});
-    }
-
-    #[test]
-    fn parses_action_items() {
-        let v = serde_json::json!({"items": [
-            {"task": "Send the deck", "owner": "Me", "due": "Friday", "at": "(12:34)"},
-            {"task": "  ", "owner": "", "due": "", "at": ""}
-        ]});
-        let items = parse_action_items(&v);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].at_ms, Some(754_000));
-        assert_eq!(items[0].owner, "Me");
-    }
 }

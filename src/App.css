@@ -2511,3 +2511,7 @@ span.dim {
 .engine-pick .row-desc {
   margin-left: 22px;
 }
+
+.speaker-correction { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 0; }
+.speaker-correction label { display: flex; gap: 5px; align-items: center; }
+.speaker-correction input:not([type="checkbox"]), .speaker-correction select { max-width: 240px; }

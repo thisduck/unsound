@@ -185,6 +185,7 @@ export interface Meeting {
   startedAt: string;
   endedAt?: string | null;
   summary: string;
+  summaryStale?: boolean;
   notes: string;
   sttModel: string;
   llmModel: string;
@@ -346,6 +347,8 @@ export const api = {
     invoke<void>("update_meeting_notes", { id, notes }),
   setSpeakerName: (meetingId: string, speaker: string, name: string, remember = true) =>
     invoke<boolean>("set_speaker_name", { meetingId, speaker, name, remember }),
+  correctMeetingSpeaker: (meetingId: string, segmentId: number, target: string | null, name: string | null, wholeGroup = false) =>
+    invoke<Meeting>("correct_meeting_speaker", { meetingId, segmentId, target, name, wholeGroup }),
   setMeetingSummary: (id: string, summary: string) =>
     invoke<void>("set_meeting_summary", { id, summary }),
   updateSegmentText: (segmentId: number, text: string) =>

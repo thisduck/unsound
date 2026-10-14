@@ -140,6 +140,7 @@ fn run(app: &AppHandle, case: &str, base: &str) -> Result {
         "invalid isolated scenario",
     )?;
     match case {
+        "soak" | "soak-recover" => return crate::meeting_bench::run(app,case,base),
         "failures" => {
             let id = format!("{base}-stall");
             create(app, &id)?;

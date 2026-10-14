@@ -83,17 +83,19 @@ sys ─┘   + Silero VAD       │    lifted into the assistant)            │
                             └─▶ voice embeddings ─▶ live speaker labels │
                                                                         ▼
         every 5 minutes, while you talk:  extract grounded points (LLM) │
-        at stop:  compose notes (streamed) → action items → title  ◀────┘
+        after transcription: compose → validate → save notes + actions ◀┘
 ```
 
 - **Audio** from both channels streams to `meeting-audio/<id>.wav` and
   `<id>.mic.wav` as it's captured, on one clock (the mic's); system audio is
   placed by its buffer timestamps so silent stretches don't drift it.
 - **Speakers** are clustered live from CAM++ voice embeddings; tiny phantom
-  clusters are merged at the end, and naming someone remembers their voice.
+  clusters are merged at the end. Correct individual utterances or whole groups;
+  corrections survive re-detection. Clear speech samples can be remembered.
 - **Notes** are extracted per five-minute stretch during the meeting and
   cached by the exact text they came from, so edits and renames only redo
-  what changed; the final compose starts streaming seconds after you stop.
+  what changed. Notes and action items cite transcript sources and save together
+  after validation. Later edits mark the notes as needing regeneration.
 - **The assistant** turns a request into a task: plan (what, when, about which
   part of the meeting) → draft (grammar-constrained JSON, so drafts are always
   well-formed) → your approval → run. Only your mic can give requests, and the

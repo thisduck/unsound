@@ -13,10 +13,13 @@ mod hotkeys;
 mod llm;
 mod meeting;
 mod meeting_work;
+mod meeting_metrics;
 #[cfg(any(test, feature = "automation"))]
 mod meeting_fixture;
 #[cfg(feature = "automation")]
 mod meeting_fixture_runner;
+#[cfg(feature="automation")]
+mod meeting_bench;
 mod models;
 mod permissions;
 #[allow(dead_code)]
@@ -26,6 +29,7 @@ mod speakers;
 mod store;
 mod stt;
 mod summary;
+mod notes_quality;
 #[cfg(target_os = "macos")]
 mod syscapture;
 #[allow(dead_code)]
@@ -510,19 +514,38 @@ fn update_meeting_notes(db: State<Db>, id: String, notes: String) -> Result<(), 
 /// saved too, so future meetings label them automatically. Returns whether a
 /// voice was remembered.
 #[tauri::command]
-fn set_speaker_name(
+async fn set_speaker_name(
     app: AppHandle,
-    db: State<Db>,
     meeting_id: String,
     speaker: String,
     name: String,
     remember: Option<bool>,
 ) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+    let db=app.state::<Db>();
+    let mut speaker=speaker;
+    if !name.trim().is_empty() && !speaker.starts_with("manual:") && meeting::active_meeting(&app).as_deref()!=Some(&meeting_id) {
+        let m=store::get_meeting(&db,&meeting_id)?.ok_or("meeting not found")?;
+        if let Some(seg)=m.segments.iter().find(|s|s.speaker==speaker) {
+            speaker=store::correct_speaker(&db,&meeting_id,seg.id,None,&name,true)?;
+        }
+    }
     store::set_speaker_name(&db, &meeting_id, &speaker, &name)?;
-    if remember.unwrap_or(true) && !name.trim().is_empty() && speaker.starts_with("them") {
+    if remember.unwrap_or(true) && !name.trim().is_empty() && (speaker.starts_with("them") || speaker.starts_with("manual:")) {
         return meeting::remember_voice(&app, &meeting_id, &speaker, name.trim());
     }
     Ok(false)
+    }).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
+fn correct_meeting_speaker(app: AppHandle, meeting_id: String, segment_id: i64, target: Option<String>, name: Option<String>, whole_group: bool) -> Result<Meeting, String> {
+    if meeting::active_meeting(&app).as_deref() == Some(&meeting_id) {
+        return Err("Stop recording before correcting speaker assignments.".into());
+    }
+    let db=app.state::<Db>();
+    store::correct_speaker(&db,&meeting_id,segment_id,target.as_deref(),name.as_deref().unwrap_or(""),whole_group)?;
+    full_meeting(&app,&db,&meeting_id)
 }
 
 #[tauri::command]
@@ -677,6 +700,11 @@ async fn meeting_stop(app: AppHandle) -> Result<Option<Meeting>, String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn meeting_performance(app:AppHandle,id:String)->Option<meeting_metrics::Report> {
+    app.state::<AppState>().meeting.metrics.report(&id)
 }
 
 #[tauri::command]
@@ -1393,6 +1421,7 @@ pub fn run() {
             create_meeting,
             update_meeting_notes,
             set_speaker_name,
+            correct_meeting_speaker,
             set_meeting_summary,
             update_segment_text,
             replace_in_meeting,
@@ -1407,6 +1436,7 @@ pub fn run() {
             meeting_start,
             meeting_stop,
             meeting_work_status,
+            meeting_performance,
             meeting_pause,
             meeting_retry,
             diarize_meeting,

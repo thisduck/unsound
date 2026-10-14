@@ -79,6 +79,10 @@ pub struct Meeting {
     #[serde(default)]
     pub summary: String,
     #[serde(default)]
+    pub content_revision: i64,
+    #[serde(default)]
+    pub summary_stale: bool,
+    #[serde(default)]
     pub notes: String,
     #[serde(default)]
     pub stt_model: String,
@@ -432,6 +436,32 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 start_ms INTEGER NOT NULL, end_ms INTEGER, PRIMARY KEY(meeting_id,start_ms));
             PRAGMA user_version=4; COMMIT;")?;
     }
+    if version < 5 {
+        conn.execute_batch("BEGIN; ALTER TABLE transcription_jobs ADD COLUMN queued_at_ms INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=5; COMMIT;")?;
+    }
+
+    if version < 6 {
+        conn.execute_batch("BEGIN;
+            ALTER TABLE meetings ADD COLUMN content_revision INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE meetings ADD COLUMN summary_revision INTEGER NOT NULL DEFAULT 0;
+            CREATE TRIGGER notes_revision AFTER UPDATE OF notes ON meetings WHEN OLD.notes IS NOT NEW.notes BEGIN
+                UPDATE meetings SET content_revision=content_revision+1 WHERE id=NEW.id; END;
+            CREATE TRIGGER segment_revision_insert AFTER INSERT ON segments BEGIN
+                UPDATE meetings SET content_revision=content_revision+1 WHERE id=NEW.meeting_id; END;
+            CREATE TRIGGER segment_revision_update AFTER UPDATE OF text,speaker,start_ms,end_ms ON segments
+                WHEN OLD.text IS NOT NEW.text OR OLD.speaker IS NOT NEW.speaker OR OLD.start_ms IS NOT NEW.start_ms OR OLD.end_ms IS NOT NEW.end_ms BEGIN
+                UPDATE meetings SET content_revision=content_revision+1 WHERE id=NEW.meeting_id; END;
+            CREATE TRIGGER segment_revision_delete AFTER DELETE ON segments BEGIN
+                UPDATE meetings SET content_revision=content_revision+1 WHERE id=OLD.meeting_id; END;
+            CREATE TRIGGER speaker_revision_insert AFTER INSERT ON speaker_names BEGIN
+                UPDATE meetings SET content_revision=content_revision+1 WHERE id=NEW.meeting_id; END;
+            CREATE TRIGGER speaker_revision_update AFTER UPDATE OF name ON speaker_names WHEN OLD.name IS NOT NEW.name BEGIN
+                UPDATE meetings SET content_revision=content_revision+1 WHERE id=NEW.meeting_id; END;
+            CREATE TRIGGER speaker_revision_delete AFTER DELETE ON speaker_names BEGIN
+                UPDATE meetings SET content_revision=content_revision+1 WHERE id=OLD.meeting_id; END;
+            PRAGMA user_version=6; COMMIT;")?;
+    }
+
     Ok(())
 }
 
@@ -607,7 +637,7 @@ pub fn update_meeting_notes(db: &Db, id: &str, notes: &str) -> Result<(), String
 pub fn set_meeting_summary(db: &Db, id: &str, summary: &str) -> Result<(), String> {
     let conn = db.0.lock().unwrap();
     conn.execute(
-        "UPDATE meetings SET summary = ?2 WHERE id = ?1",
+        "UPDATE meetings SET summary = ?2, content_revision=content_revision+1, summary_revision=content_revision+1 WHERE id = ?1",
         params![id, summary],
     )
     .map_err(|e| e.to_string())?;
@@ -640,7 +670,7 @@ pub fn list_meetings(db: &Db) -> Result<Vec<Meeting>, String> {
             "SELECT m.id, m.title, m.started_at, m.ended_at, m.summary, m.notes,
                     m.stt_model, m.llm_model, m.lang,
                     (SELECT COUNT(*) FROM segments s WHERE s.meeting_id = m.id),
-                    m.attendees
+                    m.attendees, m.content_revision, m.summary_revision
              FROM meetings m ORDER BY m.started_at DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -652,6 +682,8 @@ pub fn list_meetings(db: &Db) -> Result<Vec<Meeting>, String> {
                 started_at: r.get(2)?,
                 ended_at: r.get(3)?,
                 summary: r.get(4)?,
+                content_revision: r.get(11)?,
+                summary_stale: r.get::<_, i64>(11)? != r.get::<_, i64>(12)?,
                 notes: r.get(5)?,
                 stt_model: r.get(6)?,
                 llm_model: r.get(7)?,
@@ -676,7 +708,7 @@ pub fn get_meeting(db: &Db, id: &str) -> Result<Option<Meeting>, String> {
     let mut meeting = conn
         .query_row(
             "SELECT id, title, started_at, ended_at, summary, notes,
-                    stt_model, llm_model, lang, attendees
+                    stt_model, llm_model, lang, attendees, content_revision, summary_revision
              FROM meetings WHERE id = ?1",
             [id],
             |r| {
@@ -686,6 +718,8 @@ pub fn get_meeting(db: &Db, id: &str) -> Result<Option<Meeting>, String> {
                     started_at: r.get(2)?,
                     ended_at: r.get(3)?,
                     summary: r.get(4)?,
+                    content_revision: r.get(10)?,
+                    summary_stale: r.get::<_, i64>(10)? != r.get::<_, i64>(11)?,
                     notes: r.get(5)?,
                     stt_model: r.get(6)?,
                     llm_model: r.get(7)?,
@@ -787,13 +821,51 @@ pub fn update_segment_speakers(db: &Db, updates: &[(i64, String)]) -> Result<(),
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     for (id, speaker) in updates {
         tx.execute(
-            "UPDATE segments SET speaker = ?2 WHERE id = ?1",
+            "UPDATE segments SET speaker = ?2 WHERE id = ?1 AND speaker NOT LIKE 'manual:%'",
             params![id, speaker],
         )
         .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// User corrections get stable keys, so automatic re-clustering cannot undo them.
+/// `target` selects an existing identity; `name` creates a new one. Source audio
+/// and timestamps are never changed. All writes, including names, commit together.
+pub fn correct_speaker(db: &Db, meeting_id: &str, segment_id: i64, target: Option<&str>, name: &str, whole_group: bool) -> Result<String, String> {
+    let mut conn = db.0.lock().unwrap();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let old: String = tx.query_row("SELECT speaker FROM segments WHERE id=?1 AND meeting_id=?2", params![segment_id,meeting_id], |r|r.get(0)).map_err(|_| "Transcript line not found in this meeting.")?;
+    let identity = |label: &str| -> Result<String, String> {
+        let existing: Option<String> = tx.query_row("SELECT speaker FROM speaker_names WHERE meeting_id=?1 AND speaker LIKE 'manual:%' AND name=?2 COLLATE NOCASE LIMIT 1",params![meeting_id,label],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        match existing {
+            Some(key) => Ok(key),
+            None => tx.query_row("SELECT 'manual:' || (COALESCE(MAX(CAST(substr(speaker,8) AS INTEGER)),0)+1) FROM (SELECT speaker FROM speaker_names WHERE meeting_id=?1 UNION SELECT speaker FROM segments WHERE meeting_id=?1) WHERE speaker LIKE 'manual:%'", [meeting_id], |r| r.get(0)).map_err(|e|e.to_string()),
+        }
+    };
+    let (key, label) = if let Some(target) = target {
+        let _: i64 = tx.query_row("SELECT id FROM segments WHERE meeting_id=?1 AND speaker=?2 LIMIT 1",params![meeting_id,target],|r|r.get(0)).map_err(|_|"Speaker not found in this meeting.")?;
+        let label: Option<String> = tx.query_row("SELECT name FROM speaker_names WHERE meeting_id=?1 AND speaker=?2", params![meeting_id,target],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        let label = label.filter(|n|!n.trim().is_empty()).unwrap_or_else(||crate::summary::speaker_label(target,&Default::default()));
+        let key = if target.starts_with("manual:") { target.to_string() } else { identity(&label)? };
+        // Copy the identity under a stable key without changing unrelated utterances.
+        (key,label)
+    } else {
+        let label=name.trim();
+        if label.is_empty() || label.chars().count()>100 { return Err("Enter a speaker name of 1–100 characters.".into()); }
+        (identity(label)?,label.to_string())
+    };
+    if whole_group {
+        tx.execute("UPDATE segments SET speaker=?3 WHERE meeting_id=?1 AND speaker=?2",params![meeting_id,old,key]).map_err(|e|e.to_string())?;
+    } else {
+        tx.execute("UPDATE segments SET speaker=?3 WHERE meeting_id=?1 AND id=?2",params![meeting_id,segment_id,key]).map_err(|e|e.to_string())?;
+    }
+    tx.execute("INSERT INTO speaker_names(meeting_id,speaker,name) VALUES (?1,?2,?3) ON CONFLICT(meeting_id,speaker) DO UPDATE SET name=excluded.name",params![meeting_id,key,label]).map_err(|e|e.to_string())?;
+    // These centroids described the old grouping. Never train a remembered voice from them.
+    tx.execute("DELETE FROM meeting_speakers WHERE meeting_id=?1 AND speaker IN (?2,?3)",params![meeting_id,old,key]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;
+    Ok(key)
 }
 
 /// A search result: one matching transcript line (with its position), or a
@@ -1034,16 +1106,15 @@ pub fn open_action_items(db: &Db) -> Result<Vec<ActionItem>, String> {
     action_items_on(&conn, None, true)
 }
 
-/// Replace a meeting's summary-extracted items with a fresh set, keeping any
-/// the user touched (checked off or edited) and skipping new ones that repeat
-/// a kept item.
-pub fn replace_auto_action_items(
-    db: &Db,
-    meeting_id: &str,
-    items: &[ActionItem],
-) -> Result<(), String> {
-    let mut conn = db.0.lock().unwrap();
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+pub fn save_generated_notes(db:&Db,meeting_id:&str,summary:&str,items:&[ActionItem],expected_revision:Option<i64>)->Result<(),String> {
+    let mut conn=db.0.lock().unwrap(); let tx=conn.transaction().map_err(|e|e.to_string())?;
+    let changed=tx.execute("UPDATE meetings SET summary=?2,summary_revision=content_revision WHERE id=?1 AND (?3 IS NULL OR content_revision=?3)",params![meeting_id,summary,expected_revision]).map_err(|e|e.to_string())?;
+    if changed!=1 { return Err("The transcript, speakers, or notes changed while generating. Regenerate the notes.".into()); }
+    replace_auto_items_on(&tx,meeting_id,items)?;
+    tx.commit().map_err(|e|e.to_string())
+}
+
+fn replace_auto_items_on(tx:&Connection,meeting_id:&str,items:&[ActionItem])->Result<(),String> {
     tx.execute(
         "DELETE FROM action_items WHERE meeting_id = ?1 AND manual = 0 AND done = 0",
         [meeting_id],
@@ -1073,7 +1144,7 @@ pub fn replace_auto_action_items(
         )
         .map_err(|e| e.to_string())?;
     }
-    tx.commit().map_err(|e| e.to_string())
+    Ok(())
 }
 
 fn normalize(s: &str) -> String {
@@ -1355,7 +1426,7 @@ pub type SpeakerCentroid = (String, String, Vec<u8>, i64, i64);
 pub fn set_meeting_speakers(db: &Db, meeting_id: &str, rows: &[SpeakerCentroid]) -> Result<(), String> {
     let mut conn = db.0.lock().unwrap();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM meeting_speakers WHERE meeting_id = ?1", [meeting_id])
+    tx.execute("DELETE FROM meeting_speakers WHERE meeting_id = ?1 AND speaker NOT LIKE 'manual:%'", [meeting_id])
         .map_err(|e| e.to_string())?;
     for (speaker, model, emb, segs, ms) in rows {
         tx.execute(
@@ -1526,6 +1597,7 @@ mod tests {
             started_at: "2026-07-29T16:00:00.000Z".into(),
             ended_at: None,
             summary: String::new(),
+            content_revision:0, summary_stale:false,
             notes: String::new(),
             stt_model: String::new(),
             llm_model: String::new(),

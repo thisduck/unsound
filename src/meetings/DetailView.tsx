@@ -44,7 +44,7 @@ export function DetailView(p: Props) {
   const m = p.meeting;
   const player = usePlayer(m.hasAudio ? m.id : null);
   const [notes, setNotes] = useState(m.notes);
-  const notesSave = useNotesSave(m.id, setNotes, (text) => p.onMeeting({ ...m, notes: text }));
+  const notesSave = useNotesSave(m.id, setNotes, (text) => p.onMeeting({ ...m, notes: text, summaryStale: true }));
   const [editingSummary, setEditingSummary] = useState(false);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
@@ -54,6 +54,11 @@ export function DetailView(p: Props) {
   const [reDetecting, setReDetecting] = useState(false);
   const [newItem, setNewItem] = useState("");
   const [fix, setFix] = useState<{ from: string; to: string; count: number } | null>(null);
+  const [speakerError, setSpeakerError] = useState<string | null>(null);
+  const [correcting, setCorrecting] = useState<number | null>(null);
+  const [correctionName, setCorrectionName] = useState("");
+  const [wholeSpeaker, setWholeSpeaker] = useState(false);
+  const [speakerSaving, setSpeakerSaving] = useState(false);
   const [rememberVoice, setRememberVoice] = useState(true);
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
@@ -126,7 +131,7 @@ export function DetailView(p: Props) {
     if (!seg.id || text === seg.text) return;
     try {
       await api.updateSegmentText(seg.id, text);
-      p.onMeeting({ ...m, segments: m.segments.map((s) => (s.id === seg.id ? { ...s, text } : s)) });
+      p.onMeeting({ ...m, summaryStale: true, segments: m.segments.map((s) => (s.id === seg.id ? { ...s, text } : s)) });
       const edit = wordEdit(seg.text, text);
       if (edit) {
         const re = new RegExp(`\\b${edit.from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
@@ -164,14 +169,27 @@ export function DetailView(p: Props) {
 
   const renameSpeaker = async (speaker: string, name: string) => {
     try {
-      await api.setSpeakerName(m.id, speaker, name, rememberVoice);
-      const names = { ...(m.speakerNames ?? {}) };
-      if (name.trim()) names[speaker] = name.trim();
-      else delete names[speaker];
-      p.onMeeting({ ...m, speakerNames: names });
+      setSpeakerError(null);
+      const remembered = await api.setSpeakerName(m.id, speaker, name, rememberVoice);
+      const updated = await api.getMeeting(m.id);
+      if (updated) p.onMeeting(updated);
+      if (rememberVoice && name.trim() && !remembered) setSpeakerError("Name saved. More clear speech is needed before this voice can be remembered.");
     } catch (e) {
-      console.error("failed to rename speaker", e);
+      setSpeakerError(String(e));
+      // Naming may have succeeded even when voice enrollment could not finish.
+      const updated = await api.getMeeting(m.id).catch(() => null);
+      if (updated) p.onMeeting(updated);
     }
+  };
+
+  const correctSpeaker = async (segment: Segment, target: string | null, name: string | null) => {
+    if (segment.id == null) return;
+    setSpeakerSaving(true); setSpeakerError(null);
+    try {
+      p.onMeeting(await api.correctMeetingSpeaker(m.id, segment.id, target, name, wholeSpeaker));
+      setCorrecting(null); setCorrectionName(""); setWholeSpeaker(false);
+    } catch (e) { setSpeakerError(String(e)); }
+    finally { setSpeakerSaving(false); }
   };
 
   const reDetect = async () => {
@@ -179,7 +197,7 @@ export function DetailView(p: Props) {
     try {
       p.onMeeting(await api.diarizeMeeting(m.id, p.embId, reCount ? parseInt(reCount, 10) : undefined));
     } catch (e) {
-      console.error(e);
+      setSpeakerError(String(e));
     } finally {
       setReDetecting(false);
     }
@@ -239,8 +257,9 @@ export function DetailView(p: Props) {
             </button>
           )}
         </div>
+        {m.summaryStale && m.summary && !p.summarizing && <p className="meet-hint meet-warning" role="status">Transcript, speakers, or notes changed. Regenerate to update this summary and its action items.</p>}
         {p.summarizing && !p.liveSummary ? (
-          <p className="dim">finishing the last part of the meeting…</p>
+          <p className="dim">writing notes and checking transcript sources…</p>
         ) : !summaryText ? (
           <p className="dim">
             {m.segments.length ? "no summary yet." : "no transcript for this meeting."}
@@ -255,7 +274,7 @@ export function DetailView(p: Props) {
               const text = e.target.value;
               if (text !== m.summary) {
                 api.setMeetingSummary(m.id, text).catch(console.error);
-                p.onMeeting({ ...m, summary: text });
+                p.onMeeting({ ...m, summary: text, summaryStale: false });
               }
             }}
           />
@@ -376,6 +395,8 @@ export function DetailView(p: Props) {
       {m.segments.length > 0 && (
         <section className="meet-section">
           <h3>speakers</h3>
+          <p className="dim">Click a transcript speaker to correct one line or their whole group. Your corrections survive re-detection.</p>
+          {speakerError && <p className="meet-error" role="alert">{speakerError}</p>}
           <div className="speaker-edit">
             {speakers.map((sp) => (
               <input
@@ -446,7 +467,9 @@ export function DetailView(p: Props) {
                   if (el && s.id != null) lineRefs.current.set(s.id, el);
                 }}
               >
-                <span className="seg-who">{speakerLabel(s.speaker, m.speakerNames)}</span>
+                <button className="seg-who quiet" title="Correct speaker" onClick={() => { setCorrecting(correcting === s.id ? null : s.id ?? null); setWholeSpeaker(false); }}>
+                  {speakerLabel(s.speaker, m.speakerNames)}
+                </button>
                 <button
                   className="seg-time time-link"
                   onClick={() => jump(s.startMs)}
@@ -464,6 +487,17 @@ export function DetailView(p: Props) {
                 >
                   {s.text}
                 </span>
+                {correcting === s.id && <div className="speaker-correction">
+                  <label><input type="checkbox" checked={wholeSpeaker} onChange={(e) => setWholeSpeaker(e.target.checked)} /> apply to this speaker’s whole group</label>
+                  <select aria-label="Assign speaker" value="" disabled={speakerSaving} onChange={(e) => { if (e.target.value) void correctSpeaker(s, e.target.value, null); }}>
+                    <option value="">choose a speaker…</option>
+                    {speakers.filter((sp) => sp !== s.speaker).map((sp) => <option key={sp} value={sp}>{speakerLabel(sp, m.speakerNames)}</option>)}
+                  </select>
+                  <input aria-label="New speaker name" placeholder="or enter a new name" value={correctionName} onChange={(e) => setCorrectionName(e.target.value)} />
+                  <button className="quiet" disabled={speakerSaving || !correctionName.trim()} onClick={() => void correctSpeaker(s, null, correctionName)}>save</button>
+                  <button className="quiet" onClick={() => setCorrecting(null)}>cancel</button>
+                </div>}
+
               </div>
             );
           })
