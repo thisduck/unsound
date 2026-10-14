@@ -6,7 +6,8 @@ npm run test:notes
 ```
 
 These suites need no microphone, models, cloud credentials, or UI driver. The
-notes tests use Node 24's TypeScript support. CI runs both suites on pull requests.
+notes tests use Node 24's TypeScript support. CI runs both suites and the native
+backend acceptance checks on pull requests.
 
 ## Saved audio and durable work
 
@@ -77,10 +78,53 @@ successful database save in that case.
 | Reject credentials, then supply a replacement | The local HTTP server receives the new key; 401 does not trigger format-fallback retries. |
 | Fail notes saving; edit during an outstanding save; switch editors | Draft survives and older completion cannot erase or overwrite a newer edit. |
 
-The process-kill test is not a power-loss test. Storage faults use SQLite triggers,
+## Native backend acceptance checks (macOS)
+
+```sh
+npm run e2e:build
+npm run test:native-backend
+```
+
+This runner launches the actual Tauri app with its event loop and meeting
+supervisor. It needs no WebDriver key. It calls the same backend functions used
+by IPC; it does not check the webview or microphone hardware. Each run uses
+unique fixtures in `com.unsound.e2e`. Do not run it alongside the WebDriver suite,
+which uses the same isolated profile.
+
+The `automation` feature supplies bounded synthetic microphone chunks, a
+predictable speech engine, and deterministic speech boundaries. The production
+capture loop, WAV checkpointing, durable queue, result transaction, watchdog,
+stop/pause/retry, and startup recovery remain in use. The speech substitute
+checks the PCM actually read from disk. Normal builds contain neither these
+substitutes nor the `meeting_fixture` IPC command or scenario runner.
+
+The native scenarios check:
+
+- A cooperative model stall trips the watchdog and leaves one retryable job.
+- A non-cooperative stall retains the single worker slot while stop returns
+  within 2.5 seconds and another recorder saves audio. Canceled results cannot
+  commit after the stall is released.
+- A meeting-scoped SQLite trigger rejects transcript inserts. Retry commits
+  exactly one copy of the missing range.
+- An audio append fault stops capture and reports exactly the last saved sample.
+- Audio disconnection drains the final queued callback before capture closes.
+- The launcher kills the app with `SIGKILL` while inference is outstanding, then
+  launches two fresh processes. Committed notes and transcript survive; pending
+  audio becomes exactly one transcript row; the second restart adds no rows.
+
+Faults are in memory (SQLite triggers are temporary) and disappear on process
+restart. Only a fixture's watchdog can be shortened to one second; normal
+recordings keep the 90-second deadline. Commands restrict fixture IDs to safe
+`e2e-` names and reject the normal application profile. The runner enforces a
+60-second deadline per process and writes diagnostic logs to `e2e/artifacts/`.
+The WebDriver suite exercises the same failure cases through IPC, and checks
+that the user sees the storage error and can retry through the UI.
+
+The process-kill tests are not power-loss tests. Storage faults use SQLite triggers,
 read-only mode, and real OS write errors, not a physical full disk. Physical USB
-removal, sleep/wake, real-model stalls, and the full native recording flow still
-need hardware or virtual-device validation. Queue bounds do not claim a bound on
+removal, sleep/wake, real-model stalls, speech detection, and actual device capture
+still need hardware or virtual-device validation. The synthetic source does not
+measure speech recognition quality or model performance. Queue bounds do not claim a bound on
 model memory or every microphone tap buffer. A blocked OS storage call can still
 delay capture shutdown.
 
@@ -103,10 +147,13 @@ The optional `automation` feature and `src-tauri/tauri.e2e.conf.json` produce
 and Keychain entries use `com.unsound.e2e`. Global hotkeys, tray, meeting detection,
 and background assistants are disabled. Normal builds omit the automation plugin.
 
-The spec navigates the native webview, creates a synthetic meeting through real
-IPC, edits notes through the UI, and checks persistence after webview reload and
-native session restart. The archive stays accessible without downloaded models.
-It does not yet record a real meeting. Each run deletes only its unique fixture.
+The specs navigate the native webview, edit notes through the UI, and check
+persistence after reload and native restart. Recovery specs start synthetic
+recordings through `meeting_start`; test-only IPC arms faults and supplies PCM.
+They check saved sample positions, exact transcript timestamps and text, pending
+counts, stop latency, visible errors, and retry. They also kill the isolated app
+process while inference is outstanding. Each run deletes only its unique
+fixtures. The archive stays accessible without downloaded models.
 
 Ports 3000 and 4444 must be free. Startup has a deadline and cleans up child
 services on failure. WDIO fatal setup errors prevent workers from connecting after

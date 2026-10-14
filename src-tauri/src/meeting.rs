@@ -103,6 +103,12 @@ pub struct StartOptions {
 
 /// Validate models are present and start a meeting (used by the command layer).
 pub fn start_with_options(app: &AppHandle, opts: StartOptions) -> Result<(), String> {
+    #[cfg(feature = "automation")]
+    if crate::meeting_fixture::valid_id(&opts.meeting_id)
+        && opts.stt_model == format!("{}{}", crate::meeting_fixture::MODEL_PREFIX, opts.meeting_id)
+    {
+        return start(app, opts, PathBuf::new());
+    }
     let vad_path = models::downloaded_model_path(app, "vad-silero")?;
     // Surface a missing speech model early; the engine itself is built on the
     // transcription thread (sherpa recognizers are !Send).
@@ -139,25 +145,38 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
     let mic_writer = WavWriter::create(&mic_file)?;
     let sys_writer = WavWriter::create(&sys_file)?;
 
+    #[cfg(feature = "automation")]
+    let fixture = crate::meeting_fixture::for_model(app, &opts.stt_model);
+    #[cfg(feature = "automation")]
+    let synthetic = fixture.is_some();
+    #[cfg(not(feature = "automation"))]
+    let synthetic = false;
+
     // The mic defines the meeting clock; system audio starts a moment later
     // and is offset onto it.
-    audio::start_recording(
-        app.clone(),
-        &st.audio,
-        s.mic_device.clone(),
-        audio::Owner::Meeting,
-    )?;
+    if !synthetic {
+        audio::start_recording(
+            app.clone(),
+            &st.audio,
+            s.mic_device.clone(),
+            audio::Owner::Meeting,
+        )?;
+    }
     let mic_started = Instant::now();
     #[cfg(target_os = "macos")]
-    let sys_ok = match crate::syscapture::start(&st.sys) {
-        Ok(()) => true,
-        Err(e) => {
-            eprintln!("[meeting] system audio unavailable, mic only: {e}");
-            let _ = app.emit(
-                "meeting-warning",
-                format!("System audio unavailable — recording your mic only ({e})."),
-            );
-            false
+    let sys_ok = if synthetic {
+        false
+    } else {
+        match crate::syscapture::start(&st.sys) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("[meeting] system audio unavailable, mic only: {e}");
+                let _ = app.emit(
+                    "meeting-warning",
+                    format!("System audio unavailable — recording your mic only ({e})."),
+                );
+                false
+            }
         }
     };
     #[cfg(not(target_os = "macos"))]
@@ -180,6 +199,8 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
             run_capture(
                 app, id, vad_path, stop, tx, depth, exclusions, mic_writer, sys_writer, sys_ok,
                 sys_offset,
+                #[cfg(feature = "automation")]
+                fixture,
             )
         })
     };
@@ -351,6 +372,17 @@ pub fn retry(app: &AppHandle, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn stall_timeout(_app: &AppHandle, _id: &str) -> Duration {
+    #[cfg(feature = "automation")]
+    {
+        crate::meeting_fixture::timeout(_app, _id)
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        Duration::from_secs(90)
+    }
+}
+
 /// One meeting transcription worker for the app. A non-cooperative native call can
 /// occupy this slot, but cannot spawn an unbounded number of replacement calls.
 /// Capture and stop never join this worker.
@@ -395,10 +427,10 @@ pub fn start_recovery(app: AppHandle) {
                 }
                 if let Some(w) = slot.as_ref() {
                     if !w.cancel.load(Ordering::Relaxed)
-                        && w.progress.lock().unwrap().elapsed() > Duration::from_secs(90)
+                        && w.progress.lock().unwrap().elapsed() > stall_timeout(&app, &w.id)
                     {
                         w.cancel.store(true, Ordering::Relaxed);
-                        fail(&app,&w.id,"Transcription made no progress for 90 seconds. Recording can continue. Stop recording, then retry; restart the app if the model cannot stop.");
+                        fail(&app,&w.id,"Transcription stopped making progress. Recording can continue. Stop recording, then retry; restart the app if the model cannot stop.");
                     }
                 } else if let Ok(rows) = meeting_work::statuses(&app.state::<Db>()) {
                     for row in rows {
@@ -603,6 +635,10 @@ pub fn command_active(app: &AppHandle) -> bool {
 }
 
 fn make_vad(vad_path: &PathBuf) -> Option<SileroVad> {
+    #[cfg(feature = "automation")]
+    if vad_path.as_os_str().is_empty() {
+        return None;
+    }
     let config = SileroVadConfig {
         model: vad_path.to_string_lossy().to_string(),
         // End a segment after 0.5s of silence; ignore <0.25s blips; cap a single
@@ -653,6 +689,7 @@ fn run_capture(
     mut sys_writer: WavWriter,
     #[allow(unused_mut)] mut sys_ok: bool,
     sys_offset: u64,
+    #[cfg(feature = "automation")] fixture: Option<Arc<crate::meeting_fixture::Fixture>>,
 ) {
     let st = app.state::<AppState>();
     let mut storage_failed = false;
@@ -689,6 +726,12 @@ fn run_capture(
             std::thread::sleep(Duration::from_millis(100));
             waited += 1;
         }
+        #[cfg(feature = "automation")]
+        let fixture_input = fixture.as_ref().map(|f| f.capture_input());
+        #[cfg(feature = "automation")]
+        if fixture_input.as_ref().is_some_and(|(disconnected, _)| *disconnected) {
+            *st.audio.capture_error.lock().unwrap() = Some("injected audio disconnect".into());
+        }
         if let Some(error) = st.audio.capture_error.lock().unwrap().take() {
             fail(&app,&meeting_id,&format!("Microphone capture was interrupted: {error}. Recording has stopped; saved audio is available for recovery."));
             stop.store(true, Ordering::Relaxed);
@@ -697,14 +740,27 @@ fn run_capture(
 
         // Mic: on the final pass, stopping the device also returns the tail
         // still inside the resampler.
-        let new_mic = if stopping {
+        #[cfg(feature = "automation")]
+        let synthetic_audio = fixture_input.map(|(_, samples)| samples);
+        #[cfg(not(feature = "automation"))]
+        let synthetic_audio: Option<Vec<f32>> = None;
+        let new_mic = if let Some(samples) = synthetic_audio {
+            samples
+        } else if stopping {
             audio::stop_meeting_recording(&st.audio)
         } else {
             audio::drain_16k(&st.audio)
         };
         if !storage_failed {
-            let save = mic_writer
-                .append(&new_mic)
+            #[cfg(feature = "automation")]
+            let writable = fixture.as_ref()
+                .filter(|_| !new_mic.is_empty())
+                .map(|f| f.check_save())
+                .unwrap_or(Ok(()));
+            #[cfg(not(feature = "automation"))]
+            let writable: Result<(), String> = Ok(());
+            let save = writable
+                .and_then(|_| mic_writer.append(&new_mic))
                 .and_then(|_| mic_writer.checkpoint())
                 .and_then(|n| {
                     meeting_work::saved(&app.state::<Db>(), &meeting_id, "mic", n as i64)
@@ -722,6 +778,18 @@ fn run_capture(
         mic_pos += new_mic.len() as u64;
         let excluded = exclusions.lock().unwrap().clone();
         if !storage_failed {
+            #[cfg(feature = "automation")]
+            if fixture.is_some() && !new_mic.is_empty() {
+                // Deterministic speech boundaries replace VAD only for fixture audio.
+                if let Err(e) = meeting_work::enqueue(
+                    &app.state::<Db>(), &meeting_id, "mic", "me",
+                    (mic_pos - new_mic.len() as u64) as i64, mic_pos as i64, false,
+                ) {
+                    fail(&app, &meeting_id, &e);
+                    storage_failed = true;
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
             if let Err(e) = handle_channel(
                 &app.state::<Db>(),
                 &meeting_id,

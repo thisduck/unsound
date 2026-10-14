@@ -370,7 +370,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
 
       {setupNeeded && !selected && !live && <MeetingSetup models={models} onModelsChanged={onModelsChanged} />}
       {work.filter((w) => w.state !== "complete" || w.warning).map((w) => (
-        <div key={w.meetingId} className={"meet-hint " + (w.error ? "meet-error" : "meet-warning")} role={w.error ? "alert" : "status"}>
+        <div key={w.meetingId} data-meeting-id={w.meetingId} className={"meet-hint " + (w.error ? "meet-error" : "meet-warning")} role={w.error ? "alert" : "status"}>
           <div>
             <strong>{meetings.find((m) => m.id === w.meetingId)?.title || "Meeting"}: </strong>
             {w.state === "recording" ? "recording" : w.state === "finishing" ? "finishing transcript" : w.state === "complete" ? "transcript recovered" : w.state === "paused" ? "transcription paused" : "needs attention"}

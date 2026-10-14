@@ -81,6 +81,8 @@ impl Parakeet {
 /// `AppState.stt`; the sherpa recognizers (Moonshine/Parakeet) own their model
 /// and are !Send, so an `Engine` must be built and used on one thread.
 pub enum Engine {
+    #[cfg(feature = "automation")]
+    Fixture(Arc<crate::meeting_fixture::Fixture>),
     Whisper(PathBuf),
     Moonshine(Moonshine),
     Parakeet(Parakeet),
@@ -89,6 +91,10 @@ pub enum Engine {
 /// Resolve the selected STT model id into a ready engine. For sherpa models
 /// this loads the recognizer, so call it on the thread that will use it.
 pub fn resolve(app: &AppHandle, model_id: &str) -> Result<Engine, String> {
+    #[cfg(feature = "automation")]
+    if let Some(fixture) = crate::meeting_fixture::for_model(app, model_id) {
+        return Ok(Engine::Fixture(fixture));
+    }
     let info = models::find_model(app, model_id)?;
     let path = models::downloaded_model_path(app, model_id)?;
     if info.files.is_empty() {
@@ -126,6 +132,8 @@ pub fn transcribe_parts_checked(
 ) -> Result<Vec<(i64, i64, String)>, String> {
     if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err("transcription paused".into()); }
     match engine {
+        #[cfg(feature = "automation")]
+        Engine::Fixture(f) => f.transcribe(samples, &cancel).map(|text| text_part(text, samples.len())),
         Engine::Whisper(path) => stt::transcribe_segments_until(&app.state::<AppState>().stt,
             path, samples, language, prompt, Some(cancel)),
         Engine::Moonshine(m) => Ok(text_part(m.transcribe(samples), samples.len())),
@@ -144,6 +152,8 @@ pub fn transcribe_preview(
     stop: Arc<AtomicBool>,
 ) -> Result<String, String> {
     match engine {
+        #[cfg(feature = "automation")]
+        Engine::Fixture(f) => f.transcribe(samples, &stop),
         Engine::Whisper(path) => {
             let st = app.state::<AppState>();
             stt::transcribe_until(&st.stt, path, samples, language, initial_prompt, Some(stop))
@@ -161,6 +171,8 @@ pub fn transcribe_text(
     initial_prompt: Option<&str>,
 ) -> Result<String, String> {
     match engine {
+        #[cfg(feature = "automation")]
+        Engine::Fixture(f) => f.transcribe(samples, &AtomicBool::new(false)),
         Engine::Whisper(path) => {
             let st = app.state::<AppState>();
             stt::transcribe(&st.stt, path, samples, language, initial_prompt)

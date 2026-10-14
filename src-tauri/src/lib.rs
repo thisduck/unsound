@@ -13,6 +13,10 @@ mod hotkeys;
 mod llm;
 mod meeting;
 mod meeting_work;
+#[cfg(any(test, feature = "automation"))]
+mod meeting_fixture;
+#[cfg(feature = "automation")]
+mod meeting_fixture_runner;
 mod models;
 mod permissions;
 #[allow(dead_code)]
@@ -1245,7 +1249,8 @@ fn cancel_shortcut_capture() {
 pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(feature = "automation")]
-    let builder = builder.plugin(tauri_plugin_automation::init());
+    let builder = builder.plugin(tauri_plugin_automation::init())
+        .manage(meeting_fixture::Fixtures::default());
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1321,6 +1326,8 @@ pub fn run() {
             // background assistants, meeting detection, or microphone capture.
             if cfg!(feature = "automation") {
                 meeting::start_recovery(handle.clone());
+                #[cfg(feature = "automation")]
+                meeting_fixture_runner::launch_if_requested(&handle);
                 return Ok(());
             }
             agent::start(&handle);
@@ -1348,6 +1355,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            #[cfg(feature = "automation")]
+            meeting_fixture::meeting_fixture,
             list_models,
             download_model,
             delete_model,

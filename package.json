@@ -12,7 +12,8 @@
     "e2e:build": "node e2e/build.mjs",
     "e2e:check": "node e2e/preflight.mjs",
     "test:e2e": "npm run e2e:check && wdio run e2e/wdio.conf.mjs",
-    "test:notes": "node --test tests/*.test.mjs"
+    "test:notes": "node --test tests/*.test.mjs",
+    "test:native-backend": "node e2e/native-backend.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

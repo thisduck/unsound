@@ -31,9 +31,16 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      - run: npm run build
       - run: npm run test:reliability
       - run: npm run test:notes
+      - run: npm run e2e:build
+      - run: npm run test:native-backend
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: native-backend-failures
+          path: e2e/artifacts/
+          if-no-files-found: ignore
 
   native-ui:
     if: github.event_name == 'workflow_dispatch' && inputs.native_ui
