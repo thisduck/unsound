@@ -47,8 +47,12 @@ the models that do the work.
   unsound follows your rules and does the work in your own browser (through
   Claude in Chrome, or its own model with a browser connector). No
   integration needed per site.
-- **🔎 Search every meeting.** Full-text search across all transcripts, or ask
-  a question across meetings and get an answer with sources.
+- **🔎 Research your meetings.** Ask questions about one meeting or the archive.
+  The local AI can search transcripts and summaries, read relevant passages,
+  and return answers and exact quotes with links to their sources.
+- **✅ Follow through.** Edit action owners and deadlines, mark actions done or
+  ignored, and reopen them later. Set reminders or snooze them; due reminders
+  remain visible in the app and can notify you while unsound is running.
 - **🔒 Completely private.** Everything runs on your machine. Works with the
   Wi-Fi off — the only exceptions are tools you connect and approve.
 

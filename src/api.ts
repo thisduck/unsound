@@ -174,10 +174,25 @@ export interface ActionItem {
   due: string;
   atMs?: number | null;
   done: boolean;
+  ignored?: boolean;
+  remindAt?: number | null;
+  reminderError?: string;
+  revision?: number;
   manual: boolean;
   createdAt: string;
   meetingTitle: string;
 }
+
+export interface ResearchSource {
+  id: string; meetingId: string; title: string; date: string; kind: string;
+  text: string; speaker?: string | null; atMs?: number | null; stale: boolean;
+}
+export interface ResearchAnswer {
+  claims: { text: string; sourceIds: string[] }[];
+  quotes: { sourceId: string; text: string }[];
+  sources: ResearchSource[]; insufficient: boolean; searches: string[];
+}
+export interface ResearchTurn { question: string; answer: string }
 
 export interface Meeting {
   id: string;
@@ -361,10 +376,8 @@ export const api = {
   getMeeting: (id: string) => invoke<Meeting | null>("get_meeting", { id }),
   summarizeMeeting: (meetingId: string, modelId: string) =>
     invoke<Meeting>("summarize_meeting", { meetingId, modelId }),
-  askMeeting: (meetingId: string, modelId: string, question: string) =>
-    invoke<string>("ask_meeting", { meetingId, modelId, question }),
-  askMeetings: (modelId: string, question: string) =>
-    invoke<string>("ask_meetings", { modelId, question }),
+  researchMeetings: (modelId: string, question: string, meetingId: string | null, history: ResearchTurn[]) =>
+    invoke<ResearchAnswer>("research_meetings", { modelId, question, meetingId, history }),
   searchMeetings: (query: string) => invoke<SearchHit[]>("search_meetings", { query }),
   meetingStart: (
     meetingId: string,
@@ -395,6 +408,8 @@ export const api = {
   addMark: (meetingId: string, label = "", atMs?: number) =>
     invoke<Mark>("add_mark", { meetingId, atMs: atMs ?? null, label }),
   deleteMark: (id: number) => invoke<void>("delete_mark", { id }),
+  listActionItems: () => invoke<ActionItem[]>("list_action_items"),
+  dueActionReminders: () => invoke<ActionItem[]>("due_action_reminders"),
   openActionItems: () => invoke<ActionItem[]>("open_action_items"),
   saveActionItem: (item: ActionItem) => invoke<ActionItem>("save_action_item", { item }),
   deleteActionItem: (id: number) => invoke<void>("delete_action_item", { id }),

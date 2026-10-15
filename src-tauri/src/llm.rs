@@ -900,6 +900,10 @@ pub fn chat_json(
     schema: &serde_json::Value,
     max_tokens: usize,
 ) -> Result<serde_json::Value, String> {
+    chat_json_in_slot(state,model_path,messages,schema,max_tokens,None)
+}
+
+pub fn chat_json_in_slot(state:&LlmState,model_path:&Path,messages:&[(&str,String)],schema:&serde_json::Value,max_tokens:usize,slot:Option<Slot>)->Result<serde_json::Value,String> {
     let grammar = json_grammar(schema)?;
     let gen = Gen {
         temperature: 0.0,
@@ -907,7 +911,7 @@ pub fn chat_json(
         grammar: Some(&grammar),
         force_lowercase: false,
     };
-    let text = chat(state, model_path, messages, &gen, None, &mut |_| {})?;
+    let text = chat(state, model_path, messages, &gen, slot, &mut |_| {})?;
     parse_json_reply(&text)
 }
 
@@ -945,14 +949,6 @@ fn preview(s: &str) -> String {
 // ---- meeting prompts --------------------------------------------------------
 
 pub const MEETING_TITLE_PROMPT: &str = "Write a short, specific title (at most 8 words) for the meeting these notes describe. Output only the title — no quotes, no trailing period.";
-
-/// Q&A over one meeting — grounded, cites, refuses to invent.
-pub const MEETING_QA_PROMPT: &str = r#"You answer questions about a single meeting using only the material provided: its notes, summary, and transcript (lines are "[m:ss] Speaker: text"). "Me" is the user.
-Answer concisely and directly. Say who said what when it helps, and cite the transcript time of supporting lines like (12:34). If the answer isn't in the material, say you don't see it in this meeting — never guess or invent details."#;
-
-/// Q&A across meetings, from retrieved excerpts.
-pub const MEETINGS_QA_PROMPT: &str = r#"You answer questions about the user's past meetings using only the excerpts provided. Each excerpt is labeled with its meeting title and date; transcript lines are "[m:ss] Speaker: text". "Me" is the user.
-Answer concisely. Cite sources as (Meeting title, m:ss). If meetings disagree, say so and prefer the most recent. If the excerpts don't contain the answer, say you couldn't find it — never guess."#;
 
 #[cfg(test)]
 mod tests {

@@ -143,6 +143,14 @@ pub struct ActionItem {
     pub at_ms: Option<i64>,
     #[serde(default)]
     pub done: bool,
+    #[serde(default)]
+    pub ignored: bool,
+    #[serde(default)]
+    pub remind_at: Option<i64>,
+    #[serde(default)]
+    pub reminder_error: String,
+    #[serde(default)]
+    pub revision: i64,
     /// Added or edited by the user — survives summary regeneration.
     #[serde(default)]
     pub manual: bool,
@@ -460,6 +468,18 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             CREATE TRIGGER speaker_revision_delete AFTER DELETE ON speaker_names BEGIN
                 UPDATE meetings SET content_revision=content_revision+1 WHERE id=OLD.meeting_id; END;
             PRAGMA user_version=6; COMMIT;")?;
+    }
+
+    if version < 7 {
+        conn.execute_batch("BEGIN;
+            ALTER TABLE action_items ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE action_items ADD COLUMN remind_at INTEGER;
+            ALTER TABLE action_items ADD COLUMN reminder_notified_at INTEGER;
+            ALTER TABLE action_items ADD COLUMN reminder_attempt_at INTEGER;
+            ALTER TABLE action_items ADD COLUMN reminder_error TEXT NOT NULL DEFAULT '';
+            ALTER TABLE action_items ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+            CREATE INDEX action_reminders ON action_items(remind_at) WHERE done=0 AND ignored=0;
+            PRAGMA user_version=7; COMMIT;")?;
     }
 
     Ok(())
@@ -1072,6 +1092,10 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<ActionItem> {
         due: r.get(4)?,
         at_ms: r.get(5)?,
         done: r.get::<_, i64>(6)? != 0,
+        ignored: r.get::<_, i64>(10)? != 0,
+        remind_at: r.get(11)?,
+        reminder_error: r.get(12)?,
+        revision: r.get(13)?,
         manual: r.get::<_, i64>(7)? != 0,
         created_at: r.get(8)?,
         meeting_title: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
@@ -1079,7 +1103,7 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<ActionItem> {
 }
 
 const ITEM_COLUMNS: &str = "a.id, a.meeting_id, a.text, a.owner, a.due, a.at_ms, a.done, a.manual,
-     a.created_at, m.title";
+     a.created_at, m.title, a.ignored, a.remind_at, a.reminder_error, a.revision";
 
 fn action_items_on(
     conn: &Connection,
@@ -1088,7 +1112,7 @@ fn action_items_on(
 ) -> Result<Vec<ActionItem>, String> {
     let sql = format!(
         "SELECT {ITEM_COLUMNS} FROM action_items a LEFT JOIN meetings m ON m.id = a.meeting_id
-         WHERE (?1 IS NULL OR a.meeting_id = ?1) AND (?2 = 0 OR a.done = 0)
+         WHERE (?1 IS NULL OR a.meeting_id = ?1) AND (?2 = 0 OR (a.done = 0 AND a.ignored = 0))
          ORDER BY {}",
         if meeting_id.is_some() { "COALESCE(a.at_ms, 0), a.id" } else { "a.created_at DESC, a.id" }
     );
@@ -1116,7 +1140,7 @@ pub fn save_generated_notes(db:&Db,meeting_id:&str,summary:&str,items:&[ActionIt
 
 fn replace_auto_items_on(tx:&Connection,meeting_id:&str,items:&[ActionItem])->Result<(),String> {
     tx.execute(
-        "DELETE FROM action_items WHERE meeting_id = ?1 AND manual = 0 AND done = 0",
+        "DELETE FROM action_items WHERE meeting_id = ?1 AND manual = 0 AND done = 0 AND ignored = 0 AND remind_at IS NULL",
         [meeting_id],
     )
     .map_err(|e| e.to_string())?;
@@ -1158,40 +1182,57 @@ fn normalize(s: &str) -> String {
 }
 
 /// Insert (id 0) or update an item; any user edit marks it manual.
+pub fn list_action_items(db: &Db) -> Result<Vec<ActionItem>, String> {
+    action_items_on(&db.0.lock().unwrap(), None, false)
+}
+
+/// User writes use a revision so an old editor cannot undo completion or snoozing.
 pub fn save_action_item(db: &Db, item: &ActionItem) -> Result<ActionItem, String> {
+    if item.text.trim().is_empty() { return Err("An action needs text.".into()); }
+    if item.done && item.ignored { return Err("Choose done or ignored, not both.".into()); }
+    if item.remind_at.is_some_and(|t| t <= 0 || t > 253402300799000) { return Err("Choose a valid reminder time.".into()); }
+    let reminder = if item.done || item.ignored { None } else { item.remind_at };
     let conn = db.0.lock().unwrap();
     if item.id == 0 {
-        conn.execute(
-            "INSERT INTO action_items (meeting_id, text, owner, due, at_ms, done, manual, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
-            params![
-                item.meeting_id,
-                item.text,
-                item.owner,
-                item.due,
-                item.at_ms,
-                item.done as i64,
-                crate::util::now_iso()
-            ],
-        )
-        .map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO action_items(meeting_id,text,owner,due,at_ms,done,manual,created_at,ignored,remind_at)
+            VALUES (?1,?2,?3,?4,?5,?6,1,?7,?8,?9)",
+            params![item.meeting_id,item.text.trim(),item.owner.trim(),item.due.trim(),item.at_ms,item.done as i64,crate::util::now_iso(),item.ignored as i64,reminder]).map_err(|e|e.to_string())?;
     } else {
-        conn.execute(
-            "UPDATE action_items SET text = ?2, owner = ?3, due = ?4, done = ?5, manual = 1 WHERE id = ?1",
-            params![item.id, item.text, item.owner, item.due, item.done as i64],
-        )
-        .map_err(|e| e.to_string())?;
+        let changed=conn.execute("UPDATE action_items SET text=?2,owner=?3,due=?4,done=?5,ignored=?6,manual=1,
+            reminder_notified_at=CASE WHEN remind_at IS ?7 THEN reminder_notified_at ELSE NULL END,
+            reminder_attempt_at=CASE WHEN remind_at IS ?7 THEN reminder_attempt_at ELSE NULL END,
+            reminder_error=CASE WHEN remind_at IS ?7 THEN reminder_error ELSE '' END,
+            remind_at=?7,revision=revision+1 WHERE id=?1 AND revision=?8",
+            params![item.id,item.text.trim(),item.owner.trim(),item.due.trim(),item.done as i64,item.ignored as i64,reminder,item.revision]).map_err(|e|e.to_string())?;
+        if changed != 1 { return Err("This action changed in another view. Reload it and try again.".into()); }
     }
-    let id = if item.id == 0 { conn.last_insert_rowid() } else { item.id };
-    conn.query_row(
-        &format!(
-            "SELECT {ITEM_COLUMNS} FROM action_items a LEFT JOIN meetings m ON m.id = a.meeting_id
-             WHERE a.id = ?1"
-        ),
-        [id],
-        row_to_item,
-    )
-    .map_err(|e| e.to_string())
+    let id=if item.id==0 {conn.last_insert_rowid()} else {item.id};
+    conn.query_row(&format!("SELECT {ITEM_COLUMNS} FROM action_items a LEFT JOIN meetings m ON m.id=a.meeting_id WHERE a.id=?1"),[id],row_to_item).map_err(|e|e.to_string())
+}
+
+/// Due reminders stay visible until the user completes, ignores, snoozes or clears them.
+pub fn due_reminders(db:&Db, now:i64, delivery_only:bool)->Result<Vec<ActionItem>,String> {
+    let conn=db.0.lock().unwrap();
+    let mut q=conn.prepare(&format!("SELECT {ITEM_COLUMNS} FROM action_items a LEFT JOIN meetings m ON m.id=a.meeting_id
+        WHERE a.done=0 AND a.ignored=0 AND a.remind_at<=?1 AND (?2=0 OR (a.reminder_notified_at IS NULL AND (a.reminder_attempt_at IS NULL OR a.reminder_attempt_at<=?1-60000))) ORDER BY a.remind_at,a.id LIMIT 100")).map_err(|e|e.to_string())?;
+    let rows=q.query_map(params![now,delivery_only as i64],row_to_item).map_err(|e|e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
+}
+
+pub fn reminder_result(db:&Db,item:&ActionItem,now:i64,error:Option<&str>)->Result<(),String> {
+    db.0.lock().unwrap().execute("UPDATE action_items SET reminder_attempt_at=?3,reminder_notified_at=?4,reminder_error=?5
+        WHERE id=?1 AND remind_at=?2 AND done=0 AND ignored=0 AND revision=?6",params![item.id,item.remind_at,now,if error.is_none(){Some(now)}else{None},error.unwrap_or(""),item.revision]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+/// Claim briefly before calling the OS. A crash retries after the lease expires;
+/// a second app process or a stale action snapshot cannot send the same attempt.
+pub fn claim_reminder(db:&Db,item:&ActionItem,now:i64)->Result<bool,String> {
+    let n=db.0.lock().unwrap().execute("UPDATE action_items SET reminder_attempt_at=?3
+        WHERE id=?1 AND remind_at=?2 AND remind_at<=?3 AND revision=?4 AND done=0 AND ignored=0
+        AND reminder_notified_at IS NULL AND (reminder_attempt_at IS NULL OR reminder_attempt_at<=?3-60000)",
+        params![item.id,item.remind_at,now,item.revision]).map_err(|e|e.to_string())?;
+    Ok(n==1)
 }
 
 pub fn delete_action_item(db: &Db, id: i64) -> Result<(), String> {
@@ -1635,5 +1676,61 @@ mod tests {
         let got = get_meeting(&db, "m1").unwrap().unwrap();
         assert_eq!(got.ended_at.as_deref(), Some("2026-07-29T16:01:04.000Z"));
         assert_eq!(got.attendees, vec!["Priya".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod followup_tests {
+    use super::*;
+    use serde_json::json;
+    fn fixture()->(tempfile::TempDir,Db,ActionItem) {
+        let dir=tempfile::tempdir().unwrap();let db=open_path(&dir.path().join("db")).unwrap();
+        create_meeting(&db,&serde_json::from_value(json!({"id":"m","startedAt":"2026-10-15"})).unwrap()).unwrap();
+        let item:ActionItem=serde_json::from_value(json!({"meetingId":"m","text":"Send the draft","remindAt":1000})).unwrap();
+        let saved=save_action_item(&db,&item).unwrap();(dir,db,saved)
+    }
+    #[test]
+    fn followup_states_and_reminders_survive_reopen_and_regeneration() {
+        let(dir,db,mut item)=fixture();
+        assert_eq!(due_reminders(&db,1000,true).unwrap().len(),1);
+        item.ignored=true;item=save_action_item(&db,&item).unwrap();assert!(item.remind_at.is_none());
+        let mut generated=item.clone();generated.ignored=false;generated.manual=false;
+        save_generated_notes(&db,"m","notes",&[generated],None).unwrap();
+        assert!(open_action_items(&db).unwrap().is_empty());
+        drop(db);let db=open_path(&dir.path().join("db")).unwrap();
+        let rows=list_action_items(&db).unwrap();assert_eq!(rows.len(),1);assert!(rows[0].ignored);
+        item.ignored=false;item=save_action_item(&db,&item).unwrap();assert_eq!(open_action_items(&db).unwrap().len(),1);
+        item.done=true;let item=save_action_item(&db,&item).unwrap();assert!(item.done);assert!(due_reminders(&db,2000,true).unwrap().is_empty());
+    }
+    #[test]
+    fn followup_failed_notification_retries_and_snooze_resets_delivery() {
+        let(_dir,db,mut item)=fixture();
+        reminder_result(&db,&item,1000,Some("injected notification failure")).unwrap();
+        assert!(due_reminders(&db,2000,true).unwrap().is_empty());
+        assert_eq!(due_reminders(&db,61000,true).unwrap().len(),1);
+        reminder_result(&db,&item,61000,None).unwrap();
+        assert!(due_reminders(&db,90000,true).unwrap().is_empty());
+        assert_eq!(due_reminders(&db,90000,false).unwrap().len(),1);
+        item.remind_at=Some(100000);item=save_action_item(&db,&item).unwrap();
+        // A late result from the previous schedule cannot acknowledge the new one.
+        let mut old=item.clone();old.remind_at=Some(1000);reminder_result(&db,&old,100001,None).unwrap();
+        assert_eq!(due_reminders(&db,100001,true).unwrap().len(),1);
+        item.done=true;save_action_item(&db,&item).unwrap();assert!(due_reminders(&db,100001,false).unwrap().is_empty());
+    }
+    #[test]
+    fn followup_delivery_lease_recovers_after_restart_and_rejects_stale_actions() {
+        let(dir,db,item)=fixture();
+        assert!(claim_reminder(&db,&item,1000).unwrap());
+        assert!(!claim_reminder(&db,&item,1000).unwrap());
+        drop(db);let db=open_path(&dir.path().join("db")).unwrap();
+        assert!(due_reminders(&db,2000,true).unwrap().is_empty());
+        assert!(claim_reminder(&db,&item,61000).unwrap());
+        let mut done=item.clone();done.done=true;save_action_item(&db,&done).unwrap();
+        assert!(!claim_reminder(&db,&item,122000).unwrap());
+    }
+    #[test]
+    fn followup_stale_edit_cannot_undo_completion() {
+        let(_dir,db,item)=fixture();let mut done=item.clone();done.done=true;save_action_item(&db,&done).unwrap();
+        assert!(save_action_item(&db,&item).is_err());assert!(list_action_items(&db).unwrap()[0].done);
     }
 }

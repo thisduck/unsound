@@ -8,11 +8,10 @@
 //! context size. Edits, re-detected speakers or a changed transcript
 //! invalidate only the chunks whose text changed.
 //!
-//! Also here: grounded Q&A over one meeting (reusing a cached context so
-//! follow-ups are instant) and across all meetings (full-text retrieval).
+//! Read-only archive Q&A is implemented in `meeting_research`.
 
-use crate::llm::{self, Gen, Slot};
-use crate::store::{self, Chunk, Db, Meeting, Segment};
+use crate::llm::{self, Gen};
+use crate::store::{self, Chunk, Db, Segment};
 use crate::util::clock;
 use crate::{AppState, notes_quality};
 use std::collections::{BTreeMap, HashMap};
@@ -243,183 +242,10 @@ pub fn summarize(app: &AppHandle, meeting_id: &str, model_path: &Path) -> Result
     Ok(summary)
 }
 
-// ---- Q&A --------------------------------------------------------------------
-
-/// Words that carry no search signal in a question.
-const STOPWORDS: &[&str] = &[
-    "a", "about", "all", "an", "and", "any", "are", "as", "at", "be", "been", "but", "by", "can",
-    "could", "did", "do", "does", "for", "from", "get", "got", "had", "has", "have", "he", "her",
-    "him", "his", "how", "i", "if", "in", "is", "it", "its", "last", "me", "meeting", "meetings",
-    "my", "of", "on", "or", "our", "out", "said", "say", "she", "so", "that", "the", "their",
-    "them", "then", "there", "they", "this", "to", "told", "us", "was", "we", "were", "what",
-    "when", "where", "which", "who", "why", "will", "with", "would", "you", "your", "talk",
-    "talked", "discuss", "discussed", "mention", "mentioned", "tell", "anything", "something",
-];
-
-fn keywords(question: &str) -> String {
-    question
-        .split(|c: char| !c.is_alphanumeric() && c != '\'')
-        .map(|w| w.trim_matches('\'').to_lowercase())
-        .filter(|w| w.len() > 1 && !STOPWORDS.contains(&w.as_str()))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Answer a question about one meeting. When the whole transcript fits the
-/// model's budget it goes in verbatim (on the Q&A slot: the material stays
-/// processed, so follow-ups only pay for the question); otherwise the notes,
-/// summary and every stretch's extracted points go in, plus the transcript
-/// lines that best match the question.
-pub fn ask(app: &AppHandle, meeting_id: &str, model_path: &Path, question: &str) -> Result<String, String> {
-    let db = app.state::<Db>();
-    let st = app.state::<AppState>();
-    let meeting = store::get_meeting(&db, meeting_id)?.ok_or("meeting not found")?;
-    let names = &meeting.speaker_names;
-
-    let mut head = String::new();
-    if !meeting.notes.trim().is_empty() {
-        head.push_str(&format!("My notes:\n{}\n\n", meeting.notes.trim()));
-    }
-    if !meeting.summary.trim().is_empty() {
-        head.push_str(&format!("Summary:\n{}\n\n", meeting.summary.trim()));
-    }
-    let transcript: String = meeting
-        .segments
-        .iter()
-        .map(|s| render_line(s, names))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let full = format!("{head}Transcript:\n{transcript}");
-    let budget = llm::prompt_budget(&st.llm, model_path)?;
-    let fits = llm::count_text_tokens(&st.llm, model_path, &full)? + 600 < budget;
-
-    let (material, slot) = if fits {
-        (full, Some(Slot::Qa))
-    } else {
-        let mut m = head;
-        let chunks = store::chunks(&db, meeting_id)?;
-        if !chunks.is_empty() {
-            m.push_str("Points from each part of the meeting:\n");
-            for c in chunks.iter().filter(|c| !is_empty_facts(&c.facts)) {
-                m.push_str(&format!(
-                    "### {}–{}\n{}\n",
-                    clock(c.start_ms),
-                    clock(c.end_ms),
-                    notes_quality::render(&notes_quality::decode(&c.facts), &meeting.segments, names)
-                ));
-            }
-        }
-        m.push_str("\nTranscript lines most related to the question:\n");
-        m.push_str(&related_lines(&db, &meeting, question, 40)?);
-        (m, None)
-    };
-    let messages = [
-        ("system", llm::MEETING_QA_PROMPT.to_string()),
-        ("user", format!("{material}\n\nQuestion: {question}")),
-    ];
-    let emitter = app.clone();
-    let gen = Gen {
-        max_tokens: 1200,
-        ..Default::default()
-    };
-    let _turn = LLM_TURN.lock().unwrap_or_else(|p| p.into_inner());
-    llm::chat(&st.llm, model_path, &messages, &gen, slot, &mut |t| {
-        let _ = emitter.emit("meeting-answer-token", t);
-    })
-}
-
-/// Transcript lines matching the question's keywords, each with one line of
-/// context either side, merged and in timeline order.
-fn related_lines(db: &Db, meeting: &Meeting, question: &str, limit: i64) -> Result<String, String> {
-    let Some(q) = store::fts_query(&keywords(question), true) else {
-        return Ok(String::new());
-    };
-    let hits = store::search_segment_ids(db, &q, Some(&meeting.id), limit)?;
-    let index: HashMap<i64, usize> = meeting.segments.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
-    let mut keep = std::collections::BTreeSet::new();
-    for (_, id, _) in hits {
-        if let Some(&i) = index.get(&id) {
-            for j in i.saturating_sub(1)..=(i + 1).min(meeting.segments.len().saturating_sub(1)) {
-                keep.insert(j);
-            }
-        }
-    }
-    Ok(keep
-        .into_iter()
-        .map(|i| render_line(&meeting.segments[i], &meeting.speaker_names))
-        .collect::<Vec<_>>()
-        .join("\n"))
-}
-
-/// Answer a question across all meetings from full-text retrieval: the best
-/// matching lines (with context) from the most relevant meetings, plus each
-/// meeting's summary. Streams on `meetings-answer-token`.
-pub fn ask_all(app: &AppHandle, model_path: &Path, question: &str) -> Result<String, String> {
-    let db = app.state::<Db>();
-    let st = app.state::<AppState>();
-    let Some(q) = store::fts_query(&keywords(question), true) else {
-        return Ok("Ask about something specific — a topic, a person, a decision.".into());
-    };
-    let hits = store::search_segment_ids(&db, &q, None, 120)?;
-    // Rank meetings by how many strong hits they have (hits come best-first).
-    let mut order: Vec<String> = Vec::new();
-    let mut count: HashMap<String, usize> = HashMap::new();
-    for (mid, _, _) in &hits {
-        if !count.contains_key(mid) {
-            order.push(mid.clone());
-        }
-        *count.entry(mid.clone()).or_default() += 1;
-    }
-    // Meetings whose summary/notes/title match but no transcript line does.
-    for h in store::search_meetings(&db, &keywords(question))? {
-        if h.kind == "meeting" && !count.contains_key(&h.meeting_id) {
-            order.push(h.meeting_id.clone());
-            count.insert(h.meeting_id, 0);
-        }
-    }
-    order.truncate(6);
-    if order.is_empty() {
-        return Ok("I couldn't find anything about that in your meetings.".into());
-    }
-    let budget = llm::prompt_budget(&st.llm, model_path)?.min(24_000);
-    let mut material = String::new();
-    for mid in &order {
-        let Some(m) = store::get_meeting(&db, mid)? else { continue };
-        let date = m.started_at.get(..10).unwrap_or("");
-        let title = if m.title.trim().is_empty() { "Untitled meeting" } else { m.title.trim() };
-        let mut part = format!("\n=== {title} ({date}) ===\n");
-        if !m.summary.trim().is_empty() {
-            let s: String = m.summary.chars().take(1500).collect();
-            part.push_str(&format!("Summary:\n{s}\n"));
-        }
-        let lines = related_lines(&db, &m, question, 12)?;
-        if !lines.is_empty() {
-            part.push_str(&format!("Matching transcript lines:\n{lines}\n"));
-        }
-        let total = llm::count_text_tokens(&st.llm, model_path, &format!("{material}{part}"))?;
-        if total > budget {
-            break;
-        }
-        material.push_str(&part);
-    }
-    let messages = [
-        ("system", llm::MEETINGS_QA_PROMPT.to_string()),
-        ("user", format!("{material}\n\nQuestion: {question}")),
-    ];
-    let emitter = app.clone();
-    let gen = Gen {
-        max_tokens: 1200,
-        ..Default::default()
-    };
-    let _turn = LLM_TURN.lock().unwrap_or_else(|p| p.into_inner());
-    llm::chat(&st.llm, model_path, &messages, &gen, None, &mut |t| {
-        let _ = emitter.emit("meetings-answer-token", t);
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Meeting;
 
     fn seg(start_ms: i64, speaker: &str, text: &str) -> Segment {
         Segment {
@@ -457,11 +283,6 @@ mod tests {
     fn names_do_not_replace_word_fragments_or_rewrite_other_names() {
         let names=HashMap::from([("me".into(),"Adnan".into()),("them:0".into(),"Speaker 2".into()),("them:1".into(),"Priya".into())]);
         assert_eq!(apply_names("Meeting: Me met Speaker 1 and Speaker 2. Somewhere else.",&names),"Meeting: Adnan met Speaker 2 and Priya. Somewhere else.");
-    }
-
-    #[test]
-    fn keywords_drop_filler() {
-        assert_eq!(keywords("What did we decide about the Q3 pricing?"), "decide q3 pricing");
     }
 
     /// A short synthetic product meeting (no real data) for eyeballing

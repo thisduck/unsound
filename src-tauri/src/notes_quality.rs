@@ -217,6 +217,7 @@ pub fn actions(
             due: f.due.clone(),
             at_ms: evidence_times(f, segments).first().copied(),
             done: false,
+            ignored: false, remind_at: None, reminder_error: String::new(), revision: 0,
             manual: false,
             created_at: String::new(),
             meeting_title: String::new(),

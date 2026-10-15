@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
-import { ActionItem, api, clock, Meeting, ModelInfo, on, SearchHit } from "../api";
-import { Markdown } from "../Markdown";
+import { useEffect, useState } from "react";
+import { api, clock, Meeting, ModelInfo, SearchHit } from "../api";
+import { ResearchPanel } from "./ResearchPanel";
+import { FollowUps } from "./FollowUps";
 import { elapsed, snippetParts, speakerLabel } from "./format";
 
 interface Props {
@@ -37,57 +38,21 @@ function group(hits: SearchHit[]): { meetingId: string; title: string; startedAt
 export function ListView({ meetings, onOpen, llmId, options, idle }: Props) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchHit[] | null>(null);
-  const [answer, setAnswer] = useState("");
-  const [asking, setAsking] = useState(false);
-  const askingRef = useRef(false);
-  const [items, setItems] = useState<ActionItem[]>([]);
-  const [showItems, setShowItems] = useState(false);
-
-  useEffect(() => {
-    api.openActionItems().then(setItems).catch(() => {});
-    const sub = on.meetingsAnswerToken((chunk) => {
-      if (askingRef.current) setAnswer((a) => a + chunk);
-    });
-    return () => {
-      sub.then((un) => un());
-    };
-  }, [meetings]);
-
+  const [showResearch, setShowResearch] = useState(false);
   // Full-text search as you type (debounced). Empty query → the full list.
   useEffect(() => {
     const q = query.trim();
-    setAnswer("");
     if (!q) {
       setResults(null);
       return;
     }
+    let active = true;
     const t = setTimeout(() => {
-      api.searchMeetings(q).then(setResults).catch((e) => console.error("search failed", e));
+      api.searchMeetings(q).then(rows => { if (active) setResults(rows); }).catch((e) => console.error("search failed", e));
     }, 180);
-    return () => clearTimeout(t);
+    return () => { active = false; clearTimeout(t); };
   }, [query]);
 
-  const askAll = async () => {
-    if (!llmId || !query.trim() || asking) return;
-    setAnswer("");
-    setAsking(true);
-    askingRef.current = true;
-    try {
-      setAnswer(await api.askMeetings(llmId, query.trim()));
-    } catch (e) {
-      setAnswer(String(e));
-    } finally {
-      askingRef.current = false;
-      setAsking(false);
-    }
-  };
-
-  const toggleItem = async (it: ActionItem) => {
-    const saved = await api.saveActionItem({ ...it, done: !it.done });
-    setItems((list) => list.map((x) => (x.id === it.id ? saved : x)));
-  };
-
-  const open = items.filter((i) => !i.done);
   const o = options;
 
   return (
@@ -142,24 +107,20 @@ export function ListView({ meetings, onOpen, llmId, options, idle }: Props) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && query.trim().endsWith("?")) askAll();
+              if (e.key === "Enter" && query.trim().endsWith("?")) setShowResearch(true);
             }}
-            placeholder="search every meeting — or ask a question and press ask"
+            placeholder="search transcripts and summaries"
           />
-          {llmId && query.trim() && (
-            <button className="quiet accent" disabled={asking} onClick={askAll}>
-              {asking ? "…" : "ask"}
+          {llmId && (
+            <button className="quiet accent" onClick={() => setShowResearch(s => !s)}>
+              {showResearch ? "close AI" : "ask AI"}
             </button>
           )}
         </div>
       )}
 
-      {(answer || asking) && (
-        <div className="meet-prose meet-answer">
-          <Markdown text={answer} />
-          {asking && <span className="caret" />}
-        </div>
-      )}
+      {llmId && <div hidden={!showResearch}><ResearchPanel modelId={llmId} initialQuestion={query} onSource={onOpen} /></div>}
+      <FollowUps onSource={onOpen} refreshKey={meetings} />
 
       {results !== null ? (
         results.length === 0 ? (
@@ -196,27 +157,6 @@ export function ListView({ meetings, onOpen, llmId, options, idle }: Props) {
         )
       ) : (
         <>
-          {open.length > 0 && (
-            <div className="open-items">
-              <button className="quiet open-items-toggle" onClick={() => setShowItems((s) => !s)}>
-                {showItems ? "▾" : "▸"} {open.length} open follow-up{open.length === 1 ? "" : "s"}
-              </button>
-              {showItems &&
-                open.map((it) => (
-                  <div className="item" key={it.id}>
-                    <input type="checkbox" checked={it.done} onChange={() => toggleItem(it)} />
-                    <span className="item-text">{it.text}</span>
-                    {it.owner && <span className="item-chip">{it.owner}</span>}
-                    {it.due && <span className="item-chip due">{it.due}</span>}
-                    {it.meetingId && (
-                      <button className="quiet item-src" onClick={() => onOpen(it.meetingId!, it.atMs ?? null)}>
-                        {it.meetingTitle || "meeting"}
-                      </button>
-                    )}
-                  </div>
-                ))}
-            </div>
-          )}
           {meetings.length === 0 && idle && (
             <div className="empty">
               <p>

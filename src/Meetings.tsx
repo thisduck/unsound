@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { api, Meeting, MeetingWork, ModelInfo, on, Segment, Task } from "./api";
 import { MeetingSetup } from "./MeetingSetup";
@@ -25,6 +26,7 @@ function RecTimer() {
 }
 
 interface Props {
+  openRequest?: { id: string; at: number | null } | null;
   stt?: ModelInfo;
   llm?: ModelInfo;
   language: string;
@@ -35,10 +37,16 @@ interface Props {
   onActivate?: () => void;
 }
 
-export function Meetings({ stt, llm, language, models, onModelsChanged, onActivate }: Props) {
+export function Meetings({ stt, llm, language, models, onModelsChanged, onActivate, openRequest }: Props) {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [selected, setSelected] = useState<Meeting | null>(null);
   const [focusMs, setFocusMs] = useState<number | null>(null);
+  useEffect(() => {
+    if (!openRequest) return;
+    let active = true;
+    api.getMeeting(openRequest.id).then(m => { if (active && m) { setSelected(m); setFocusMs(openRequest.at); } }).catch(e => { if (active) setError(String(e)); });
+    return () => { active = false; };
+  }, [openRequest]);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [work, setWork] = useState<MeetingWork[]>([]);
@@ -119,6 +127,14 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     loadAssist();
     api.systemAudioSupported().then(setSysSupported).catch(() => {});
     const subs = [
+      listen("action-items-changed", async () => {
+        const id = selectedIdRef.current;
+        if (!id) return;
+        try {
+          const fresh = await api.getMeeting(id);
+          if (fresh) setSelected(cur => cur?.id === id ? { ...cur, actionItems: fresh.actionItems } : cur);
+        } catch (e) { setError(String(e)); }
+      }),
       on.meetingSummaryToken((chunk) => {
         if (summaryRef.current) setLiveSummary((s) => (s ?? "") + chunk);
       }),
@@ -462,7 +478,9 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
           diarizeReady={embModels.length > 0}
           focusMs={focusMs}
         />
-      ) : (
+      ) : null}
+      {/* Preserve the archive conversation while opening a cited meeting. */}
+      <div hidden={Boolean(selected) || ((phase === "recording" || phase === "starting") && Boolean(live))}>
         <ListView
           meetings={meetings}
           onOpen={openMeeting}
@@ -479,7 +497,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
             set: setPref,
           }}
         />
-      )}
+      </div>
     </div>
   );
 }

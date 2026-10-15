@@ -15,11 +15,13 @@
     "test:notes": "node --test tests/*.test.mjs",
     "test:native-backend": "node e2e/native-backend.mjs",
     "bench:meeting": "node e2e/meeting-bench.mjs",
-    "test:meeting-quality": "cargo test --locked --manifest-path src-tauri/Cargo.toml --lib notes_quality && cargo test --locked --manifest-path src-tauri/Cargo.toml --lib speakers::tests && cargo test --locked --manifest-path src-tauri/Cargo.toml --lib summary::tests::names && cargo test --locked --manifest-path src-tauri/Cargo.toml --lib meeting_metrics"
+    "test:meeting-quality": "cargo test --locked --manifest-path src-tauri/Cargo.toml --lib notes_quality && cargo test --locked --manifest-path src-tauri/Cargo.toml --lib speakers::tests && cargo test --locked --manifest-path src-tauri/Cargo.toml --lib summary::tests::names && cargo test --locked --manifest-path src-tauri/Cargo.toml --lib meeting_metrics",
+    "test:followups": "cargo test --locked --manifest-path src-tauri/Cargo.toml --lib followup && cargo test --locked --manifest-path src-tauri/Cargo.toml --lib meeting_research"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
+    "@tauri-apps/api": "~2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-notification": "~2.4.0",
     "@tauri-apps/plugin-opener": "^2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

@@ -30,6 +30,8 @@ mod store;
 mod stt;
 mod summary;
 mod notes_quality;
+mod meeting_research;
+mod reminders;
 #[cfg(target_os = "macos")]
 mod syscapture;
 #[allow(dead_code)]
@@ -620,22 +622,11 @@ async fn summarize_meeting(app: AppHandle, meeting_id: String, model_id: String)
     full_meeting(&app, &db, &meeting_id)
 }
 
-/// Answer a question about one meeting (streams on `meeting-answer-token`).
+/// Research a question with read-only search and transcript tools; return checked sources.
 #[tauri::command]
-async fn ask_meeting(app: AppHandle, meeting_id: String, model_id: String, question: String) -> Result<String, String> {
-    let model_path = models::downloaded_model_path(&app, &model_id)?;
-    tauri::async_runtime::spawn_blocking(move || summary::ask(&app, &meeting_id, &model_path, &question))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-/// Answer a question across all meetings (streams on `meetings-answer-token`).
-#[tauri::command]
-async fn ask_meetings(app: AppHandle, model_id: String, question: String) -> Result<String, String> {
-    let model_path = models::downloaded_model_path(&app, &model_id)?;
-    tauri::async_runtime::spawn_blocking(move || summary::ask_all(&app, &model_path, &question))
-        .await
-        .map_err(|e| e.to_string())?
+async fn research_meetings(app: AppHandle, model_id: String, question: String, meeting_id: Option<String>, history: Option<Vec<meeting_research::Turn>>) -> Result<meeting_research::Answer, String> {
+    let path=models::downloaded_model_path(&app,&model_id)?;
+    tauri::async_runtime::spawn_blocking(move || meeting_research::run(&app,&path,&question,meeting_id.as_deref(),&history.unwrap_or_default())).await.map_err(|e|e.to_string())?
 }
 
 /// Full-text search across every meeting: transcript lines (with their time)
@@ -770,8 +761,14 @@ fn open_action_items(db: State<Db>) -> Result<Vec<store::ActionItem>, String> {
 }
 
 #[tauri::command]
-fn save_action_item(db: State<Db>, item: store::ActionItem) -> Result<store::ActionItem, String> {
-    store::save_action_item(&db, &item)
+fn list_action_items(db: State<Db>) -> Result<Vec<store::ActionItem>, String> { store::list_action_items(&db) }
+#[tauri::command]
+fn due_action_reminders(db: State<Db>) -> Result<Vec<store::ActionItem>, String> { store::due_reminders(&db,util::now_ms(),false) }
+#[tauri::command]
+fn save_action_item(app: AppHandle, db: State<Db>, item: store::ActionItem) -> Result<store::ActionItem, String> {
+    let saved=store::save_action_item(&db, &item)?;
+    let _=app.emit("action-items-changed",());
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -1282,6 +1279,7 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -1358,6 +1356,7 @@ pub fn run() {
                 meeting_fixture_runner::launch_if_requested(&handle);
                 return Ok(());
             }
+            reminders::start(handle.clone());
             agent::start(&handle);
             meeting::start_recovery(handle.clone());
             // The command key (from either shortcut path) is handled here,
@@ -1430,8 +1429,7 @@ pub fn run() {
             list_meetings,
             get_meeting,
             summarize_meeting,
-            ask_meeting,
-            ask_meetings,
+            research_meetings,
             search_meetings,
             meeting_start,
             meeting_stop,
@@ -1444,6 +1442,8 @@ pub fn run() {
             add_mark,
             delete_mark,
             open_action_items,
+            list_action_items,
+            due_action_reminders,
             save_action_item,
             delete_action_item,
             list_tasks,

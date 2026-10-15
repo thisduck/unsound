@@ -33,6 +33,7 @@ jobs:
       - run: npm ci
       - run: npm run test:reliability
       - run: npm run test:meeting-quality
+      - run: npm run test:followups
       - run: npm run test:notes
       - run: npm run e2e:build
       - run: npm run test:native-backend

@@ -258,3 +258,66 @@ The baseline also records the synthetic five-voice speaker evaluation. Automatic
 clustering produced four speakers, with live purity 0.70 and offline purity 0.72.
 This exposes a remaining quality gap. Speaker correction is tested; automatic
 diarization still needs evaluation and tuning on labeled conversational audio.
+
+## Action follow-through and reminders
+
+`npm run test:followups` covers open/done/ignored transitions, preservation during
+note regeneration, stale-edit rejection, notification retry, and reminder leases
+across database reopen. The native webview spec exercises ignore, restart,
+reopen, and completion through real IPC.
+
+Actions have editable text, owner, deadline wording, and an optional explicit
+reminder time. Done and ignored actions remain available through filters and can
+be reopened. They cancel their pending reminder. Ignored actions also appear as
+ignored when copied to Markdown. Generated notes preserve user-managed actions;
+identical normalized action text is not recreated during regeneration.
+
+Reminders use a persisted timestamp and a backend worker, so hiding the main
+window does not stop delivery. Quitting the application stops its worker;
+overdue reminders are picked up on the next launch. Notifications use the
+[Tauri notification plugin](https://v2.tauri.app/plugin/notification/). Notification
+permission is requested only when the user schedules a reminder. OS settings may
+suppress a notification even if submission succeeds, so the in-app due-reminder
+inbox remains visible until the user acts. Scheduling is not an Apple Reminders
+export or a background service that runs after the app quits.
+
+Delivery uses a 60-second SQLite lease before contacting the OS. Failed attempts
+retry after that lease, and stale schedules cannot acknowledge a newer snooze.
+A crash after OS submission and before acknowledgement can repeat a notification;
+the action itself remains a single record. Automation builds do not start the
+notification worker, so fixtures never send desktop notifications.
+
+## AI research over meetings
+
+The archive's **ask AI** control and each meeting's question panel use the same
+read-only research loop. The model chooses search keywords and can read transcript
+windows from discovered meetings. Searches include transcript full text,
+summaries/title/notes, and named speakers; a meeting-scoped conversation cannot
+read outside that meeting. Queries remove common question filler and diversify
+transcript hits across meetings. The recent-meeting catalog is a starting point,
+not the search boundary.
+
+Answers contain cited claims, exact transcript quotations, source cards, and links
+to the original meeting/time. Generated summaries are labeled as secondary
+sources, including a stale warning. Quotes are checked as exact contiguous text
+from retrieved transcript sources; unknown citations and summary-as-transcript
+quotes fail validation. If a cited meeting changes during research, the answer
+is rejected. Citation checks do not prove the semantic correctness of a claim.
+The model can report insufficient evidence rather than invent an answer.
+
+The loop allows five tool calls plus bounded validation repair, forty sources,
+and 20,000 characters of source text, with a model-token-budget check. Reads
+return up to twelve transcript segments from a selected position. There are no
+write, shell, network, or action-execution tools. Four recent conversation turns
+provide follow-up context but do not count as evidence; answers must retrieve
+sources again. Conversation history is in memory and survives opening an archive
+citation, but not app restart.
+
+```sh
+LLM_MODEL=/path/to/model.gguf cargo test --locked --manifest-path src-tauri/Cargo.toml --lib research_with_real_model -- --ignored --nocapture
+```
+
+The synthetic Qwen3 4B evaluation locates an older meeting beyond the recent
+catalog, verifies a verbatim quote with its speaker/time, answers a follow-up,
+and reports insufficient evidence for an unrelated question. Pure tests cover
+scope boundaries, source limits, duplicate reads, and fabricated quotes/IDs.

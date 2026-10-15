@@ -49,6 +49,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries", "static"] }
 # MCP client for the meeting assistant (stdio + streamable HTTP servers).
 rmcp = { version = "3.5", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+tauri-plugin-notification = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

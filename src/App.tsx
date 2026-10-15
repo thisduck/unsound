@@ -1,3 +1,4 @@
+import { ReminderInbox } from "./meetings/ReminderInbox";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, on, formatBytes, formatDuration, LANGUAGES, ModelInfo, Style } from "./api";
 import { CorrectableText } from "./Correctable";
@@ -77,6 +78,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [view, setView] = useState<"dictate" | "meetings" | "tasks">("dictate");
+  const [reminderTarget, setReminderTarget] = useState<{ id: string; at: number | null } | null>(null);
   const [readyTasks, setReadyTasks] = useState(0);
   const [rawOpen, setRawOpen] = useState(false);
   const [onboarding, setOnboarding] = useState(() => !localStorage.getItem("unsound.onboarded"));
@@ -601,6 +603,8 @@ export default function App() {
         </button>
       </header>
 
+      <ReminderInbox onSource={(id, at) => { setView("meetings"); setReminderTarget({ id, at: at ?? null }); }} />
+
       {/* Meetings stays mounted (hidden when inactive) so the tray "Start /
           stop meeting" toggle works from any tab or with the window hidden. */}
       <div className={"view-wrap" + (view === "meetings" ? "" : " hidden")}>
@@ -610,6 +614,7 @@ export default function App() {
           language={language}
           models={models}
           onModelsChanged={refreshModels}
+          openRequest={reminderTarget}
           onActivate={() => setView("meetings")}
         />
       </div>

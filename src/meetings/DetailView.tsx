@@ -1,6 +1,8 @@
 import { useNotesSave } from "./useNotesSave";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ActionItem, api, clock, Meeting, on, Segment, Task } from "../api";
+import { ActionItem, api, clock, Meeting, Segment, Task } from "../api";
+import { ActionRow } from "./ActionRow";
+import { ResearchPanel } from "./ResearchPanel";
 import { Markdown } from "../Markdown";
 import { elapsed, meetingMarkdown, speakerClass, speakerLabel } from "./format";
 import { mergeTask, TaskCard } from "./TaskCard";
@@ -46,13 +48,12 @@ export function DetailView(p: Props) {
   const [notes, setNotes] = useState(m.notes);
   const notesSave = useNotesSave(m.id, setNotes, (text) => p.onMeeting({ ...m, notes: text, summaryStale: true }));
   const [editingSummary, setEditingSummary] = useState(false);
-  const [question, setQuestion] = useState("");
-  const [answer, setAnswer] = useState("");
-  const [asking, setAsking] = useState(false);
   const [copied, setCopied] = useState(false);
   const [reCount, setReCount] = useState("");
   const [reDetecting, setReDetecting] = useState(false);
   const [newItem, setNewItem] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [itemError, setItemError] = useState("");
   const [fix, setFix] = useState<{ from: string; to: string; count: number } | null>(null);
   const [speakerError, setSpeakerError] = useState<string | null>(null);
   const [correcting, setCorrecting] = useState<number | null>(null);
@@ -67,17 +68,6 @@ export function DetailView(p: Props) {
     try { setNotes(localStorage.getItem(`unsound.notes-draft.${m.id}`) ?? m.notes); }
     catch { setNotes(m.notes); }
   }, [m.id, m.notes]);
-
-  // Stream this meeting's Q&A answer.
-  const askingRef = useRef(false);
-  useEffect(() => {
-    const sub = on.meetingAnswerToken((chunk) => {
-      if (askingRef.current) setAnswer((a) => a + chunk);
-    });
-    return () => {
-      sub.then((un) => un());
-    };
-  }, []);
 
   const segments = useMemo(() => [...m.segments].sort((a, b) => a.startMs - b.startMs), [m.segments]);
   const playingIdx = useMemo(() => {
@@ -111,21 +101,6 @@ export function DetailView(p: Props) {
     if (p.focusMs != null) setTimeout(() => scrollTo(p.focusMs!), 50);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.focusMs, m.id]);
-
-  const ask = async () => {
-    if (!p.llmId || !question.trim() || asking) return;
-    setAnswer("");
-    setAsking(true);
-    askingRef.current = true;
-    try {
-      setAnswer(await api.askMeeting(m.id, p.llmId, question.trim()));
-    } catch (e) {
-      setAnswer(String(e));
-    } finally {
-      askingRef.current = false;
-      setAsking(false);
-    }
-  };
 
   const saveSegment = async (seg: Segment, text: string) => {
     if (!seg.id || text === seg.text) return;
@@ -162,11 +137,6 @@ export function DetailView(p: Props) {
       actionItems: item.id ? items.map((i) => (i.id === item.id ? saved : i)) : [...items, saved],
     });
   };
-  const deleteItem = async (id: number) => {
-    await api.deleteActionItem(id);
-    p.onMeeting({ ...m, actionItems: (m.actionItems ?? []).filter((i) => i.id !== id) });
-  };
-
   const renameSpeaker = async (speaker: string, name: string) => {
     try {
       setSpeakerError(null);
@@ -291,41 +261,19 @@ export function DetailView(p: Props) {
         <h3>action items</h3>
         {items.length === 0 && <p className="dim">none yet.</p>}
         <div className="items">
-          {items.map((it) => (
-            <div className={"item" + (it.done ? " done" : "")} key={it.id}>
-              <input type="checkbox" checked={it.done} onChange={() => saveItem({ ...it, done: !it.done })} />
-              <span
-                className="item-text"
-                contentEditable
-                suppressContentEditableWarning
-                onBlur={(e) => {
-                  const text = e.currentTarget.textContent?.trim() ?? "";
-                  if (text && text !== it.text) saveItem({ ...it, text });
-                }}
-              >
-                {it.text}
-              </span>
-              {it.owner && <span className="item-chip">{it.owner}</span>}
-              {it.due && <span className="item-chip due">{it.due}</span>}
-              {it.atMs != null && (
-                <button className="time-link" onClick={() => jump(it.atMs!)}>
-                  {clock(it.atMs)}
-                </button>
-              )}
-              <button className="quiet item-x" onClick={() => deleteItem(it.id)} title="Remove">
-                ✕
-              </button>
-            </div>
-          ))}
+          {items.map((it) => <ActionRow key={it.id} item={it} onSave={saveItem} onSource={() => it.atMs != null && jump(it.atMs)} />)}
         </div>
+        {itemError && <p className="meet-error" role="alert">{itemError}</p>}
         <input
+          disabled={adding}
           className="item-add"
           value={newItem}
           placeholder="+ add an action item"
           onChange={(e) => setNewItem(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && newItem.trim()) {
-              saveItem({
+            if (e.key === "Enter" && newItem.trim() && !adding) {
+              setAdding(true); setItemError("");
+              void saveItem({
                 id: 0,
                 meetingId: m.id,
                 text: newItem.trim(),
@@ -336,8 +284,7 @@ export function DetailView(p: Props) {
                 manual: true,
                 createdAt: "",
                 meetingTitle: "",
-              });
-              setNewItem("");
+              }).then(() => setNewItem("")).catch(e => setItemError(String(e))).finally(() => setAdding(false));
             }
           }}
         />
@@ -352,32 +299,7 @@ export function DetailView(p: Props) {
         </section>
       )}
 
-      {p.llmId && m.segments.length > 0 && (
-        <section className="meet-section">
-          <h3>ask about this meeting</h3>
-          <div className="meet-ask">
-            <input
-              className="meet-ask-input"
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") ask();
-              }}
-              placeholder="e.g. what did I agree to? what did Priya say about pricing?"
-              disabled={asking}
-            />
-            <button className="quiet accent" onClick={ask} disabled={asking || !question.trim()}>
-              {asking ? "…" : "ask"}
-            </button>
-          </div>
-          {(answer || asking) && (
-            <div className="meet-prose meet-answer">
-              <Markdown text={answer} onTime={jump} />
-              {asking && <span className="caret" />}
-            </div>
-          )}
-        </section>
-      )}
+      {p.llmId && <ResearchPanel key={m.id} modelId={p.llmId} meetingId={m.id} onSource={(_, at) => at != null && jump(at)} />}
 
       <section className="meet-section">
         <h3>my notes</h3>

@@ -38,7 +38,7 @@ export function meetingMarkdown(m: Meeting): string {
     out.push("## Action items", "");
     for (const it of items) {
       const meta = [it.owner, it.due].filter(Boolean).join(", ");
-      out.push(`- [${it.done ? "x" : " "}] ${it.text}${meta ? ` (${meta})` : ""}`);
+      out.push(it.ignored ? `- ~~${it.text}~~ (ignored)${meta ? ` (${meta})` : ""}` : `- [${it.done ? "x" : " "}] ${it.text}${meta ? ` (${meta})` : ""}`);
     }
     out.push("");
   }
