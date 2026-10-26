@@ -9,10 +9,10 @@
 //! The final, authoritative transcription + cleanup still happens once at stop.
 
 use crate::{asr, audio, stt, AppState};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -32,80 +32,108 @@ const VOICED_FRAME: usize = 480;
 const VOICED_RMS: f32 = 0.01;
 const TICK_MS: u64 = 100;
 
+/// Completed takes own their audio and detected language until their turn in
+/// the processing queue. A later recording must never replace either one.
+pub struct RecordedTake {
+    pub samples: Vec<f32>,
+    pub language: Option<String>,
+}
+
+#[derive(Default)]
+pub struct PendingTakes(Mutex<HashMap<String, RecordedTake>>);
+
+impl PendingTakes {
+    pub fn insert(&self, id: String, take: RecordedTake) {
+        self.0.lock().unwrap().insert(id, take);
+    }
+
+    pub fn take(&self, id: &str) -> Result<RecordedTake, String> {
+        self.0.lock().unwrap().remove(id).ok_or_else(|| "recording is no longer available".into())
+    }
+}
+
 #[derive(Default)]
 pub struct LiveState {
     active: Mutex<Option<Handle>>,
-    /// The spoken language detected for the current take, if any.
-    detected: Mutex<Option<String>>,
 }
 
 struct Handle {
     stop: Arc<AtomicBool>,
-    join: Option<JoinHandle<()>>,
+    /// Owned by this take, including after its worker has been stopped.
+    detected: Arc<Mutex<Option<String>>>,
+}
+
+impl LiveState {
+    fn finish(&self) -> Option<String> {
+        let handle = self.active.lock().unwrap().take()?;
+        handle.stop.store(true, Ordering::Relaxed);
+        // Native inference can take time to notice cancellation. Capture must
+        // not join it; a late detection stays with the retired take instead.
+        let language = handle.detected.lock().unwrap().take();
+        language
+    }
 }
 
 pub fn start(
     app: &AppHandle,
+    take_id: String,
     model_id: String,
     language: Option<String>,
     initial_prompt: Option<String>,
 ) -> Result<(), String> {
-    // A fresh take: end any leftover worker and forget its language.
+    // A fresh take: retire the previous preview without waiting on inference.
     stop(app);
     let st = app.state::<AppState>();
-    *st.live.detected.lock().unwrap() = None;
     let detect_with = match language {
         None => asr::whisper_path(app, &model_id)?,
         Some(_) => None,
     };
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_thread = stop_flag.clone();
+    let detected = Arc::new(Mutex::new(None));
+    let detected_thread = detected.clone();
     let app_thread = app.clone();
-    let join = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         run_live(
             app_thread,
+            take_id,
             model_id,
             language,
             initial_prompt,
             detect_with,
             stop_thread,
+            detected_thread,
         )
     });
     *st.live.active.lock().unwrap() = Some(Handle {
         stop: stop_flag,
-        join: Some(join),
+        detected,
     });
     Ok(())
 }
 
 pub fn stop(app: &AppHandle) {
-    // Hold the lock through the join so a concurrent `finish` waits for an
-    // in-flight detection to land rather than reading too early.
-    let st = app.state::<AppState>();
-    let mut active = st.live.active.lock().unwrap();
-    if let Some(mut h) = active.take() {
-        h.stop.store(true, Ordering::Relaxed);
-        if let Some(j) = h.join.take() {
-            let _ = j.join();
-        }
-    }
+    finish(app);
 }
 
 /// Stop the take's background work and hand over the language it detected.
 /// Taken, not copied: re-running transcription later detects afresh.
 pub fn finish(app: &AppHandle) -> Option<String> {
-    stop(app);
-    app.state::<AppState>().live.detected.lock().unwrap().take()
+    app.state::<AppState>().live.finish()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_live(
     app: AppHandle,
+    take_id: String,
     model_id: String,
     language: Option<String>,
     initial_prompt: Option<String>,
     mut detect_with: Option<PathBuf>,
     stop: Arc<AtomicBool>,
+    detected: Arc<Mutex<Option<String>>>,
 ) {
+    if stop.load(Ordering::Relaxed) { return; }
     // Build the engine once on this thread (sherpa recognizers are !Send).
     let mut engine = match asr::resolve(&app, &model_id) {
         Ok(e) => Some(e),
@@ -120,6 +148,7 @@ fn run_live(
     let mut next_caption = Instant::now() + Duration::from_millis(CAPTION_GAP_MS);
     while !stop.load(Ordering::Relaxed) && (engine.is_some() || detect_with.is_some()) {
         std::thread::sleep(Duration::from_millis(TICK_MS));
+        if stop.load(Ordering::Relaxed) { break; }
         let now = Instant::now();
         if let Some(path) = detect_with.clone().filter(|_| now >= next_detect) {
             let st = app.state::<AppState>();
@@ -129,7 +158,7 @@ fn run_live(
             } else {
                 match stt::detect_language(&st.stt, &path, &samples) {
                     Ok(Some(lang)) => {
-                        *st.live.detected.lock().unwrap() = Some(lang.clone());
+                        *detected.lock().unwrap() = Some(lang.clone());
                         language = Some(lang);
                         detect_with = None;
                     }
@@ -141,6 +170,7 @@ fn run_live(
                 }
             }
         }
+        if stop.load(Ordering::Relaxed) { break; }
         // With the language on auto, wait for it: Whisper's own guess on the
         // first second or two is unreliable and would caption another language.
         let caption_due = now >= next_caption && detect_with.is_none();
@@ -156,7 +186,7 @@ fn run_live(
             next_caption = next_caption.max(Instant::now() + now.elapsed() * 2);
             if let Ok(text) = result {
                 if !text.is_empty() && !stop.load(Ordering::Relaxed) {
-                    let _ = app.emit("dictation-live", text);
+                    let _ = app.emit("dictation-live", serde_json::json!({ "takeId": take_id, "text": text }));
                 }
             }
         }
@@ -175,6 +205,27 @@ fn voiced_secs(samples: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finishing_does_not_wait_for_or_adopt_an_older_detection() {
+        let live = LiveState::default();
+        let old_stop = Arc::new(AtomicBool::new(false));
+        let old_language = Arc::new(Mutex::new(None));
+        *live.active.lock().unwrap() = Some(Handle {
+            stop: old_stop.clone(), detected: old_language.clone(),
+        });
+        // The old native inference has not returned. Finish still releases it.
+        assert_eq!(live.finish(), None);
+        assert!(old_stop.load(Ordering::Relaxed));
+        *live.active.lock().unwrap() = Some(Handle {
+            stop: Arc::new(AtomicBool::new(false)),
+            detected: Arc::new(Mutex::new(Some("fr".into()))),
+        });
+        // A late result cannot supply the language of the new take.
+        *old_language.lock().unwrap() = Some("en".into());
+        assert_eq!(live.finish().as_deref(), Some("fr"));
+        assert_eq!(live.finish(), None);
+    }
 
     #[test]
     fn counts_only_frames_with_speech_energy() {

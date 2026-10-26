@@ -402,9 +402,10 @@ pub fn cleanup_text(
     target_lang: Option<&str>,
     // Romanize the original words into the Latin alphabet without translating.
     transliterate: bool,
+    take_id: Option<&str>,
 ) -> Result<String, String> {
     let emit = &mut |t: &str| {
-        let _ = app.emit("llm-token", t);
+        let _ = app.emit("llm-token", serde_json::json!({ "takeId": take_id, "chunk": t }));
     };
     cleanup(emit, state, model_path, system_prompt, transcript, style, target_lang, transliterate)
 }

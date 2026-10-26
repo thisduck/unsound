@@ -291,9 +291,10 @@ export const api = {
   addCustomModel: (name: string, kind: ModelKind, url: string) =>
     invoke<ModelInfo>("add_custom_model", { name, kind, url }),
   startRecording: () => invoke<void>("start_recording"),
-  stopRecording: () => invoke<RecordingResult>("stop_recording"),
-  transcribe: (modelId: string, language?: string, translate = false) =>
-    invoke<string>("transcribe", { modelId, language: language ?? null, translate }),
+  stopRecording: (recordingId?: string) => invoke<RecordingResult>("stop_recording", { recordingId: recordingId ?? null }),
+  discardRecording: (recordingId: string) => invoke<void>("discard_recording", { recordingId }),
+  transcribe: (modelId: string, language?: string, translate = false, recordingId?: string) =>
+    invoke<string>("transcribe", { modelId, language: language ?? null, translate, recordingId: recordingId ?? null }),
   transcribeFile: (path: string, modelId: string, language?: string, translate = false) =>
     invoke<string>("transcribe_file", { path, modelId, language: language ?? null, translate }),
   warmStt: (modelId: string) => invoke<void>("warm_stt", { modelId }),
@@ -311,8 +312,8 @@ export const api = {
       targetLang: targetLang ?? null,
       transliterate,
     }),
-  startLiveDictation: (modelId: string, language?: string) =>
-    invoke<void>("start_live_dictation", { modelId, language: language ?? null }),
+  startLiveDictation: (takeId: string, modelId: string, language?: string) =>
+    invoke<void>("start_live_dictation", { takeId, modelId, language: language ?? null }),
   stopLiveDictation: () => invoke<void>("stop_live_dictation"),
   cleanupText: (
     modelId: string,
@@ -321,6 +322,7 @@ export const api = {
     styleId?: string,
     targetLang?: string,
     transliterate = false,
+    takeId?: string,
   ) =>
     invoke<string>("cleanup_text", {
       modelId,
@@ -329,6 +331,7 @@ export const api = {
       styleId: styleId ?? null,
       targetLang: targetLang ?? null,
       transliterate,
+      takeId: takeId ?? null,
     }),
   defaultCleanupPrompt: () => invoke<string>("default_cleanup_prompt"),
   getSettings: () => invoke<Settings>("get_settings"),
@@ -347,7 +350,7 @@ export const api = {
   listMicrophones: () => invoke<string[]>("list_microphones"),
   setMicrophone: (device: string) => invoke<void>("set_microphone", { device }),
   setOverlay: (visible: boolean) => invoke<void>("set_overlay", { visible }),
-  emitOverlayState: (state: OverlayState) => emit("overlay-state", state),
+  emitOverlayState: (state: OverlayState, takeId?: string) => emit("overlay-state", { state, takeId }),
 
   // History — now stored in SQLite (was localStorage).
   listTakes: () => invoke<Take[]>("list_takes"),
@@ -474,8 +477,8 @@ export const on = {
     listen<DownloadProgress>("model-download-progress", (e) => cb(e.payload)),
   downloadDone: (cb: (d: DownloadDone) => void): Promise<UnlistenFn> =>
     listen<DownloadDone>("model-download-done", (e) => cb(e.payload)),
-  llmToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
-    listen<string>("llm-token", (e) => cb(e.payload)),
+  llmToken: (cb: (token: { takeId: string | null; chunk: string }) => void): Promise<UnlistenFn> =>
+    listen<{ takeId: string | null; chunk: string }>("llm-token", (e) => cb(e.payload)),
   meetingSummaryToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
     listen<string>("meeting-summary-token", (e) => cb(e.payload)),
   meetingAnswerToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
@@ -525,14 +528,17 @@ export const on = {
     listen<{ combo: string }>("capture-commit", (e) => cb(e.payload.combo)),
   captureCancel: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("capture-cancel", () => cb()),
-  overlayState: (cb: (state: OverlayState) => void): Promise<UnlistenFn> =>
-    listen<OverlayState>("overlay-state", (e) => cb(e.payload)),
+  overlayState: (cb: (state: OverlayState, takeId?: string) => void): Promise<UnlistenFn> =>
+    listen<OverlayState | { state: OverlayState; takeId?: string }>("overlay-state", (e) => {
+      if (typeof e.payload === "string") cb(e.payload);
+      else cb(e.payload.state, e.payload.takeId);
+    }),
   settingsChanged: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("settings-changed", () => cb()),
   fileInfo: (cb: (info: { sizeBytes: number; durationSecs: number }) => void): Promise<UnlistenFn> =>
     listen<{ sizeBytes: number; durationSecs: number }>("file-info", (e) => cb(e.payload)),
-  dictationLive: (cb: (text: string) => void): Promise<UnlistenFn> =>
-    listen<string>("dictation-live", (e) => cb(e.payload)),
+  dictationLive: (cb: (caption: { takeId: string; text: string }) => void): Promise<UnlistenFn> =>
+    listen<{ takeId: string; text: string }>("dictation-live", (e) => cb(e.payload)),
 };
 
 /// A meeting position as people read it: "4:05", or "1:02:03" past an hour.

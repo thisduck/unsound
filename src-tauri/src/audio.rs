@@ -483,6 +483,33 @@ mod reliability_tests {
     }
 
     #[test]
+    fn queued_dictations_keep_their_audio_when_the_next_recording_finishes() {
+        use crate::dictation::{PendingTakes, RecordedTake};
+        let state = AudioState::default();
+        let pending = PendingTakes::default();
+        for (id, sample, language) in [("first", 0.25, "en"), ("second", 0.5, "fr")] {
+            let buffer = disconnected(&state);
+            state.active.lock().unwrap().as_mut().unwrap().owner = Owner::Dictation;
+            buffer.lock().unwrap().extend([sample; 8000]);
+            assert_eq!(stop_recording(&state).unwrap().sample_count, 8000);
+            pending.insert(id.into(), RecordedTake {
+                samples: state.last_recording.lock().unwrap().clone(),
+                language: Some(language.into()),
+            });
+        }
+        // The shared replay buffer now holds the second take. The queued
+        // first take must still transcribe its own audio and language.
+        assert_eq!(*state.last_recording.lock().unwrap(), vec![0.5; 8000]);
+        let first = pending.take("first").unwrap();
+        assert_eq!(first.samples, vec![0.25; 8000]);
+        assert_eq!(first.language.as_deref(), Some("en"));
+        let second = pending.take("second").unwrap();
+        assert_eq!(second.samples, vec![0.5; 8000]);
+        assert_eq!(second.language.as_deref(), Some("fr"));
+        assert!(pending.take("first").is_err());
+    }
+
+    #[test]
     fn shutdown_keeps_samples_from_the_final_device_callback() {
         let state = AudioState::default();
         let buffer = disconnected(&state);

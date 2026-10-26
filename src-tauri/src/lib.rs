@@ -73,6 +73,8 @@ pub struct AppState {
     meeting: meeting::MeetingState,
     /// Live dictation captions state (preview transcription loop).
     live: dictation::LiveState,
+    /// Audio waiting for dictation processing, separate from the active mic.
+    pending_dictations: dictation::PendingTakes,
     /// Most recent pipeline output, for the tray's "paste last take".
     pub last_output: Mutex<String>,
     /// Registered shortcut id → which mode it drives.
@@ -140,11 +142,31 @@ fn set_microphone(app: AppHandle, device: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn stop_recording(app: AppHandle, state: State<AppState>) -> Result<RecordingResult, String> {
+async fn stop_recording(app: AppHandle, recording_id: Option<String>) -> Result<RecordingResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        // Retire this take's preview immediately. It never joins inference or
+        // touches the live worker of a later take during queued transcription.
+        let language = dictation::finish(&app);
+        let result = stop_dictation_recording(&app, &state);
+        let samples = recording_id.as_ref().filter(|_| result.is_ok())
+            .map(|_| state.audio.last_recording.lock().unwrap().clone());
+        let result = result?;
+        if let (Some(id), Some(samples)) = (recording_id, samples) {
+            state.pending_dictations.insert(id, dictation::RecordedTake {
+                samples,
+                language,
+            });
+        }
+        Ok(result)
+    }).await.map_err(|e| e.to_string())?
+}
+
+fn stop_dictation_recording(app: &AppHandle, state: &AppState) -> Result<RecordingResult, String> {
     let tap = state.audio.dictation_tap.lock().unwrap().take();
     if let Some(tap) = tap {
         let (samples, end) = audio::tap_end(&state.audio, tap)?;
-        meeting::exclude_until(&app, *state.dictation_tap_start.lock().unwrap(), end);
+        meeting::exclude_until(app, *state.dictation_tap_start.lock().unwrap(), end);
         let result = RecordingResult {
             duration_secs: samples.len() as f32 / audio::WHISPER_SAMPLE_RATE as f32,
             sample_count: samples.len(),
@@ -156,13 +178,25 @@ fn stop_recording(app: AppHandle, state: State<AppState>) -> Result<RecordingRes
 }
 
 #[tauri::command]
+fn discard_recording(state: State<AppState>, recording_id: String) {
+    let _ = state.pending_dictations.take(&recording_id);
+}
+
+#[tauri::command]
 async fn transcribe(
     app: AppHandle,
     state: State<'_, AppState>,
     model_id: String,
     language: Option<String>,
+    recording_id: Option<String>,
 ) -> Result<String, String> {
-    let samples = state.audio.last_recording.lock().unwrap().clone();
+    let recording = match recording_id {
+        Some(id) => state.pending_dictations.take(&id)?,
+        None => dictation::RecordedTake {
+            samples: state.audio.last_recording.lock().unwrap().clone(),
+            language: None,
+        },
+    };
     let initial_prompt = vocab_prompt(&app);
     // Inference is heavy; keep it off the async runtime. The engine (whisper or
     // a sherpa model) is resolved on the blocking thread.
@@ -170,12 +204,12 @@ async fn transcribe(
     let text = tauri::async_runtime::spawn_blocking(move || {
         // On auto, use the language detected while recording, sparing Whisper
         // its own detection pass.
-        let language = language.or_else(|| dictation::finish(&worker_app));
+        let language = language.or(recording.language);
         let mut engine = asr::resolve(&worker_app, &model_id)?;
         asr::transcribe_text(
             &worker_app,
             &mut engine,
-            &samples,
+            &recording.samples,
             language.as_deref(),
             initial_prompt.as_deref(),
         )
@@ -221,15 +255,16 @@ fn vocab_prompt(app: &AppHandle) -> Option<String> {
 #[tauri::command]
 async fn start_live_dictation(
     app: AppHandle,
+    take_id: String,
     model_id: String,
     language: Option<String>,
 ) -> Result<(), String> {
     // Validate the model is present; the engine is built on the live thread.
     models::downloaded_model_path(&app, &model_id)?;
     let initial_prompt = vocab_prompt(&app);
-    // May wait out a previous take's worker; keep that off the main thread.
+    // Keep model setup off the main thread.
     tauri::async_runtime::spawn_blocking(move || {
-        dictation::start(&app, model_id, language, initial_prompt)
+        dictation::start(&app, take_id, model_id, language, initial_prompt)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -345,6 +380,7 @@ async fn cleanup_text(
     style_id: Option<String>,
     target_lang: Option<String>,
     transliterate: bool,
+    take_id: Option<String>,
 ) -> Result<String, String> {
     let model_path = models::downloaded_model_path(&app, &model_id)?;
     let (system_prompt, style) = cleanup_setup(&app, prompt, style_id);
@@ -360,6 +396,7 @@ async fn cleanup_text(
             style.as_ref(),
             target_lang.as_deref(),
             transliterate,
+            take_id.as_deref(),
         )
     })
     .await
@@ -1390,6 +1427,7 @@ pub fn run() {
             add_custom_model,
             start_recording,
             stop_recording,
+            discard_recording,
             transcribe,
             warm_stt,
             warm_llm,

@@ -9,9 +9,22 @@ import { Onboarding } from "./Onboarding";
 import { HistoryDrawer, Take } from "./HistoryDrawer";
 import { Meetings } from "./Meetings";
 import { TasksView } from "./TasksView";
+import { createDictationQueue, type DictationState } from "./dictationQueue";
 import "./App.css";
 
 type Phase = "idle" | "recording" | "transcribing" | "cleaning";
+
+interface DictationTake {
+  id: string;
+  at: string;
+  fromHotkey: boolean;
+  stt?: ModelInfo;
+  llm?: ModelInfo;
+  language: string;
+  prompt: string;
+  style: string;
+  outLang: string;
+}
 
 const OLD_DEFAULT_PROMPT =
   "You clean up raw speech-to-text transcripts. Fix punctuation, capitalization and obvious transcription errors, remove filler words (um, uh, you know), and break the text into paragraphs where natural. Preserve the speaker's wording and meaning; do not summarize or add anything. Output only the cleaned text.";
@@ -68,7 +81,9 @@ function outputLang(code: string): { transliterate: boolean; targetName?: string
 
 export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [phase, setPhase] = useState<Phase>("idle");
+  const [workPhase, setWorkPhase] = useState<Phase>("idle");
+  const [dictationState, setDictationState] = useState<DictationState<DictationTake>>({ active: null, capturing: false, pending: 0 });
+  const phase: Phase = dictationState.active ? "recording" : workPhase;
   const [transcript, setTranscript] = useState("");
   const [cleaned, setCleaned] = useState("");
   // Live caption shown while dictating (raw, tentative); cleaned text lands at stop.
@@ -98,17 +113,21 @@ export default function App() {
   const styleIdRef = useRef("");
   const outLangRef = useRef("");
   outLangRef.current = outLang;
-  const cleaningRef = useRef(false);
+  const cleaningRef = useRef<string | null>(null);
   const takeRef = useRef<string | null>(null);
-  // Event handlers race React state: phaseRef is always current, and a
-  // release that lands while the mic is still starting queues the stop.
+  // Capture and processing have independent lifetimes. Refs also keep native
+  // shortcut events current before React has rendered the latest state.
   const phaseRef = useRef<Phase>("idle");
-  const startingRef = useRef(false);
-  const stopQueuedRef = useRef(false);
+  const workPhaseRef = useRef<Phase>("idle");
+  const dictationStateRef = useRef(dictationState);
+  const hotkeyTakesRef = useRef(new Set<string>());
+  const overlayStateRef = useRef("hidden");
+  const overlayTailRef = useRef(Promise.resolve());
 
   const changePhase = (p: Phase) => {
-    phaseRef.current = p;
-    setPhase(p);
+    workPhaseRef.current = p;
+    phaseRef.current = dictationStateRef.current.active ? "recording" : p;
+    setWorkPhase(p);
   };
 
   // Keep a ref to the latest history so upsertTake can merge + persist a full
@@ -170,16 +189,16 @@ export default function App() {
     });
     const subs = [
       on.settingsChanged(() => refreshStyles()),
-      on.llmToken((chunk) => {
-        if (cleaningRef.current) setCleaned((c) => c + chunk);
+      on.llmToken(({ takeId, chunk }) => {
+        if (takeId && takeId === cleaningRef.current && takeId === takeRef.current) setCleaned((c) => c + chunk);
       }),
       on.downloadDone(() => refreshModels()),
       on.hotkeyToggle(() => hotkeyRef.current()),
       on.pttDown(() => pttRef.current("down")),
       on.pttUp(() => pttRef.current("up")),
       on.pttCancel(() => pttRef.current("cancel")),
-      on.dictationLive((t) => {
-        if (phaseRef.current === "recording") setLiveText(t);
+      on.dictationLive(({ takeId, text }) => {
+        if (phaseRef.current === "recording" && takeRef.current === takeId) setLiveText(text);
       }),
     ];
     // Window drag-and-drop for audio files.
@@ -225,40 +244,31 @@ export default function App() {
     return () => clearTimeout(t);
   }, [llm?.id, prompt, styleId, outLang]);
 
-  const upsertTake = (patch: Partial<Omit<Take, "id" | "at">>) => {
-    const id = takeRef.current;
+  const upsertTake = (patch: Partial<Omit<Take, "id" | "at">>, id = takeRef.current, at = new Date().toISOString()) => {
     if (!id) return;
     const existing = historyRef.current.find((t) => t.id === id);
     const take: Take = existing
       ? { ...existing, ...patch }
       : {
           id,
-          at: new Date().toISOString(),
+          at,
           raw: "",
           refined: "",
           sttModel: "",
           llmModel: "",
           ...patch,
         };
-    setHistory((prev) => {
-      const i = prev.findIndex((t) => t.id === id);
-      if (i >= 0) {
-        const copy = [...prev];
-        copy[i] = { ...copy[i], ...patch };
-        return copy;
-      }
-      return [take, ...prev].slice(0, HISTORY_CAP);
-    });
+    // Merge synchronously: two pipeline stages can finish before React renders.
+    const next = historyRef.current.filter((t) => t.id !== id).concat(take)
+      .sort((a, b) => b.at.localeCompare(a.at)).slice(0, HISTORY_CAP);
+    historyRef.current = next;
+    setHistory(next);
     // Persist the full merged record to SQLite (fire-and-forget).
     api.saveTake(take).catch((e) => console.error("failed to save take", e));
   };
 
-  const fail = (e: unknown) => {
-    setError(String(e));
-    changePhase("idle");
-  };
-
   const transcribeNow = async (model: ModelInfo): Promise<string | null> => {
+    if (dictationStateRef.current.capturing || dictationStateRef.current.pending) return null;
     changePhase("transcribing");
     setStatus(`transcribing with ${model.name}…`);
     setError(null);
@@ -280,7 +290,7 @@ export default function App() {
   // mic take. Handles the whole pipeline; runs the file through the same
   // transcript → cleanup path.
   const transcribeFromFile = async (path: string) => {
-    if (busy || phaseRef.current !== "idle") return;
+    if (dictationStateRef.current.capturing || dictationStateRef.current.pending || phaseRef.current !== "idle") return;
     if (!stt) {
       setError("download a speech model first (settings → models)");
       return;
@@ -316,7 +326,7 @@ export default function App() {
   };
 
   const pickFile = async () => {
-    if (busy || phaseRef.current !== "idle") return;
+    if (dictationStateRef.current.capturing || dictationStateRef.current.pending || phaseRef.current !== "idle") return;
     const { open } = await import("@tauri-apps/plugin-dialog");
     // No extension filter — the real format is sniffed from the bytes, and
     // WhatsApp files often carry a wrong extension (e.g. a voice note saved
@@ -330,13 +340,14 @@ export default function App() {
     styleOverride?: string,
     langOverride?: string,
   ): Promise<string | null> => {
+    if (dictationStateRef.current.capturing || dictationStateRef.current.pending) return null;
     if (!llm || !text) return null;
     const useStyle = styleOverride !== undefined ? styleOverride : styleIdRef.current;
     const useLangCode = langOverride !== undefined ? langOverride : outLangRef.current;
     const { transliterate, targetName } = outputLang(useLangCode);
     changePhase("cleaning");
     setCleaned("");
-    cleaningRef.current = true;
+    cleaningRef.current = takeRef.current;
     setStatus(
       transliterate
         ? "refining → romanized…"
@@ -353,127 +364,154 @@ export default function App() {
         useStyle || undefined,
         targetName,
         transliterate,
+        takeRef.current ?? undefined,
       );
-      cleaningRef.current = false;
+      cleaningRef.current = null;
       setCleaned(result);
       upsertTake({ refined: result, llmModel: llm.name });
       changePhase("idle");
       setStatus("refined — copy it out, or swap models and re-run");
       return result;
     } catch (e) {
-      cleaningRef.current = false;
+      cleaningRef.current = null;
       setError(String(e));
       changePhase("idle");
       return null;
     }
   };
 
-  const overlayOff = () => {
-    api.emitOverlayState("hidden");
-    api.setOverlay(false).catch(() => {});
-  };
-
-  const toggleRecord = async (fromHotkey = false) => {
-    setError(null);
-    if (phaseRef.current === "recording") {
+  const queueRef = useRef<ReturnType<typeof createDictationQueue<DictationTake, true>> | null>(null);
+  if (!queueRef.current) queueRef.current = createDictationQueue<DictationTake, true>({
+    changed: (state) => {
+      dictationStateRef.current = state;
+      setDictationState(state);
+      phaseRef.current = state.active ? "recording" : workPhaseRef.current;
+      const overlay = state.active?.fromHotkey ? "recording"
+        : hotkeyTakesRef.current.size > 0 ? "processing" : "hidden";
+      const overlayKey = `${overlay}:${state.active?.id ?? ""}`;
+      if (overlayKey !== overlayStateRef.current) {
+        overlayStateRef.current = overlayKey;
+        // Keep native visibility and events ordered, including a fast restart.
+        overlayTailRef.current = overlayTailRef.current.then(async () => {
+          await api.setOverlay(overlay !== "hidden");
+          await api.emitOverlayState(overlay, state.active?.id);
+        }).catch(() => {});
+      }
+    },
+    start: async (take) => {
+      await api.startRecording();
+      // Await startup so a quick release cannot stop a worker before it starts.
+      if (take.stt) await api.startLiveDictation(take.id, take.stt.id, take.language || undefined).catch(() => {});
+    },
+    finish: async (take, cancelled) => {
+      const keep = !cancelled && !!take.stt;
+      const res = await api.stopRecording(keep ? take.id : undefined);
+      if (cancelled || !take.stt || res.durationSecs < 0.35) {
+        if (keep) await api.discardRecording(take.id);
+        hotkeyTakesRef.current.delete(take.id);
+        if (takeRef.current === take.id) {
+          changePhase("idle");
+          setStatus(cancelled ? "cancelled" : res.durationSecs < 0.35
+            ? "take too short — hold a moment longer"
+            : "recorded — download a speech model to transcribe");
+        }
+        return null;
+      }
+      return true;
+    },
+    process: async (take) => {
+      const current = () => takeRef.current === take.id;
+      const model = take.stt!;
       try {
-        const res = await api.stopRecording();
-        api.stopLiveDictation().catch(() => {});
-        if (fromHotkey) api.emitOverlayState("processing");
-        if (res.durationSecs < 0.35) {
-          changePhase("idle");
-          setStatus("take too short — hold a moment longer");
-          return;
+        if (current()) {
+          changePhase("transcribing");
+          setStatus(`transcribing with ${model.name}…`);
         }
-        if (!stt) {
-          changePhase("idle");
-          setStatus("recorded — download a speech model to transcribe");
-          return;
-        }
-        takeRef.current = crypto.randomUUID();
-        const text = await transcribeNow(stt);
-        if (!text) return;
-        const refined = llm ? await runCleanup(text) : null;
-        if (!llm) setStatus("transcript ready — download a cleanup model to refine");
-        if (fromHotkey) {
-          const out = refined ?? text;
+        const text = await api.transcribe(model.id, take.language || undefined, false, take.id);
+        upsertTake({ raw: text, sttModel: model.name, lang: take.language }, take.id, take.at);
+        if (current()) setTranscript(text);
+        let refined: string | null = null;
+        if (text && take.llm) {
+          const { transliterate, targetName } = outputLang(take.outLang);
+          if (current()) {
+            changePhase("cleaning");
+            setCleaned("");
+            setStatus(`refining with ${take.llm.name}…`);
+          }
+          cleaningRef.current = take.id;
           try {
-            const target = await api.deliverText(out);
-            if (target) upsertTake({ app: target });
-            setStatus(`typed into ${target || "the frontmost app"}`);
+            refined = await api.cleanupText(take.llm.id, text, take.prompt || undefined,
+              take.style || undefined, targetName, transliterate, take.id);
+            upsertTake({ refined, llmModel: take.llm.name }, take.id, take.at);
+            if (current()) setCleaned(refined);
           } catch (e) {
+            // Preserve the raw transcript and deliver it if cleanup fails.
             setError(String(e));
+          } finally {
+            cleaningRef.current = null;
           }
         }
-      } catch (e) {
-        fail(e);
-      } finally {
-        if (fromHotkey) overlayOff();
-      }
-    } else if (phaseRef.current === "idle" && !startingRef.current) {
-      startingRef.current = true;
-      stopQueuedRef.current = false;
-      try {
-        await api.startRecording();
-        setTranscript("");
-        setCleaned("");
-        setLiveText("");
-        setRawOpen(false);
-        changePhase("recording");
-        // Background work while recording: live captions (shown here, or in
-        // the overlay bubble for hotkey takes), and spoken-language detection
-        // when it's on auto.
-        if (stt) {
-          api.startLiveDictation(stt.id, language || undefined).catch(() => {});
+        if (take.fromHotkey && text) {
+          const target = await api.deliverText(refined ?? text);
+          if (target) upsertTake({ app: target }, take.id, take.at);
+          if (current()) setStatus(`typed into ${target || "the frontmost app"}`);
+        } else if (current()) {
+          setStatus(text ? "transcript ready" : "no speech detected");
         }
-        if (fromHotkey) {
-          await api.setOverlay(true).catch(() => {});
-          api.emitOverlayState("recording");
-        }
-        setStatus(
-          fromHotkey
-            ? "recording — press the shortcut again to stop"
-            : "recording — everything stays on this machine",
-        );
-      } catch (e) {
-        fail(e);
       } finally {
-        startingRef.current = false;
+        hotkeyTakesRef.current.delete(take.id);
+        if (current()) changePhase("idle");
       }
-      // The release arrived while the mic was still starting; honor it now.
-      if (stopQueuedRef.current && (phaseRef.current as Phase) === "recording") {
-        stopQueuedRef.current = false;
-        await toggleRecord(fromHotkey);
-      }
-    }
+    },
+    failed: (take, e) => {
+      hotkeyTakesRef.current.delete(take.id);
+      setError(String(e));
+      if (takeRef.current === take.id) changePhase("idle");
+    },
+  });
+
+  const startTake = (fromHotkey: boolean) => {
+    const queue = queueRef.current!;
+    if (queue.state().active) return;
+    // File imports and manual re-runs still own the editor until they finish.
+    if (!queue.state().pending && !queue.state().capturing && phaseRef.current !== "idle") return;
+    const take: DictationTake = {
+      id: crypto.randomUUID(), at: new Date().toISOString(), fromHotkey,
+      stt, llm, language, prompt, style: styleIdRef.current, outLang: outLangRef.current,
+    };
+    takeRef.current = take.id;
+    if (fromHotkey) hotkeyTakesRef.current.add(take.id);
+    setError(null);
+    setTranscript("");
+    setCleaned("");
+    setLiveText("");
+    setRawOpen(false);
+    changePhase("idle");
+    setStatus(fromHotkey ? "recording — release or press the shortcut again to stop" : "recording — everything stays on this machine");
+    queue.start(take);
   };
 
-  // The hotkey and drop listeners are registered once; route them through
-  // refs so they always see the current phase and model selection.
+  const stopTake = (cancelled = false) => {
+    if (!queueRef.current!.state().active) return;
+    changePhase(cancelled ? "idle" : "transcribing");
+    setStatus(cancelled ? "cancelled" : "processing — you can speak again");
+    queueRef.current!.stop(cancelled);
+  };
+
+  const toggleRecord = (fromHotkey = false) => {
+    if (queueRef.current!.state().active) stopTake();
+    else startTake(fromHotkey);
+  };
+
+  // Native listeners are registered once and route through current handlers.
   const hotkeyRef = useRef<() => void>(() => {});
-  hotkeyRef.current = () => {
-    if (startingRef.current) stopQueuedRef.current = true;
-    else if (phaseRef.current === "idle" || phaseRef.current === "recording") toggleRecord(true);
-  };
-
+  hotkeyRef.current = () => toggleRecord(true);
   const dropRef = useRef<(path: string) => void>(() => {});
   dropRef.current = (path: string) => transcribeFromFile(path);
-
   const pttRef = useRef<(what: "down" | "up" | "cancel") => void>(() => {});
   pttRef.current = (what) => {
-    if (what === "down") {
-      if (phaseRef.current === "idle" && !startingRef.current) toggleRecord(true);
-    } else if (what === "up") {
-      if (startingRef.current) stopQueuedRef.current = true;
-      else if (phaseRef.current === "recording") toggleRecord(true);
-    } else if (what === "cancel" && phaseRef.current === "recording") {
-      // The held key turned out to be part of a bigger combo; discard.
-      api.stopRecording().catch(() => {});
-      api.stopLiveDictation().catch(() => {});
-      overlayOff();
-      changePhase("idle");
-      setStatus("cancelled");
-    }
+    if (what === "down") startTake(true);
+    else stopTake(what === "cancel");
   };
 
   const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -503,6 +541,8 @@ export default function App() {
   };
 
   const loadTake = (take: Take) => {
+    if (dictationStateRef.current.capturing || dictationStateRef.current.pending || phaseRef.current !== "idle") return;
+    takeRef.current = take.id;
     setTranscript(take.raw);
     setCleaned(take.refined);
     setHistoryOpen(false);
@@ -512,7 +552,8 @@ export default function App() {
     setStatus("loaded from history");
   };
 
-  const busy = phase === "transcribing" || phase === "cleaning";
+  const busy = dictationState.capturing || dictationState.pending > 0 || phase === "transcribing" || phase === "cleaning";
+  const manualBusy = busy && !dictationState.capturing && dictationState.pending === 0;
   const waveBars = useLevelHistory(phase === "recording");
   const heroText = cleaned || "";
 
@@ -561,11 +602,13 @@ export default function App() {
   const pillLabel =
     phase === "recording"
       ? "listening — tap to stop"
-      : phase === "transcribing"
-        ? "transcribing…"
-        : phase === "cleaning"
-          ? "refining…"
-          : "tap to speak";
+      : dictationState.pending > 0
+        ? "tap to speak again"
+        : phase === "transcribing"
+          ? "transcribing…"
+          : phase === "cleaning"
+            ? "refining…"
+            : "tap to speak";
 
   return (
     <div className="shell">
@@ -632,7 +675,7 @@ export default function App() {
         <button
           className={"pill" + (phase === "recording" ? " live" : "")}
           onClick={() => toggleRecord()}
-          disabled={busy}
+          disabled={manualBusy}
         >
           {phase === "recording" ? (
             <Wave bars={waveBars} className="pill-wave" />

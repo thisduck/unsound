@@ -12,19 +12,22 @@ export default function Overlay() {
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
   const stateRef = useRef(state);
+  const takeRef = useRef<string | undefined>(undefined);
   stateRef.current = state;
   const bars = useLevelHistory(state === "recording" || state === "command");
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-root");
     const subs = [
-      on.overlayState((s) => {
+      on.overlayState((s, takeId) => {
         // A new take starts blank; the last caption stays up while it's processed.
         if (s !== "processing") setCaption("");
+        takeRef.current = takeId;
+        stateRef.current = s;
         setState(s);
       }),
-      on.dictationLive((t) => {
-        if (stateRef.current === "recording") setCaption(t);
+      on.dictationLive(({ takeId, text }) => {
+        if (stateRef.current === "recording" && takeRef.current === takeId) setCaption(text);
       }),
       on.assistantToast((text) => {
         setToast(text);

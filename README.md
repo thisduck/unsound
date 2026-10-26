@@ -16,6 +16,7 @@ the models that do the work.
 - **🎙 Dictate anywhere.** Press a keyboard shortcut in any app — Mail, Slack,
   Notes, your browser — speak, and the cleaned-up text is typed right where
   your cursor is. Two modes: press once to start and stop, or hold-to-talk.
+  Speak again while earlier takes finish processing; their text arrives in order.
 - **✍️ Write in your own voice.** Teach unsound your writing styles by pasting
   a few samples ("casual", "professional", …). It matches your tone,
   punctuation, even lowercase habits — and you can switch styles with a click.
