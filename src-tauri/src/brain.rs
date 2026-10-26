@@ -729,6 +729,9 @@ mod reliability_tests {
                         Err(e) => panic!("{e}"),
                     }
                 };
+                // Accepted sockets inherit nonblocking mode on macOS. Header
+                // and body reads below use blocking I/O with a bounded timeout.
+                stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut length = 0;
