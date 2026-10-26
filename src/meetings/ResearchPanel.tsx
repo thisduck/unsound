@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, clock, ResearchAnswer, ResearchSource } from "../api";
 import { speakerLabel } from "./format";
 
-export function ResearchPanel({ modelId, meetingId, initialQuestion = "", onSource }: { modelId: string; meetingId?: string; initialQuestion?: string; onSource: (id: string, at?: number | null) => void }) {
+export function ResearchPanel({ modelId, meetingId, initialQuestion = "", onSource }: { modelId?: string; meetingId?: string; initialQuestion?: string; onSource: (id: string, at?: number | null) => void }) {
   const [question, setQuestion] = useState(initialQuestion);
   const [turns, setTurns] = useState<{ question: string; answer: ResearchAnswer }[]>([]);
   const [busy, setBusy] = useState(false);
@@ -10,7 +10,7 @@ export function ResearchPanel({ modelId, meetingId, initialQuestion = "", onSour
   const inFlight = useRef(false);
   useEffect(() => { if (!turns.length && !inFlight.current) setQuestion(initialQuestion); }, [initialQuestion]);
   const ask = async () => {
-    if (inFlight.current || !question.trim()) return;
+    if (!modelId || inFlight.current || !question.trim()) return;
     const q = question.trim(); inFlight.current = true; setBusy(true); setError("");
     try {
       const history = turns.slice(-4).map(t => ({ question: t.question, answer: [...t.answer.claims.map(c => c.text), ...t.answer.quotes.map(x => x.text)].join("\n") }));
@@ -23,6 +23,7 @@ export function ResearchPanel({ modelId, meetingId, initialQuestion = "", onSour
   return <section className="meet-section research-panel">
     <div className="meet-section-head"><h3>{meetingId ? "ask this meeting" : "ask your meetings"}</h3>{turns.length > 0 && <button className="quiet" disabled={busy} onClick={() => setTurns([])}>new conversation</button>}</div>
     <p className="meet-hint">Search transcripts and summaries, compare decisions, or pull exact quotes. Answers link back to the evidence.</p>
+    {!modelId && <p className="meet-hint" role="status">Download a language model in settings → models, then choose it as your notes model in meeting options to ask questions.</p>}
     {turns.map((turn, n) => <div className="research-turn" key={n}>
       <h4>{turn.question}</h4>
       {turn.answer.claims.map((claim, i) => <p key={i}>{claim.text} {claim.sourceIds.map(id => { const s = turn.answer.sources.find(s => s.id === id); return s && <button className="time-link" title={label(s)} key={id} onClick={() => onSource(s.meetingId, s.atMs)}>[{turn.answer.sources.indexOf(s) + 1}]</button>; })}</p>)}
@@ -31,8 +32,8 @@ export function ResearchPanel({ modelId, meetingId, initialQuestion = "", onSour
       {!!turn.answer.sources.length && <details><summary>{turn.answer.sources.length} sources · {turn.answer.searches.length} searches / reads</summary>{turn.answer.sources.map((s, i) => <div className="research-source" key={s.id}><button className="quiet" onClick={() => onSource(s.meetingId, s.atMs)}>[{i + 1}] {label(s)}</button>{s.kind === "summary" && <span className="meet-hint">{s.stale ? "Summary needs regeneration" : "Generated summary"}</span>}<p>{s.text}</p></div>)}</details>}
     </div>)}
     <form className="meet-ask-row" onSubmit={e => { e.preventDefault(); void ask(); }}>
-      <input className="meet-ask-input" aria-label="Ask AI about meetings" value={question} maxLength={4000} onChange={e => setQuestion(e.target.value)} placeholder={turns.length ? "Ask a follow-up…" : "What did we decide about pricing? Pull the exact quotes."} disabled={busy} />
-      <button className="quiet accent" disabled={busy || !question.trim()}>{busy ? "researching…" : "ask"}</button>
+      <input className="meet-ask-input" aria-label="Ask AI about meetings" value={question} maxLength={4000} onChange={e => setQuestion(e.target.value)} placeholder={turns.length ? "Ask a follow-up…" : "What did we decide about pricing? Pull the exact quotes."} disabled={busy || !modelId} />
+      <button className="quiet accent" disabled={busy || !modelId || !question.trim()}>{busy ? "researching…" : "ask"}</button>
     </form>
     {busy && <p className="dim" role="status">Searching meetings and checking sources…</p>}
     {error && <p className="meet-error" role="alert">{error}</p>}

@@ -111,15 +111,13 @@ export function ListView({ meetings, onOpen, llmId, options, idle }: Props) {
             }}
             placeholder="search transcripts and summaries"
           />
-          {llmId && (
-            <button className="quiet accent" onClick={() => setShowResearch(s => !s)}>
-              {showResearch ? "close AI" : "ask AI"}
-            </button>
-          )}
+          <button className="quiet accent" onClick={() => setShowResearch(s => !s)}>
+            {showResearch ? "close AI" : "ask AI"}
+          </button>
         </div>
       )}
 
-      {llmId && <div hidden={!showResearch}><ResearchPanel modelId={llmId} initialQuestion={query} onSource={onOpen} /></div>}
+      <div hidden={!showResearch}><ResearchPanel modelId={llmId} initialQuestion={query} onSource={onOpen} /></div>
       <FollowUps onSource={onOpen} refreshKey={meetings} />
 
       {results !== null ? (

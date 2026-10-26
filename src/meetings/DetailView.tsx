@@ -62,6 +62,7 @@ export function DetailView(p: Props) {
   const [speakerSaving, setSpeakerSaving] = useState(false);
   const [rememberVoice, setRememberVoice] = useState(true);
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const summarySection = useRef<HTMLElement>(null);
 
   useEffect(() => {
     if (notesSave.saving || notesSave.error) return;
@@ -212,7 +213,7 @@ export function DetailView(p: Props) {
         {m.attendees && m.attendees.length > 0 && <> · with {m.attendees.join(", ")}</>}
       </div>
 
-      <section className="meet-section">
+      <section className="meet-section" ref={summarySection}>
         <div className="meet-section-head">
           <h3>summary</h3>
           <span className="spacer" />
@@ -299,7 +300,10 @@ export function DetailView(p: Props) {
         </section>
       )}
 
-      {p.llmId && <ResearchPanel key={m.id} modelId={p.llmId} meetingId={m.id} onSource={(_, at) => at != null && jump(at)} />}
+      <ResearchPanel key={m.id} modelId={p.llmId} meetingId={m.id} onSource={(_, at) => {
+        if (at != null) jump(at);
+        else summarySection.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }} />
 
       <section className="meet-section">
         <h3>my notes</h3>
