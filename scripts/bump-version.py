@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Set the app version across tauri.conf.json, package.json, Cargo.toml and
-Cargo.lock. Used by the release workflow: bump-version.py 0.2.0"""
+"""Set the app version across Tauri, npm and Cargo manifests and lockfiles.
+Used by the release workflow: bump-version.py 0.2.0"""
 
 import json
 import re
@@ -15,6 +15,8 @@ def bump_json(path: str) -> None:
     with open(path) as f:
         data = json.load(f)
     data["version"] = version
+    if path == "package-lock.json":
+        data["packages"][""]["version"] = version
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
@@ -44,6 +46,7 @@ def bump_cargo_lock(path: str) -> None:
 
 bump_json("src-tauri/tauri.conf.json")
 bump_json("package.json")
+bump_json("package-lock.json")
 bump_cargo_toml("src-tauri/Cargo.toml")
 bump_cargo_lock("src-tauri/Cargo.lock")
 print(f"version set to {version}")
