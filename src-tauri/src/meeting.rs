@@ -131,6 +131,7 @@ pub fn start_benchmark(app:&AppHandle,id:&str,model:&str)->Result<(),String> {
 }
 
 fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), String> {
+    let _permit = crate::updates::capture_permit()?;
     let st = app.state::<AppState>();
     let mut active = st.meeting.active.lock().unwrap();
     if active.is_some() {

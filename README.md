@@ -5,8 +5,8 @@
 Speak into unsound and it writes down what you said, then quietly tidies it
 up: fixes punctuation, drops the "um"s and false starts, breaks it into
 paragraphs. Nothing you say ever leaves your computer — no cloud, no account,
-no internet. The only time it touches the network is the one-time download of
-the models that do the work.
+no internet. Model downloads and optional update checks use the network. Connected tools
+use the network as configured and approved.
 
 [**Download the latest release →**](https://github.com/thisduck/unsound/releases)
 (macOS, Apple Silicon)
@@ -55,7 +55,7 @@ the models that do the work.
   ignored, and reopen them later. Set reminders or snooze them; due reminders
   remain visible in the app and can notify you while unsound is running.
 - **🔒 Completely private.** Everything runs on your machine. Works with the
-  Wi-Fi off — the only exceptions are tools you connect and approve.
+  Wi-Fi off — model downloads, update checks, and connected tools need a connection.
 
 Pick the models you like from a built-in library (smaller and faster, or
 larger and sharper) — they download once and you can swap them anytime.
@@ -133,6 +133,28 @@ additions on top of it (settings → prompt).
 Grab the `.dmg` from [Releases](https://github.com/thisduck/unsound/releases),
 drag unsound to Applications, and open it — builds are code-signed and
 notarized.
+
+From v0.9.1 onward, unsound checks for new versions on launch and every 12 hours.
+An **update** button appears when a new version is available. Open **updates**
+in the main window, **settings → updates**, or **Check for updates…** in the
+menu bar to check manually, read release notes, or disable automatic checks.
+Choose **Download update**, then **Update & restart** when your work is saved.
+Downloads are signature-verified; installation waits for recordings, meeting
+processing, and active assistant tasks. Checks send no recordings or notes.
+Versions through v0.9.0 need one manual DMG upgrade to get the updater.
+
+### Publishing updates
+
+Dispatch the **build dmg** workflow with a stable version such as `0.9.1`.
+It builds and signs the app, then tags the version and publishes the DMG,
+`unsound.app.tar.gz`, its signature, and `latest.json` together. Optional
+release notes go in `release-notes/<version>.md`; otherwise GitHub generates them.
+Update the notes file before building so the in-app feed matches the release page.
+
+The updater signing key is the `TAURI_SIGNING_PRIVATE_KEY` Actions secret.
+Keep its private backup safe: existing installations trust the public key in
+`src-tauri/tauri.conf.json`. Apple signing and notarization use the existing
+Apple Actions secrets. Never commit a private signing key.
 
 ## Development
 

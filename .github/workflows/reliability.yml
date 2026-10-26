@@ -35,6 +35,8 @@ jobs:
       - run: npm run test:meeting-quality
       - run: npm run test:followups
       - run: npm run test:notes
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib updates
+      - run: python3 -m unittest discover -s tests -p '*_test.py'
       - run: npm run e2e:build
       - run: npm run test:native-backend
       - uses: actions/upload-artifact@v4

@@ -11,6 +11,7 @@ import { Meetings } from "./Meetings";
 import { TasksView } from "./TasksView";
 import { createDictationQueue, type DictationState } from "./dictationQueue";
 import "./App.css";
+import { UpdateCenter } from "./UpdateCenter";
 
 type Phase = "idle" | "recording" | "transcribing" | "cleaning";
 
@@ -88,7 +89,7 @@ export default function App() {
   const [cleaned, setCleaned] = useState("");
   // Live caption shown while dictating (raw, tentative); cleaned text lands at stop.
   const [liveText, setLiveText] = useState("");
-  const [status, setStatus] = useState("ready — fully offline");
+  const [status, setStatus] = useState("ready — local processing");
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -636,6 +637,7 @@ export default function App() {
           </button>
         </nav>
         <span className="spacer" />
+        <UpdateCenter busy={phase !== "idle" || dictationState.pending > 0} />
         {view === "dictate" && (
           <button className="quiet" onClick={() => setHistoryOpen(true)}>
             history

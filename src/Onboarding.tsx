@@ -39,9 +39,9 @@ export function Onboarding({ models, onChanged, onDone }: Props) {
         "um"s and false starts gone.
       </p>
       <p className="ob-text">
-        Everything happens on your machine. No cloud, no account, no internet — nothing you say
-        ever leaves this computer. The one exception: downloading the models that do the work,
-        which happens once, next.
+        Transcription and notes run on your machine, without an account. Your content stays
+        here unless you share it through a connected tool. Model downloads and optional
+        update checks use the network.
       </p>
       <div className="ob-actions">
         <button className="ob-primary" onClick={() => setStep(1)}>

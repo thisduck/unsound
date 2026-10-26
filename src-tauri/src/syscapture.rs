@@ -280,6 +280,10 @@ pub struct CaptureResult {
     pub sample_count: usize,
 }
 
+pub fn is_recording(state: &SysCaptureState) -> bool {
+    state.active.lock().unwrap().is_some()
+}
+
 pub fn start(state: &SysCaptureState) -> Result<(), String> {
     if !is_supported() {
         return Err("system-audio capture needs macOS 13 or newer".into());

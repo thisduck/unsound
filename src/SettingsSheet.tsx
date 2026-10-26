@@ -1,3 +1,4 @@
+import { openUpdates } from "./UpdateCenter";
 import { useState } from "react";
 import { api, ModelInfo, ModelKind } from "./api";
 import { DictionarySection, MicPicker, ModelLibrary, PermissionsSection, ShortcutsSection, StylesSection } from "./sections";
@@ -13,7 +14,8 @@ type Section =
   | "microphone"
   | "prompt"
   | "accessibility"
-  | "permissions";
+  | "permissions"
+  | "updates";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "shortcuts", label: "shortcuts" },
@@ -26,6 +28,7 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: "prompt", label: "prompt" },
   { id: "accessibility", label: "accessibility" },
   { id: "permissions", label: "permissions" },
+  { id: "updates", label: "updates" },
 ];
 
 const TEXT_SIZES: { label: string; value: string }[] = [
@@ -278,6 +281,12 @@ export function SettingsSheet({
             </div>
           </section>
         );
+      case "updates":
+        return <section className="sheet-section">
+          <h3>Keep unsound up to date</h3>
+          <p>Check for new versions, read release notes, and install signed updates. You choose when to restart.</p>
+          <button className="quiet accent" onClick={openUpdates}>Check for updates…</button>
+        </section>;
       case "permissions":
         return (
           <section className="sheet-section">
@@ -318,8 +327,8 @@ export function SettingsSheet({
             <h2>{SECTIONS.find((s) => s.id === section)?.label}</h2>
             <span className="sheet-note">
               {section === "assistant"
-                ? "tools you connect here are the only way anything leaves this Mac — and only after you approve"
-                : "downloads are the only time unsound touches the network"}
+                ? "connected tools use the network only as configured and approved"
+                : "models and meeting content stay local; update checks contact GitHub"}
             </span>
             <button className="quiet" onClick={onClose}>
               close ✕

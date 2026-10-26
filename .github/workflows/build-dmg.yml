@@ -8,6 +8,10 @@ on:
         required: false
         default: ""
 
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -34,22 +38,9 @@ jobs:
 
       - name: Bump version
         if: inputs.version != ''
-        run: python3 scripts/bump-version.py "${{ inputs.version }}"
-
-      - name: Commit and tag release
-        if: inputs.version != ''
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git stash
-          # The dispatch snapshot can trail a just-pushed commit; build the
-          # real tip of main so the release matches it.
-          git pull --rebase origin main
-          git stash pop
-          git add -A
-          git commit -m "release v${{ inputs.version }}"
-          git tag "v${{ inputs.version }}"
-          git push origin HEAD:main --tags
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/bump-version.py "$RELEASE_VERSION"
 
       - name: Install frontend dependencies
         run: npm ci
@@ -61,6 +52,8 @@ jobs:
 
       - name: Build app and dmg (signed + notarized)
         env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -77,12 +70,39 @@ jobs:
           path: src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
-      - name: Create GitHub release
+      # Tag only after the signed build succeeds. Never rebase after building:
+      # a concurrent main push must fail, rather than tag unbuilt code.
+      - name: Commit and tag release
+        if: inputs.version != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+          git commit -m "release v$RELEASE_VERSION"
+          git tag "v$RELEASE_VERSION"
+          git push --atomic origin HEAD:main "refs/tags/v$RELEASE_VERSION"
+
+      - name: Publish release and signed update feed
         if: inputs.version != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          gh release create "v${{ inputs.version }}" \
+          notes="release-notes/$RELEASE_VERSION.md"
+          if [ -f "$notes" ]; then
+            gh release create "v$RELEASE_VERSION" --draft --verify-tag \
+              --title "unsound v$RELEASE_VERSION" --notes-file "$notes"
+          else
+            gh release create "v$RELEASE_VERSION" --draft --verify-tag \
+              --title "unsound v$RELEASE_VERSION" --generate-notes
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > "$RUNNER_TEMP/release.json"
+          python3 scripts/update-manifest.py "$RELEASE_VERSION" "$GITHUB_REPOSITORY" "$RUNNER_TEMP/release.json" --output "$RUNNER_TEMP/latest.json"
+          gh release upload "v$RELEASE_VERSION" \
             src-tauri/target/release/bundle/dmg/*.dmg \
-            --title "unsound v${{ inputs.version }}" \
-            --generate-notes
+            src-tauri/target/release/bundle/macos/*.app.tar.gz \
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig \
+            "$RUNNER_TEMP/latest.json"
+          gh release edit "v$RELEASE_VERSION" --draft=false --latest

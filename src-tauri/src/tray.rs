@@ -41,6 +41,7 @@ pub fn build_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
         mic_items.iter().map(|i| i as &dyn IsMenuItem<Wry>).collect();
     let microphone = Submenu::with_items(app, "Microphone", true, &mic_refs)?;
 
+    let updates = MenuItem::with_id(app, "check-updates", "Check for updates…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit unsound", true, None::<&str>)?;
 
     Menu::with_items(
@@ -53,6 +54,7 @@ pub fn build_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
             &PredefinedMenuItem::separator(app)?,
             &microphone,
             &PredefinedMenuItem::separator(app)?,
+            &updates,
             &quit,
         ],
     )
@@ -76,12 +78,13 @@ pub fn init(app: &AppHandle) -> Result<(), tauri::Error> {
 
 fn on_menu_event(app: &AppHandle, id: &str) {
     match id {
-        "open" => {
+        "open" | "check-updates" => {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();
             }
+            if id == "check-updates" { let _ = app.emit("check-for-updates", ()); }
         }
         "paste-last" => {
             let text = app

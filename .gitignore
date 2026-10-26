@@ -26,3 +26,6 @@ dist-ssr
 # Native UI test builds and failure screenshots
 e2e/bin/
 e2e/artifacts/
+
+# Python release-tool caches
+__pycache__/

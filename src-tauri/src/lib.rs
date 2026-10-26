@@ -37,6 +37,7 @@ mod syscapture;
 #[allow(dead_code)]
 mod tools;
 mod tray;
+mod updates;
 mod util;
 #[cfg(test)]
 mod reliability_tests;
@@ -94,6 +95,7 @@ fn list_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
 
 #[tauri::command]
 async fn download_model(app: AppHandle, id: String) -> Result<(), String> {
+    let _work = updates::work_permit()?;
     models::download(app, id).await
 }
 
@@ -116,6 +118,7 @@ fn add_custom_model(
 /// the take taps the meeting's recording (and is kept out of its transcript).
 #[tauri::command]
 fn start_recording(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let _permit = updates::capture_permit()?;
     if audio::owner(&state.audio) == Some(audio::Owner::Meeting) {
         let (tap, start) = audio::tap_begin(&state.audio)?;
         *state.audio.dictation_tap.lock().unwrap() = Some(tap);
@@ -190,6 +193,7 @@ async fn transcribe(
     language: Option<String>,
     recording_id: Option<String>,
 ) -> Result<String, String> {
+    let _work = updates::work_permit()?;
     let recording = match recording_id {
         Some(id) => state.pending_dictations.take(&id)?,
         None => dictation::RecordedTake {
@@ -285,6 +289,7 @@ async fn transcribe_file(
     model_id: String,
     language: Option<String>,
 ) -> Result<String, String> {
+    let _work = updates::work_permit()?;
     let file = std::path::PathBuf::from(&path);
     let size_bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
     let decode_file = file.clone();
@@ -382,6 +387,7 @@ async fn cleanup_text(
     transliterate: bool,
     take_id: Option<String>,
 ) -> Result<String, String> {
+    let _work = updates::work_permit()?;
     let model_path = models::downloaded_model_path(&app, &model_id)?;
     let (system_prompt, style) = cleanup_setup(&app, prompt, style_id);
     let emitter = app.clone();
@@ -649,6 +655,7 @@ fn get_meeting(app: AppHandle, db: State<Db>, id: String) -> Result<Option<Meeti
 /// Returns the updated meeting.
 #[tauri::command]
 async fn summarize_meeting(app: AppHandle, meeting_id: String, model_id: String) -> Result<Meeting, String> {
+    let _work = updates::work_permit()?;
     let model_path = models::downloaded_model_path(&app, &model_id)?;
     let worker = app.clone();
     let id = meeting_id.clone();
@@ -662,6 +669,7 @@ async fn summarize_meeting(app: AppHandle, meeting_id: String, model_id: String)
 /// Research a question with read-only search and transcript tools; return checked sources.
 #[tauri::command]
 async fn research_meetings(app: AppHandle, model_id: String, question: String, meeting_id: Option<String>, history: Option<Vec<meeting_research::Turn>>) -> Result<meeting_research::Answer, String> {
+    let _work = updates::work_permit()?;
     let path=models::downloaded_model_path(&app,&model_id)?;
     tauri::async_runtime::spawn_blocking(move || meeting_research::run(&app,&path,&question,meeting_id.as_deref(),&history.unwrap_or_default())).await.map_err(|e|e.to_string())?
 }
@@ -757,6 +765,7 @@ async fn diarize_meeting(
     embedding_model_id: Option<String>,
     num_speakers: Option<usize>,
 ) -> Result<Meeting, String> {
+    let _work = updates::work_permit()?;
     tauri::async_runtime::spawn_blocking(move || {
         let emb = embedding_model_id
             .filter(|m| !m.is_empty())
@@ -1006,6 +1015,7 @@ fn set_command_keys(app: AppHandle, keys: Vec<String>) -> Result<(), String> {
 /// Command key down: during a meeting, claim the meeting's mic; otherwise
 /// record a standalone request. The overlay shows it's listening.
 fn command_down(app: &AppHandle) {
+    let Ok(_permit) = updates::capture_permit() else { return };
     let st = app.state::<AppState>();
     let result = if meeting::is_recording(app) {
         meeting::command_begin(app)
@@ -1026,6 +1036,7 @@ fn command_down(app: &AppHandle) {
 
 /// Command key up: hand what was said to the assistant.
 fn command_up(app: &AppHandle) {
+    let Ok(work) = updates::work_permit() else { return };
     let st = app.state::<AppState>();
     let _ = app.emit("overlay-state", "processing");
     if meeting::command_active(app) {
@@ -1039,6 +1050,7 @@ fn command_up(app: &AppHandle) {
     }
     let app = app.clone();
     std::thread::spawn(move || {
+        let _work = work;
         let st = app.state::<AppState>();
         if audio::stop_recording(&st.audio).is_err() {
             return;
@@ -1106,6 +1118,7 @@ fn system_audio_supported() -> bool {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn start_system_capture(state: State<AppState>) -> Result<(), String> {
+    let _permit = updates::capture_permit()?;
     syscapture::start(&state.sys)
 }
 
@@ -1156,6 +1169,7 @@ async fn transcribe_system_capture(
     model_id: String,
     language: Option<String>,
 ) -> Result<String, String> {
+    let _work = updates::work_permit()?;
     let model_path = models::downloaded_model_path(&app, &model_id)?;
     let samples = state.sys.last.lock().unwrap().clone();
     let vocab: Vec<String> = {
@@ -1314,6 +1328,8 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_automation::init())
         .manage(meeting_fixture::Fixtures::default());
     builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updates::Updates::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -1419,6 +1435,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            updates::check_app_update,
+            updates::download_app_update,
+            updates::install_app_update,
+            updates::app_update_blocker,
             #[cfg(feature = "automation")]
             meeting_fixture::meeting_fixture,
             list_models,

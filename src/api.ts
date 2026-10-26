@@ -1,6 +1,9 @@
-import { invoke } from "@tauri-apps/api/core";
+import { markUnsaved, trackWork } from "./updateActivity";
+import { invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { emit, listen, UnlistenFn } from "@tauri-apps/api/event";
 import type { Take } from "./HistoryDrawer";
+
+const invoke = <T,>(...args: Parameters<typeof nativeInvoke>): Promise<T> => trackWork(() => nativeInvoke<T>(...args));
 
 export type OverlayState = "recording" | "processing" | "command" | "hidden";
 
@@ -374,7 +377,7 @@ export const api = {
   replaceInMeeting: (meetingId: string, from: string, to: string, remember: boolean) =>
     invoke<number>("replace_in_meeting", { meetingId, from, to, remember }),
   renameMeeting: (id: string, title: string) => invoke<void>("rename_meeting", { id, title }),
-  deleteMeeting: (id: string) => invoke<void>("delete_meeting", { id }),
+  deleteMeeting: async (id: string) => { await invoke<void>("delete_meeting", { id }); markUnsaved(id, false); },
   listMeetings: () => invoke<Meeting[]>("list_meetings"),
   getMeeting: (id: string) => invoke<Meeting | null>("get_meeting", { id }),
   summarizeMeeting: (meetingId: string, modelId: string) =>

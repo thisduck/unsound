@@ -1,3 +1,4 @@
+import { markUnsaved } from "../updateActivity.ts";
 // Shared across live/archive editors. Requests for one meeting run in order.
 const writes = new Map<string, Promise<void>>();
 const revisions = new Map<string, number>();
@@ -19,6 +20,7 @@ export function createNotesDraft(
   };
   try {
     pending = storage.getItem(key);
+    if (pending !== null) markUnsaved(id, true);
     if (pending !== null) { advance(); initialError = "Recovered an unsaved notes draft. Review it, then retry saving."; }
   } catch { initialError = "Local draft storage is unavailable. Keep this window open until your notes finish saving."; }
   const restored = pending;
@@ -27,6 +29,7 @@ export function createNotesDraft(
     restored, initialError,
     edit(text: string) {
       pending = text;
+      markUnsaved(id, true);
       advance();
       let error = null;
       try { storage.setItem(key, text); }
@@ -42,6 +45,7 @@ export function createNotesDraft(
           await write(id, text);
           if (revision === sent && revisions.get(id) === sent) {
             pending = null;
+            markUnsaved(id, false);
             try { if (storage.getItem(key) === text) storage.removeItem(key); } catch { /* database save succeeded */ }
             saved?.(text);
             report({ saving: false, error: null });
