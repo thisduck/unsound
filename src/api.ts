@@ -488,8 +488,8 @@ export const on = {
     listen<DownloadDone>("model-download-done", (e) => cb(e.payload)),
   llmToken: (cb: (token: { takeId: string | null; chunk: string }) => void): Promise<UnlistenFn> =>
     listen<{ takeId: string | null; chunk: string }>("llm-token", (e) => cb(e.payload)),
-  meetingSummaryToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
-    listen<string>("meeting-summary-token", (e) => cb(e.payload)),
+  meetingSummaryToken: (cb: (token: { meetingId: string; chunk: string }) => void): Promise<UnlistenFn> =>
+    listen<{ meetingId: string; chunk: string }>("meeting-summary-token", (e) => cb(e.payload)),
   meetingAnswerToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
     listen<string>("meeting-answer-token", (e) => cb(e.payload)),
   meetingSegments: (cb: (p: { meetingId: string; segments: Segment[] }) => void): Promise<UnlistenFn> =>

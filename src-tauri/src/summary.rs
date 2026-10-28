@@ -221,7 +221,7 @@ pub fn summarize(app: &AppHandle, meeting_id: &str, model_path: &Path) -> Result
     // Publish only after all references have been checked; incomplete JSON or
     // invalid model evidence must never replace previously saved notes.
     store::save_generated_notes(&db,meeting_id,&summary,&items,Some(meeting.content_revision))?;
-    let _=app.emit("meeting-summary-token",&summary);
+    let _=app.emit("meeting-summary-token",serde_json::json!({ "meetingId": meeting_id, "chunk": &summary }));
 
     if meeting.title.trim().is_empty() {
         let messages = [

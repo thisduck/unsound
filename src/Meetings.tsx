@@ -7,7 +7,7 @@ import { ListView } from "./meetings/ListView";
 import { LiveView } from "./meetings/LiveView";
 import { mergeTask } from "./meetings/TaskCard";
 
-type Phase = "idle" | "starting" | "recording" | "stopping" | "summarizing";
+type Phase = "idle" | "starting" | "recording" | "stopping";
 
 function RecTimer() {
   const [secs, setSecs] = useState(0);
@@ -54,7 +54,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const [detected, setDetected] = useState<{ app: string } | null>(null);
   const [released, setReleased] = useState<string | null>(null);
   const [sysSupported, setSysSupported] = useState(true);
-  const [liveSummary, setLiveSummary] = useState<string | null>(null);
+  const [summaries, setSummaries] = useState<Record<string, string>>({});
   const [tasks, setTasks] = useState<Task[]>([]);
   // Live meeting state.
   const [live, setLive] = useState<{ id: string; title: string; attendees: string[] } | null>(null);
@@ -80,8 +80,9 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
 
   const phaseRef = useRef<Phase>("idle");
   phaseRef.current = phase;
-  const summaryRef = useRef(false);
-  const summarizeAfter = useRef(new Set<string>());
+  const summaryJobs = useRef(new Set<string>());
+  const summarizeAfter = useRef(new Map<string, string>());
+  const summaryModelRef = useRef<string | undefined>(undefined);
   const liveIdRef = useRef<string | null>(null);
   const selectedIdRef = useRef<string | null>(null);
   selectedIdRef.current = selected?.id ?? null;
@@ -94,6 +95,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const embModels = models.filter((m) => m.kind === "diarize" && m.id !== "diarize-segmentation" && m.downloaded);
   const meetStt = sttModels.find((m) => m.id === prefs.stt) ?? stt ?? sttModels[0];
   const meetLlm = llmModels.find((m) => m.id === prefs.llm) ?? llm ?? llmModels[0];
+  summaryModelRef.current = meetLlm?.id;
   const meetEmbId = (embModels.find((m) => m.id === prefs.emb) ?? embModels[0])?.id;
 
   // Setup gate: a speech model, the VAD model and a voice model.
@@ -135,8 +137,10 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
           if (fresh) setSelected(cur => cur?.id === id ? { ...cur, actionItems: fresh.actionItems } : cur);
         } catch (e) { setError(String(e)); }
       }),
-      on.meetingSummaryToken((chunk) => {
-        if (summaryRef.current) setLiveSummary((s) => (s ?? "") + chunk);
+      on.meetingSummaryToken(({ meetingId, chunk }) => {
+        if (summaryJobs.current.has(meetingId)) {
+          setSummaries((s) => ({ ...s, [meetingId]: (s[meetingId] ?? "") + chunk }));
+        }
       }),
       // Live transcript: a finalized segment supersedes that channel's partial.
       on.meetingSegments(({ meetingId, segments: segs }) => {
@@ -169,7 +173,11 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       // Tray "Start / stop meeting".
       on.meetingToggle(() => toggleRef.current()),
       // A stop from the floating indicator keeps the normal summary flow.
-      on.meetingStopped((id) => summarizeAfter.current.add(id)),
+      on.meetingStopped((id) => {
+        if (summaryModelRef.current && !summaryJobs.current.has(id)) {
+          summarizeAfter.current.set(id, summaryModelRef.current);
+        }
+      }),
       // "Record this meeting?" prompt (or the banner below).
       on.meetingStartRequest(() => {
         setDetected(null);
@@ -216,7 +224,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
           setLiveSegments([]);
           setPartials({});
           const meeting = await api.getMeeting(id);
-          if (mounted && meeting) setSelected(meeting);
+          if (mounted && meeting && !liveIdRef.current) setSelected(meeting);
           refresh();
         }
       } catch (e) { if (mounted) setError(`Could not read saving status: ${String(e)}`); }
@@ -233,7 +241,6 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       if (m) {
         setSelected(m);
         setFocusMs(atMs ?? null);
-        setLiveSummary(null);
         setTasks(await api.listTasks(id));
       }
     } catch (e) {
@@ -242,6 +249,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   };
 
   const startMeeting = async () => {
+    if (phaseRef.current !== "idle") return;
     if (!meetStt) {
       setError("download a speech model first (settings → models)");
       return;
@@ -262,7 +270,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     setStatus(null);
     setNotesThrough(0);
     setTasks([]);
-    setLiveSummary(null);
+    phaseRef.current = "starting";
     setPhase("starting");
     try {
       await api.createMeeting({
@@ -288,29 +296,33 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     }
   };
 
-  const summarize = async (id: string) => {
-    if (!meetLlm) return;
+  const summarize = async (id: string, modelId = meetLlm?.id) => {
+    if (!modelId || summaryJobs.current.has(id)) return;
     const pending = work.find((w) => w.meetingId === id);
     if (pending && pending.state !== "complete") { setError("Finish transcription before writing the summary."); return; }
-    setPhase("summarizing");
-    setLiveSummary(null);
-    summaryRef.current = true;
+    summaryJobs.current.add(id);
+    summarizeAfter.current.delete(id);
+    setSummaries((s) => ({ ...s, [id]: "" }));
     try {
-      const m = await api.summarizeMeeting(id, meetLlm.id);
+      const m = await api.summarizeMeeting(id, modelId);
       setSelected((cur) => (cur && cur.id === id ? { ...m, segments: m.segments } : cur));
     } catch (e) {
       setError(String(e));
     } finally {
-      summaryRef.current = false;
-      setLiveSummary(null);
-      setPhase("idle");
+      summaryJobs.current.delete(id);
+      setSummaries((s) => {
+        const next = { ...s };
+        delete next[id];
+        return next;
+      });
       refresh();
     }
   };
 
   const stopMeeting = async () => {
     const id = liveIdRef.current;
-    if (!id) return;
+    if (!id || phaseRef.current !== "recording") return;
+    phaseRef.current = "stopping";
     setPhase("stopping");
     setReleased(null);
     try {
@@ -318,30 +330,35 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       const m = await api.meetingStop(id);
       liveIdRef.current = null;
       setLive(null);
+      setPhase("idle");
       if (m) {
+        selectedIdRef.current = m.id;
         setSelected(m);
-        setTasks(await api.listTasks(id));
+        api.listTasks(id).then((tasks) => {
+          if (!liveIdRef.current && selectedIdRef.current === id) setTasks(tasks);
+        }).catch((e) => setError(String(e)));
       }
       setLiveSegments([]);
       setPartials({});
-      if (meetLlm) summarizeAfter.current.add(id);
-      setPhase("idle");
-      setWork(await api.meetingWorkStatus());
+      if (meetLlm && !summaryJobs.current.has(id)) summarizeAfter.current.set(id, meetLlm.id);
+      api.meetingWorkStatus().then(setWork).catch((e) => setError(String(e)));
       refresh();
     } catch (e) {
       setError(String(e));
-      setPhase("idle");
+      // If native capture did stop before the error, the status poll releases
+      // this state; otherwise keep the stop control available for a retry.
+      setPhase("recording");
     }
   };
 
   useEffect(() => {
-    const id = selected?.id;
-    if (phase === "idle" && id && meetLlm && summarizeAfter.current.has(id)
-      && work.some((w) => w.meetingId === id && w.state === "complete")) {
-      summarizeAfter.current.delete(id);
-      void summarize(id);
+    // A stopped meeting keeps processing even after navigation or a new recording.
+    for (const [id, modelId] of summarizeAfter.current) {
+      if (work.some((w) => w.meetingId === id && w.state === "complete")) {
+        void summarize(id, modelId);
+      }
     }
-  }, [work, phase, selected?.id, meetLlm?.id]);
+  }, [work]);
 
   toggleRef.current = () => {
     if (phaseRef.current === "recording") stopMeeting();
@@ -360,7 +377,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     }
   };
 
-  const busy = phase === "starting" || phase === "stopping" || phase === "summarizing";
+  const busy = phase === "starting" || phase === "stopping";
   const pillLabel =
     phase === "recording"
       ? "end meeting"
@@ -368,9 +385,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         ? "starting…"
         : phase === "stopping"
           ? "wrapping up…"
-          : phase === "summarizing"
-            ? "writing notes…"
-            : "start a meeting";
+          : "start a meeting";
 
   return (
     <div className="meetings">
@@ -387,6 +402,11 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       </div>
 
       {setupNeeded && !selected && !live && <MeetingSetup models={models} onModelsChanged={onModelsChanged} />}
+      {Object.keys(summaries).map((id) => (
+        <div key={id} data-meeting-id={id} className="meet-hint" role="status">
+          {meetings.find((m) => m.id === id)?.title || "Meeting"}: writing notes…
+        </div>
+      ))}
       {work.filter((w) => w.state !== "complete" || w.warning).map((w) => (
         <div key={w.meetingId} data-meeting-id={w.meetingId} className={"meet-hint " + (w.error ? "meet-error" : "meet-warning")} role={w.error ? "alert" : "status"}>
           <div>
@@ -472,8 +492,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
           onDelete={() => remove(selected.id)}
           tasks={tasks}
           onTasks={setTasks}
-          liveSummary={phase === "summarizing" ? liveSummary : null}
-          summarizing={phase === "summarizing"}
+          liveSummary={summaries[selected.id] ?? null}
+          summarizing={summaries[selected.id] !== undefined}
           onSummarize={() => summarize(selected.id)}
           llmId={meetLlm?.id}
           embId={meetEmbId}
