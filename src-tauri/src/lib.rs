@@ -12,6 +12,7 @@ mod frontapp;
 mod hotkeys;
 mod llm;
 mod meeting;
+mod meeting_indicator;
 mod meeting_work;
 mod meeting_metrics;
 #[cfg(any(test, feature = "automation"))]
@@ -726,16 +727,24 @@ async fn meeting_start(
 /// durable transcription, speaker finalization, and end-of-meeting requests
 /// continue in the background. Query meeting_work_status for completion.
 #[tauri::command]
-async fn meeting_stop(app: AppHandle) -> Result<Option<Meeting>, String> {
+async fn meeting_stop(app: AppHandle, meeting_id: Option<String>) -> Result<Option<Meeting>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let Some(id) = meeting::stop(&app)? else {
+        let Some(id) = meeting::stop_if_current(&app, meeting_id.as_deref())? else {
             return Ok(None);
         };
+        let _ = app.emit("meeting-stopped", &id);
         let db = app.state::<Db>();
         full_meeting(&app, &db, &id).map(Some)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn meeting_recording_status(app: AppHandle) -> Result<Option<meeting::RecordingStatus>, String> {
+    tauri::async_runtime::spawn_blocking(move || meeting::recording_status(&app))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1378,6 +1387,7 @@ pub fn run() {
             // Open the local SQLite store (history + meetings) and manage it.
             app.manage(store::open(app.handle())?);
             let s = settings::load(app.handle());
+            meeting_indicator::create(app.handle())?;
             if !cfg!(feature = "automation") {
                 if let Err(e) = apply_shortcuts(app.handle(), &s) {
                     eprintln!("global shortcuts unavailable: {e}");
@@ -1430,7 +1440,9 @@ pub fn run() {
             // Live in the menu bar: closing the window hides it, the tray
             // (or the global shortcut) keeps working. Quit via the tray.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
+                if window.label() != "meeting-indicator" {
+                    let _ = window.hide();
+                }
                 api.prevent_close();
             }
         })
@@ -1491,6 +1503,7 @@ pub fn run() {
             search_meetings,
             meeting_start,
             meeting_stop,
+            meeting_recording_status,
             meeting_work_status,
             meeting_performance,
             meeting_pause,

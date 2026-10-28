@@ -91,6 +91,9 @@ sys ─┘   + Silero VAD       │    lifted into the assistant)            │
         after transcription: compose → validate → save notes + actions ◀┘
 ```
 
+- **Recording indicator** floats above other apps with unsound's logo, an elapsed
+  timer, and a Stop button. Drag it to move it. It stays visible when the main
+  window is hidden, and asks “Call ended?” when a detected call releases the mic.
 - **Audio** from both channels streams to `meeting-audio/<id>.wav` and
   `<id>.mic.wav` as it's captured, on one clock (the mic's); system audio is
   placed by its buffer timestamps so silent stretches don't drift it.

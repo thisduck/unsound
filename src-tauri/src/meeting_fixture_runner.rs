@@ -141,6 +141,35 @@ fn run(app: &AppHandle, case: &str, base: &str) -> Result {
     )?;
     match case {
         "soak" | "soak-recover" => return crate::meeting_bench::run(app,case,base),
+        "recording-indicator" => {
+            let window = app.get_webview_window("meeting-indicator").ok_or("missing indicator window")?;
+            let visible = || window.is_visible().map_err(|e| e.to_string());
+            ensure(!visible()? && meeting::recording_status(app).is_none(), "idle indicator is visible")?;
+            create(app, base)?;
+            start(app, base)?;
+            wait(|| visible())?;
+            wait(|| Ok(meeting::recording_status(app).is_some_and(|s| s.meeting_id == base && s.elapsed_ms >= 1000)))?;
+            if let Some(main) = app.get_webview_window("main") {
+                main.hide().map_err(|e| e.to_string())?;
+            }
+            ensure(visible()?, "hiding main hid the recording indicator")?;
+            // Exercise the same command used by the indicator, including stale clicks.
+            let stopped = tauri::async_runtime::block_on(crate::meeting_stop(app.clone(), Some(base.into())))?;
+            ensure(stopped.is_some_and(|m| m.id == base), "indicator stop did not return the meeting")?;
+            wait(|| Ok(!visible()? && meeting::recording_status(app).is_none()))?;
+
+            let next = format!("{base}-next");
+            create(app, &next)?;
+            start(app, &next)?;
+            wait(|| visible())?;
+            ensure(tauri::async_runtime::block_on(crate::meeting_stop(app.clone(), Some(base.into())))?.is_none(), "stale indicator stopped a newer meeting")?;
+            ensure(visible()? && meeting::is_recording(app), "stale stop hid the active indicator")?;
+            control(app, &next, fixture::Action::Disconnect)?;
+            wait(|| Ok(!visible()? && meeting::recording_status(app).is_none()))?;
+            wait(|| Ok(!in_flight(app, base) && !in_flight(app, &next)))?;
+            remove(app, base)?;
+            remove(app, &next)?;
+        }
         "failures" => {
             let id = format!("{base}-stall");
             create(app, &id)?;

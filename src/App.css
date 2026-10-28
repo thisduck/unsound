@@ -1314,6 +1314,94 @@ body {
   }
 }
 
+/* Persistent meeting recording window; the label is a native drag handle. */
+:root.meeting-indicator-root,
+:root.meeting-indicator-root body,
+:root.meeting-indicator-root #root {
+  background: transparent !important;
+  overflow: hidden;
+  height: 100%;
+}
+
+.meeting-indicator-stack {
+  height: 100%;
+  padding: 8px;
+}
+
+.meeting-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 60px;
+  padding: 0 10px 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  background: rgba(24, 26, 30, 0.96);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
+  user-select: none;
+}
+
+.meeting-indicator-drag {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  cursor: grab;
+}
+
+.meeting-indicator-drag:active { cursor: grabbing; }
+/* The drag attribute must be the pointer target, including over its text. */
+.meeting-indicator-drag > * { pointer-events: none; }
+
+.meeting-indicator-brand { position: relative; flex: none; width: 32px; height: 32px; }
+.meeting-indicator-brand img { display: block; width: 100%; height: 100%; }
+.meeting-indicator-dot {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f08b82;
+  box-shadow: 0 0 0 4px rgba(240, 139, 130, 0.12);
+}
+
+.meeting-indicator-copy { display: grid; gap: 4px; min-width: 0; }
+.meeting-indicator-copy strong { font-size: 12px; font-weight: 600; }
+.meeting-indicator-detail {
+  font-size: 11px;
+  color: #b8bbc2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+.meeting-indicator.call-ended { border-color: rgba(232, 168, 124, 0.5); }
+.meeting-indicator.call-ended .meeting-indicator-detail { color: var(--accent); }
+.meeting-indicator-detail [role="alert"] { color: var(--danger); }
+
+.meeting-indicator-stop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: none;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(240, 139, 130, 0.25);
+  border-radius: 9px;
+  background: rgba(240, 139, 130, 0.1);
+  color: #f3b1a9;
+  font: 500 12px var(--sans);
+  cursor: pointer;
+}
+.meeting-indicator-stop > span { width: 8px; height: 8px; border-radius: 2px; background: currentColor; }
+.meeting-indicator-stop:hover { background: rgba(240, 139, 130, 0.2); }
+.meeting-indicator-stop:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.meeting-indicator-stop:disabled { opacity: 0.65; cursor: wait; }
+
 /* ── scrollbars ── */
 ::-webkit-scrollbar {
   width: 8px;

@@ -100,6 +100,9 @@ substitutes nor the `meeting_fixture` IPC command or scenario runner.
 
 The native scenarios check:
 
+- The recording indicator appears during capture, survives hiding the main
+  window, and disappears after Stop or capture failure. Its timer uses the
+  recorder's clock; a delayed Stop for an older meeting leaves a new one running.
 - A cooperative model stall trips the watchdog and leaves one retryable job.
 - A non-cooperative stall retains the single worker slot while stop returns
   within 2.5 seconds and another recorder saves audio. Canceled results cannot

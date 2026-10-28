@@ -7,6 +7,11 @@ const invoke = <T,>(...args: Parameters<typeof nativeInvoke>): Promise<T> => tra
 
 export type OverlayState = "recording" | "processing" | "command" | "hidden";
 
+export interface MeetingRecordingStatus {
+  meetingId: string;
+  elapsedMs: number;
+}
+
 export type ModelKind = "stt" | "llm" | "diarize" | "vad";
 
 export interface ModelInfo {
@@ -402,7 +407,8 @@ export const api = {
   meetingWorkStatus: () => invoke<MeetingWork[]>("meeting_work_status"),
   meetingPause: (id: string) => invoke<void>("meeting_pause", { id }),
   meetingRetry: (id: string) => invoke<void>("meeting_retry", { id }),
-  meetingStop: () => invoke<Meeting | null>("meeting_stop"),
+  meetingStop: (meetingId?: string) => invoke<Meeting | null>("meeting_stop", { meetingId: meetingId ?? null }),
+  meetingRecordingStatus: () => invoke<MeetingRecordingStatus | null>("meeting_recording_status"),
   diarizeMeeting: (meetingId: string, embeddingModelId?: string, numSpeakers?: number) =>
     invoke<Meeting>("diarize_meeting", {
       meetingId,
@@ -492,6 +498,10 @@ export const on = {
     listen<{ meetingId: string; speaker: string; text: string }>("meeting-partial", (e) => cb(e.payload)),
   meetingToggle: (cb: () => void): Promise<UnlistenFn> =>
     listen<void>("meeting-toggle", () => cb()),
+  meetingRecordingChanged: (cb: () => void): Promise<UnlistenFn> =>
+    listen<void>("meeting-recording-changed", () => cb()),
+  meetingStopped: (cb: (meetingId: string) => void): Promise<UnlistenFn> =>
+    listen<string>("meeting-stopped", (e) => cb(e.payload)),
   meetingsAnswerToken: (cb: (chunk: string) => void): Promise<UnlistenFn> =>
     listen<string>("meetings-answer-token", (e) => cb(e.payload)),
   meetingStatus: (

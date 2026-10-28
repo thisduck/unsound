@@ -64,8 +64,12 @@ struct Worker {
 impl MeetingState {
     /// Reserve the recorder until capture has released the devices. The old
     /// transcriber may finish later, but must no longer change recording state.
-    fn release_capture(&self) -> Option<Handle> {
+    fn release_capture(&self, expected_id: Option<&str>) -> Option<Handle> {
         let mut active = self.active.lock().unwrap();
+        // A delayed click on an old indicator cannot stop the next meeting.
+        if expected_id.is_some_and(|id| active.as_ref().is_none_or(|h| h.meeting_id != id)) {
+            return None;
+        }
         let mut handle = active.take()?;
         handle.stop.store(true, Ordering::Relaxed);
         if let Some(capture) = handle.capture.take() {
@@ -78,6 +82,7 @@ impl MeetingState {
 
 struct Handle {
     meeting_id: String,
+    started: Instant,
     stop: Arc<AtomicBool>,
     capture: Option<JoinHandle<()>>,
     rx: Option<mpsc::Receiver<Job>>,
@@ -231,6 +236,7 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
 
     *active = Some(Handle {
         meeting_id: opts.meeting_id,
+        started: mic_started,
         stop,
         capture: Some(capture),
         rx: Some(rx),
@@ -241,17 +247,23 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
     });
     *st.meeting.recording.lock().unwrap() = true;
     drop(active);
+    crate::meeting_indicator::refresh(app);
     crate::tray::refresh_menu(app);
     Ok(())
 }
 
 /// Release capture promptly. Durable work continues in the single background worker.
 pub fn stop(app: &AppHandle) -> Result<Option<String>, String> {
+    stop_if_current(app, None)
+}
+
+pub fn stop_if_current(app: &AppHandle, expected_id: Option<&str>) -> Result<Option<String>, String> {
     let started=Instant::now();
     let st = app.state::<AppState>();
-    let Some(h) = st.meeting.release_capture() else {
+    let Some(h) = st.meeting.release_capture(expected_id) else {
         return Ok(None);
     };
+    crate::meeting_indicator::refresh(app);
     crate::tray::refresh_menu(app);
     let id = h.meeting_id.clone();
     drop(h);
@@ -527,6 +539,21 @@ pub fn start_recovery(app: AppHandle) {
 
 pub fn is_recording(app: &AppHandle) -> bool {
     *app.state::<AppState>().meeting.recording.lock().unwrap()
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingStatus {
+    pub meeting_id: String,
+    pub elapsed_ms: u64,
+}
+
+/// Capture state, independent of the main webview and transcription backlog.
+pub fn recording_status(app: &AppHandle) -> Option<RecordingStatus> {
+    app.state::<AppState>().meeting.active.lock().unwrap().as_ref().map(|h| RecordingStatus {
+        meeting_id: h.meeting_id.clone(),
+        elapsed_ms: h.started.elapsed().as_millis() as u64,
+    })
 }
 
 /// The id of the meeting being recorded, if any.
@@ -1775,6 +1802,7 @@ mod reliability_tests {
         let (tx, _) = mpsc::sync_channel(4);
         Handle {
             meeting_id: id.into(),
+            started: Instant::now(),
             stop: Arc::new(AtomicBool::new(false)),
             capture: None,
             rx: None,
@@ -1803,7 +1831,7 @@ mod reliability_tests {
         let (released, wait_released) = mpsc::channel();
         let stopping = state.clone();
         let finalizer = std::thread::spawn(move || {
-            let old = stopping.release_capture().unwrap();
+            let old = stopping.release_capture(None).unwrap();
             released.send(()).unwrap();
             inference.join().unwrap();
             // Mirrors stop: after release, only the old meeting's metadata
@@ -1833,6 +1861,19 @@ mod reliability_tests {
             state.active.lock().unwrap().as_ref().unwrap().meeting_id,
             "new"
         );
-        state.release_capture();
+        state.release_capture(None);
+    }
+
+    #[test]
+    fn stale_indicator_stop_does_not_release_a_new_recording() {
+        let state = MeetingState::default();
+        *state.active.lock().unwrap() = Some(handle("new"));
+        *state.recording.lock().unwrap() = true;
+        assert!(state.release_capture(Some("old")).is_none());
+        assert!(*state.recording.lock().unwrap());
+        assert_eq!(state.active.lock().unwrap().as_ref().unwrap().meeting_id, "new");
+        assert_eq!(state.release_capture(Some("new")).unwrap().meeting_id, "new");
+        assert!(!*state.recording.lock().unwrap());
+        assert!(state.release_capture(Some("new")).is_none());
     }
 }

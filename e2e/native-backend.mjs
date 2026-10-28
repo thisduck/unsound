@@ -34,6 +34,7 @@ async function scenario(name, fixtureId = id) {
     console.log(`PASS native backend: ${name}`);
   } finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
 }
+await scenario("recording-indicator");
 await scenario("failures");
 await scenario("crash-write", `${id}-crash`);
 await scenario("crash-read", `${id}-crash`);

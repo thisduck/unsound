@@ -168,6 +168,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       }),
       // Tray "Start / stop meeting".
       on.meetingToggle(() => toggleRef.current()),
+      // A stop from the floating indicator keeps the normal summary flow.
+      on.meetingStopped((id) => summarizeAfter.current.add(id)),
       // "Record this meeting?" prompt (or the banner below).
       on.meetingStartRequest(() => {
         setDetected(null);
@@ -313,7 +315,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     setReleased(null);
     try {
       // Capture stops promptly; durable transcription continues in the background.
-      const m = await api.meetingStop();
+      const m = await api.meetingStop(id);
       liveIdRef.current = null;
       setLive(null);
       if (m) {
