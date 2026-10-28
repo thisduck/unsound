@@ -899,8 +899,11 @@ export function MeetingsSection({ models, onError }: { models: ModelInfo[]; onEr
         </div>
         <label className="check-row">
           <input type="checkbox" checked={s.detectMeetings} onChange={(e) => save({ ...s, detectMeetings: e.target.checked })} />
-          offer to record when Zoom, Meet, Teams, Slack or FaceTime starts using the mic
+          offer to record when a supported meeting is detected
         </label>
+        <p className="sheet-hint block">
+          General mic use won’t trigger a prompt. Browser calls need a recognized meeting page in the foreground and Accessibility access. Automatic detection requires macOS 14.2 or later.
+        </p>
         <label className="check-row">
           <input
             type="checkbox"

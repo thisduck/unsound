@@ -1894,6 +1894,16 @@ textarea.meet-summary {
   -webkit-user-select: none;
 }
 
+.prompt-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.prompt-logo { width: 32px; height: 32px; flex: none; }
+.prompt-text { min-width: 0; }
+
 .prompt-title {
   font-size: 13px;
   font-weight: 600;

@@ -4,10 +4,11 @@
 //!
 //! On macOS 14.2+ CoreAudio lists its client processes, each with its bundle id
 //! and whether it's pulling input right now — so we know exactly which app took
-//! the mic. On older systems we fall back to "is the input device busy?" plus
-//! the list of running call apps (browsers can't be told apart there, so they
-//! don't count). A background thread polls every couple of seconds; nothing is
-//! recorded until the user says so.
+//! the mic. Browser capture also needs a recognized meeting URL in the
+//! foreground browser. Generic dictation/transcription pages never qualify.
+//! If per-process attribution or browser context is unavailable, stay silent.
+//! A background thread polls every couple of seconds; nothing is recorded
+//! until the user says so.
 
 use serde::Serialize;
 use tauri::AppHandle;
@@ -39,12 +40,14 @@ const KNOWN_APPS: &[(&str, &str, bool)] = &[
     ("Cisco-Systems.Spark", "Webex", false),
     ("com.apple.FaceTime", "FaceTime", false),
     ("com.hnc.Discord", "Discord", false),
-    ("com.google.Chrome", "Chrome (Meet?)", true),
-    ("com.apple.Safari", "Safari (Meet?)", true),
-    ("company.thebrowser.Browser", "Arc (Meet?)", true),
-    ("org.mozilla.firefox", "Firefox (Meet?)", true),
-    ("com.microsoft.edgemac", "Edge (Meet?)", true),
-    ("com.brave.Browser", "Brave (Meet?)", true),
+    // CoreAudio identifies the browser, not the service in a tab. Do not
+    // attribute its microphone use to Google Meet without that evidence.
+    ("com.google.Chrome", "Chrome", true),
+    ("com.apple.Safari", "Safari", true),
+    ("company.thebrowser.Browser", "Arc", true),
+    ("org.mozilla.firefox", "Firefox", true),
+    ("com.microsoft.edgemac", "Edge", true),
+    ("com.brave.Browser", "Brave", true),
 ];
 
 /// Match a bundle id against the known call apps: `(canonical id, name, browser)`.
@@ -58,6 +61,15 @@ fn known_app(bundle_id: &str) -> Option<(&'static str, &'static str, bool)> {
                     .is_some_and(|rest| rest.starts_with('.'))
         })
         .copied()
+}
+
+fn meeting_source(bundle_id: &str, browser_url: Option<&str>) -> Option<&'static str> {
+    let (_, name, browser) = known_app(bundle_id)?;
+    if browser {
+        crate::browser_meeting::provider(browser_url?)
+    } else {
+        Some(name)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -142,8 +154,6 @@ mod imp {
     const PROCESS_PID: u32 = fourcc(b"ppid");
     const PROCESS_BUNDLE_ID: u32 = fourcc(b"pbid");
     const PROCESS_IS_RUNNING_INPUT: u32 = fourcc(b"piri");
-    const DEFAULT_INPUT_DEVICE: u32 = fourcc(b"dIn ");
-    const DEVICE_IS_RUNNING_SOMEWHERE: u32 = fourcc(b"gone");
 
     fn address(selector: u32) -> PropertyAddress {
         PropertyAddress {
@@ -225,58 +235,23 @@ mod imp {
         )
     }
 
-    /// Pre-14.2 fallback: is anyone using the default input device?
-    fn input_busy() -> bool {
-        let Some(device) = get::<u32>(SYSTEM_OBJECT, DEFAULT_INPUT_DEVICE).filter(|&d| d != 0)
-        else {
-            return false;
-        };
-        get::<u32>(device, DEVICE_IS_RUNNING_SOMEWHERE).unwrap_or(0) != 0
-    }
-
-    /// Running (non-browser) call apps, for the fallback path.
-    fn running_call_apps() -> Vec<String> {
-        use objc2_app_kit::NSWorkspace;
-        let workspace = NSWorkspace::sharedWorkspace();
-        workspace
-            .runningApplications()
-            .iter()
-            .filter_map(|a| a.bundleIdentifier().map(|b| b.to_string()))
-            .filter(|b| known_app(b).is_some_and(|(_, _, browser)| !browser))
-            .collect()
-    }
-
     /// One poll: the call apps holding the mic (canonical id → name), and
-    /// whether unsound itself is using it. `own_mic` is only knowable on the
-    /// per-process path.
-    fn snapshot() -> (HashMap<&'static str, &'static str>, bool) {
+    /// whether unsound itself is using it. No global-mic fallback: a web
+    /// transcription tool must not trigger a prompt just because Zoom is open.
+    fn snapshot() -> Option<(HashMap<&'static str, &'static str>, bool)> {
         let own_pid = std::process::id() as i32;
         let mut holders = HashMap::new();
-        match mic_users() {
-            Some(users) => {
-                let mut own = false;
-                for u in users {
-                    if u.pid == own_pid {
-                        own = true;
-                        continue;
-                    }
-                    if let Some((id, name, _)) = known_app(&u.bundle_id) {
-                        holders.insert(id, name);
-                    }
-                }
-                (holders, own)
+        let mut own = false;
+        for u in mic_users()? {
+            if u.pid == own_pid {
+                own = true;
+                continue;
             }
-            None => {
-                if input_busy() {
-                    for b in running_call_apps() {
-                        if let Some((id, name, _)) = known_app(&b) {
-                            holders.insert(id, name);
-                        }
-                    }
-                }
-                (holders, false)
+            if let Some((id, name, _)) = known_app(&u.bundle_id) {
+                holders.insert(id, name);
             }
         }
+        Some((holders, own))
     }
 
     /// Start the detector thread (once; later calls are no-ops).
@@ -294,7 +269,8 @@ mod imp {
     }
 
     struct Tracked {
-        name: &'static str,
+        /// None until microphone use has been associated with a meeting.
+        name: Option<&'static str>,
         /// When it was last seen holding the mic.
         last_seen: Instant,
     }
@@ -309,29 +285,47 @@ mod imp {
             std::thread::sleep(POLL);
             if !ENABLED.load(Ordering::SeqCst) {
                 tracked.clear();
+                prompted_for = None;
+                hide_prompt(&app);
                 continue;
             }
-            let (holders, own_mic) = snapshot();
+            let Some((holders, own_mic)) = snapshot() else {
+                hide_prompt(&app);
+                continue;
+            };
             let now = Instant::now();
 
-            for (&id, &name) in &holders {
-                match tracked.get_mut(id) {
-                    Some(t) => t.last_seen = now,
-                    None => {
-                        tracked.insert(id, Tracked { name, last_seen: now });
-                        // Only a fresh grab of the mic prompts, and only when
-                        // we aren't already recording or dictating.
-                        if !crate::meeting::is_recording(&app) && !own_mic {
-                            let payload = DetectedApp {
-                                app: name.to_string(),
-                                bundle_id: id.to_string(),
-                            };
-                            eprintln!("[detect] {name} ({id}) took the mic");
-                            let _ = app.emit("meeting-detected", &payload);
-                            place_and_show(&app);
-                            prompted_for = Some(id);
-                        }
-                    }
+            for &id in holders.keys() {
+                let t = tracked.entry(id).or_insert(Tracked {
+                    name: None,
+                    last_seen: now,
+                });
+                t.last_seen = now;
+                if t.name.is_some() {
+                    continue;
+                }
+                let browser = known_app(id).is_some_and(|(_, _, browser)| browser);
+                let url = if browser {
+                    crate::browser_meeting::foreground_url(id)
+                } else {
+                    None
+                };
+                let Some(name) = meeting_source(id, url.as_deref()) else {
+                    continue;
+                };
+                t.name = Some(name);
+                // An unrecognized browser can qualify later if a real meeting
+                // is opened. Once recognized, switching tabs does not end it or
+                // re-prompt; only releasing the mic re-arms this session.
+                if !crate::meeting::is_recording(&app) && !own_mic {
+                    let payload = DetectedApp {
+                        app: name.to_string(),
+                        bundle_id: id.to_string(),
+                    };
+                    eprintln!("[detect] {name} ({id}) took the mic");
+                    let _ = app.emit("meeting-detected", &payload);
+                    place_and_show(&app);
+                    prompted_for = Some(id);
                 }
             }
 
@@ -344,11 +338,12 @@ mod imp {
                 .collect();
             for id in released {
                 if let Some(t) = tracked.remove(id) {
-                    eprintln!("[detect] {} ({id}) released the mic", t.name);
+                    let Some(name) = t.name else { continue };
+                    eprintln!("[detect] {name} ({id}) released the mic");
                     let _ = app.emit(
                         "meeting-app-released",
                         DetectedApp {
-                            app: t.name.to_string(),
+                            app: name.to_string(),
                             bundle_id: id.to_string(),
                         },
                     );
@@ -439,6 +434,32 @@ pub fn hide_meeting_prompt(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_mic_use_needs_a_known_meeting_page() {
+        for id in [
+            "com.google.Chrome",
+            "com.google.Chrome.helper",
+            "com.apple.Safari",
+            "org.mozilla.firefox",
+        ] {
+            assert_eq!(meeting_source(id, None), None);
+            assert_eq!(
+                meeting_source(id, Some("https://dictation.io/speech")),
+                None
+            );
+            assert_eq!(meeting_source(id, Some("https://otter.ai/record")), None);
+            assert_eq!(meeting_source(id, Some("https://meet.google.com/")), None);
+            assert_eq!(
+                meeting_source(id, Some("https://meet.google.com/abc-defg-hij")),
+                Some("Google Meet")
+            );
+        }
+        assert_eq!(meeting_source("us.zoom.xos", None), Some("Zoom"));
+        assert_eq!(meeting_source("com.microsoft.teams2", None), Some("Teams"));
+        assert_eq!(meeting_source("com.apple.VoiceMemos", None), None);
+        assert_eq!(meeting_source("com.unknown.transcription", None), None);
+    }
 
     #[test]
     fn matches_known_apps_and_their_helpers() {

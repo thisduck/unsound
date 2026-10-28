@@ -5,6 +5,7 @@ pub mod audiofile;
 pub mod calendar;
 mod audio_store;
 mod brain;
+mod browser_meeting;
 mod deliver;
 pub mod detect;
 mod dictation;

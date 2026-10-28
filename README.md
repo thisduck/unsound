@@ -94,6 +94,12 @@ sys ─┘   + Silero VAD       │    lifted into the assistant)            │
 - **Recording indicator** floats above other apps with unsound's logo, an elapsed
   timer, and a Stop button. Drag it to move it. It stays visible when the main
   window is hidden, and asks “Call ended?” when a detected call releases the mic.
+- **Meeting prompts** identify the app and offer “Start unsound meeting.” On
+  macOS 14.2+, a known desktop call app must own the microphone. Browser prompts
+  also require a recognized Google Meet, Zoom, or Teams meeting URL in the
+  foreground browser, readable with existing Accessibility access. Generic
+  transcription pages, unknown URLs, and unavailable context stay silent. No
+  browser permission dialog is opened, and no URL or browsing history is saved.
 - **Audio** from both channels streams to `meeting-audio/<id>.wav` and
   `<id>.mic.wav` as it's captured, on one clock (the mic's); system audio is
   placed by its buffer timestamps so silent stretches don't drift it.

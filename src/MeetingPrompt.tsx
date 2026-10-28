@@ -43,16 +43,19 @@ export default function MeetingPrompt() {
   return (
     <div className="prompt-stack">
       <div className="prompt-card">
-        <div className="prompt-text">
-          <div className="prompt-title">{detected ? `${detected.app} is using your mic` : "A call started"}</div>
-          <div className="prompt-sub">Record this meeting? It stays on this Mac.</div>
+        <div className="prompt-header">
+          <img src="/unsound.svg" alt="" className="prompt-logo" />
+          <div className="prompt-text">
+            <div className="prompt-title">{detected ? `${detected.app} is using your mic` : "A call may have started"}</div>
+            <div className="prompt-sub">Record this meeting with unsound.</div>
+          </div>
         </div>
         <div className="prompt-actions">
           <button className="quiet" onClick={hide}>
             Not now
           </button>
           <button className="quiet accent" onClick={record}>
-            Record
+            Start unsound meeting
           </button>
         </div>
       </div>
