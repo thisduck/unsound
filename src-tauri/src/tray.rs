@@ -9,12 +9,12 @@ const MIC_DEFAULT_ID: &str = "mic:";
 
 pub fn build_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
     let open = MenuItem::with_id(app, "open", "Open unsound", true, None::<&str>)?;
-    let paste = MenuItem::with_id(app, "paste-last", "Insert last take", true, None::<&str>)?;
+    let paste = MenuItem::with_id(app, "paste-last", "Insert last dictation", true, None::<&str>)?;
 
     let meeting_label = if crate::meeting::is_recording(app) {
-        "Stop meeting"
+        "Stop recording"
     } else {
-        "Start meeting"
+        "Record a meeting"
     };
     let meeting = MenuItem::with_id(app, "meeting", meeting_label, true, None::<&str>)?;
 

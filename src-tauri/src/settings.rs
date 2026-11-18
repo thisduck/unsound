@@ -177,6 +177,10 @@ pub struct MeetingSettings {
     /// Summary model for background notes during a meeting; empty = the one
     /// the Meetings tab passes at start.
     pub summary_model: String,
+    /// Speech model for meetings; empty = the dictation speech model.
+    pub speech_model: String,
+    /// Spoken language for meetings: None follows dictation, "" auto-detects.
+    pub language: Option<String>,
 }
 
 impl Default for MeetingSettings {
@@ -186,6 +190,8 @@ impl Default for MeetingSettings {
             use_calendar: false,
             embedding_model: String::new(),
             summary_model: String::new(),
+            speech_model: String::new(),
+            language: None,
         }
     }
 }

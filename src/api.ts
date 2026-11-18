@@ -1,7 +1,7 @@
 import { markUnsaved, trackWork } from "./updateActivity";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { emit, listen, UnlistenFn } from "@tauri-apps/api/event";
-import type { Take } from "./HistoryDrawer";
+import type { Take } from "./Dictations";
 
 const invoke = <T,>(...args: Parameters<typeof nativeInvoke>): Promise<T> => trackWork(() => nativeInvoke<T>(...args));
 
@@ -131,6 +131,19 @@ export interface MeetingSettings {
   useCalendar: boolean;
   embeddingModel: string;
   summaryModel: string;
+  /// Meeting speech model; "" uses the dictation speech model.
+  speechModel: string;
+  /// Meeting spoken language; null follows dictation, "" auto-detects.
+  language: string | null;
+}
+
+/// A point from the notes written so far in a live meeting.
+export interface LiveNote {
+  kind: "decision" | "action" | "open_question" | "point" | string;
+  text: string;
+  owner: string;
+  due: string;
+  startMs: number;
 }
 
 export interface Settings {
@@ -466,6 +479,9 @@ export const api = {
   calendarRequest: () => invoke<boolean>("calendar_request"),
   calendarCurrent: () => invoke<CalEvent | null>("calendar_current"),
   hideMeetingPrompt: () => invoke<void>("hide_meeting_prompt"),
+  meetingLiveNotes: (meetingId: string) => invoke<LiveNote[]>("meeting_live_notes", { meetingId }),
+  /// Show the main window; `view` asks it to navigate (e.g. "live").
+  showMainWindow: (view?: string) => invoke<void>("show_main_window", { view: view ?? null }),
 
   // System-audio capture (ScreenCaptureKit; macOS 13+).
   systemAudioSupported: () => invoke<boolean>("system_audio_supported"),
@@ -550,6 +566,8 @@ export const on = {
     listen<void>("settings-changed", () => cb()),
   fileInfo: (cb: (info: { sizeBytes: number; durationSecs: number }) => void): Promise<UnlistenFn> =>
     listen<{ sizeBytes: number; durationSecs: number }>("file-info", (e) => cb(e.payload)),
+  navigate: (cb: (view: string) => void): Promise<UnlistenFn> =>
+    listen<string>("navigate", (e) => cb(e.payload)),
   dictationLive: (cb: (caption: { takeId: string; text: string }) => void): Promise<UnlistenFn> =>
     listen<{ takeId: string; text: string }>("dictation-live", (e) => cb(e.payload)),
 };

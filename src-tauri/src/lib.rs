@@ -640,6 +640,48 @@ fn list_meetings(db: State<Db>) -> Result<Vec<Meeting>, String> {
     store::list_meetings(&db)
 }
 
+/// A point from the notes written so far during a meeting, for the live view.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveNote {
+    kind: String,
+    text: String,
+    owner: String,
+    due: String,
+    start_ms: i64,
+}
+
+/// Facts extracted from each finished stretch of a meeting, in timeline order.
+#[tauri::command]
+fn meeting_live_notes(db: State<Db>, meeting_id: String) -> Result<Vec<LiveNote>, String> {
+    Ok(store::chunks(&db, &meeting_id)?
+        .into_iter()
+        .flat_map(|c| {
+            let start = c.start_ms;
+            notes_quality::decode(&c.facts).facts.into_iter().map(move |f| LiveNote {
+                kind: f.kind,
+                text: f.text,
+                owner: f.owner,
+                due: f.due,
+                start_ms: start,
+            })
+        })
+        .collect())
+}
+
+/// Bring the main window forward, optionally asking it to show a view.
+#[tauri::command]
+fn show_main_window(app: AppHandle, view: Option<String>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    if let Some(view) = view {
+        let _ = app.emit("navigate", view);
+    }
+}
+
 #[tauri::command]
 fn get_meeting(app: AppHandle, db: State<Db>, id: String) -> Result<Option<Meeting>, String> {
     match store::get_meeting(&db, &id)? {
@@ -1261,7 +1303,7 @@ fn apply_shortcuts(app: &AppHandle, s: &Settings) -> Result<(), String> {
 // Room for the pill plus a three-line caption above it. The window is
 // transparent and click-through, so the unused area is invisible.
 const OVERLAY_W: f64 = 460.0;
-const OVERLAY_H: f64 = 136.0;
+const OVERLAY_H: f64 = 156.0;
 
 /// Small always-on-top wave shown while dictating into other apps, with the
 /// words so far streaming above it.
@@ -1499,6 +1541,8 @@ pub fn run() {
             delete_meeting,
             list_meetings,
             get_meeting,
+            meeting_live_notes,
+            show_main_window,
             summarize_meeting,
             research_meetings,
             search_meetings,
