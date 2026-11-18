@@ -15,17 +15,21 @@ describe("meeting follow-through", () => {
   });
   after(async () => { await invoke("delete_meeting", { id }); });
   it("shows a due reminder, persists ignore, and allows reopening and completion", async () => {
-    await $(".reminder-inbox").waitForDisplayed();
-    await $(".reminder-inbox button=ignore").click();
+    await $(".topbar-nav button*=Inbox").click();
+    const due = $("section[aria-label='Due'] .follow-up");
+    await due.waitForDisplayed();
+    await due.$("button[aria-label='Action item options']").click();
+    await $(".menu-item=Ignore").click();
     await browser.waitUntil(async () => (await invoke("list_action_items")).find(i => i.id === item.id)?.ignored === true);
     await browser.reloadSession(); await openApp();
     const ignored = (await invoke("list_action_items")).find(i => i.id === item.id);
     assert.equal(ignored.ignored, true); assert.equal(ignored.remindAt, null);
-    await $(".nav button*=meetings").click();
+    await $(".topbar-nav button*=Meetings").click();
     await $(`.meet-row-title=${title}`).click();
-    await $(".follow-up button=reopen").click();
-    await $(".follow-up button=mark done").waitForDisplayed();
-    await $(".follow-up button=mark done").click();
+    await $(".follow-up button[aria-label='Action item options']").click();
+    await $(".menu-item=Reopen").click();
+    await $(".follow-up button[aria-label='Mark done']").waitForDisplayed();
+    await $(".follow-up button[aria-label='Mark done']").click();
     await browser.waitUntil(async () => (await invoke("list_action_items")).find(i => i.id === item.id)?.done === true);
     assert.equal((await invoke("due_action_reminders")).some(i => i.id === item.id), false);
   });

@@ -10,12 +10,13 @@ describe("native meeting persistence", () => {
   after(async () => { await invoke("delete_meeting", { id }); });
 
   it("navigates the actual webview", async () => {
-    await $(".nav button*=meetings").click();
-    assert.match(await $(".nav button.on").getText(), /meetings/);
-    await $(".nav button*=tasks").click();
-    assert.match(await $(".nav button.on").getText(), /tasks/);
-    await $(".nav button*=dictate").click();
-    assert.equal(await $(".nav button.on").getText(), "dictate");
+    const current = () => $(".topbar-nav button[aria-pressed='true']").getText();
+    await $(".topbar-nav button*=Inbox").click();
+    assert.match(await current(), /Inbox/);
+    await $(".topbar-nav button*=Dictations").click();
+    assert.match(await current(), /Dictations/);
+    await $(".topbar-nav button*=Meetings").click();
+    assert.match(await current(), /Meetings/);
   });
 
   it("retains saved notes across webview reload and native app restart", async () => {
@@ -28,9 +29,10 @@ describe("native meeting persistence", () => {
     let meeting = await invoke("get_meeting", { id });
     assert.equal(meeting.notes, "Decision: ship the recovery tests.");
     assert.equal(meeting.endedAt, null, "a webview reload does not finalize recording metadata");
-    await $(".nav button*=meetings").click();
+    await $(".topbar-nav button*=Meetings").click();
     await $(".meet-row-title=E2E interrupted meeting").click();
-    const notes = $("textarea.meet-notes");
+    await $("button[role='tab']=Your notes").click();
+    const notes = $("textarea[aria-label='Your notes']");
     await notes.setValue("Decision: edited in the native notes UI.");
     await browser.waitUntil(async () => (await invoke("get_meeting", { id })).notes === "Decision: edited in the native notes UI.", {
       timeoutMsg: "Notes typed in the native UI did not reach SQLite",

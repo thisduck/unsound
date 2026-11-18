@@ -102,11 +102,11 @@ describe("native recording failure recovery", () => {
     assert.equal((await meeting(id)).segments.length, 0);
     assert.equal((await work(id)).pending, 1);
     await invoke("meeting_stop");
-    await $(".nav button*=meetings").click();
+    await $(".topbar-nav button*=Meetings").click();
     const notice = $(`[data-meeting-id="${id}"]`);
     await until(async () => (await notice.getText()).includes("injected transcript storage failure"), "Storage error was not visible");
     await fault(id, "clear");
-    await notice.$("button=retry saved audio").click();
+    await notice.$("button=Try again").click();
     await complete(id, 1);
     await browser.reloadSession();
     await openApp();
@@ -152,11 +152,12 @@ describe("native recording failure recovery", () => {
     await complete(id, 1);
     await browser.refresh();
     await openApp();
-    await $(".nav button*=meetings").click();
+    await $(".topbar-nav button*=Meetings").click();
     await $(`.meet-row-title=${id}`).click();
+    await $("button[role='tab']*=Transcript").click();
     await $("button[title='Correct speaker']").click();
     await $("input[aria-label='New speaker name']").setValue("Priya");
-    await $(".speaker-correction button=save").click();
+    await $(".speaker-correction button=Save").click();
     await until(async () => {
       const m = await meeting(id);
       return m.speakerNames[m.segments[0].speaker] === "Priya";

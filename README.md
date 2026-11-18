@@ -28,8 +28,8 @@ use the network as configured and approved.
   another language — all at the click of a dropdown.
 - **🧠 It learns your words.** Click any word it misheard to correct it — names,
   jargon, and your corrections are remembered so it gets them right next time.
-- **📝 A tidy history.** Every take is kept — raw and cleaned — ready to copy,
-  reopen, or re-style.
+- **📝 Every dictation, kept.** The Dictations view lists everything you've
+  said — cleaned and original — ready to copy, reopen, or clean up again.
 - **🔎 Comfortable to read.** Adjustable text size for the transcript and
   refined output.
 - **🗓 Meetings.** Start one (or let unsound offer when Zoom, Meet or Teams
@@ -92,9 +92,10 @@ sys ─┘   + Silero VAD       │    lifted into the assistant)            │
 ```
 
 - **Recording indicator** floats above other apps with unsound's logo, an elapsed
-  timer, and a Stop button. Drag it to move it. It stays visible when the main
-  window is hidden, and asks “Call ended?” when a detected call releases the mic.
-- **Meeting prompts** identify the app and offer “Start unsound meeting.” On
+  timer, a Flag button, and Stop. Click it to open the live meeting; drag it to
+  move it. It stays visible when the main window is hidden, and asks “Stop
+  recording?” when a detected call releases the mic.
+- **Meeting prompts** identify the app and offer to record the call. On
   macOS 14.2+, a known desktop call app must own the microphone. Browser prompts
   also require a recognized Google Meet, Zoom, or Teams meeting URL in the
   foreground browser, readable with existing Accessibility access. Generic
@@ -144,8 +145,8 @@ drag unsound to Applications, and open it — builds are code-signed and
 notarized.
 
 From v0.9.1 onward, unsound checks for new versions on launch and every 12 hours.
-An **update** button appears when a new version is available. Open **updates**
-in the main window, **settings → updates**, or **Check for updates…** in the
+An **Update to …** button appears in the title bar when a new version is
+available. Open **Settings → General → Updates** or **Check for updates…** in the
 menu bar to check manually, read release notes, or disable automatic checks.
 Choose **Download update**, then **Update & restart** when your work is saved.
 Downloads are signature-verified; installation waits for recordings, meeting

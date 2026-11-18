@@ -15,9 +15,9 @@ export async function openApp() {
     timeoutMsg: "Tauri IPC did not initialize",
   });
   // Onboarding can appear on a fresh isolated profile. Exercise its real skip action.
-  const skip = $("button*=skip — set up later");
-  await browser.waitUntil(async () => (await skip.isExisting()) || (await $(".head .nav").isExisting()));
+  const skip = $("button=Skip for now");
+  await browser.waitUntil(async () => (await skip.isExisting()) || (await $(".topbar-nav").isExisting()));
   if (await skip.isExisting()) await skip.click();
-  await $(".head .nav").waitForDisplayed();
+  await $(".topbar-nav").waitForDisplayed();
 }
 
