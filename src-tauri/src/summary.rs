@@ -169,15 +169,37 @@ fn extract(app: &AppHandle, model_path: &Path, segments: &[&Segment]) -> Result<
 }
 
 fn extract_with(llm_state: &llm::LlmState, model_path: &Path, segments: &[&Segment]) -> Result<String, String> {
+    let facts = extract_facts(llm_state, model_path, segments)?;
+    serde_json::to_string(&facts).map_err(|e| e.to_string())
+}
+
+/// A reply cut off by the token limit (every fact quotes whole transcript
+/// lines, so a busy stretch can outgrow one reply).
+fn truncated(error: &str) -> bool {
+    error.contains("EOF while parsing")
+}
+
+/// Extract facts for a run of segments. When the reply doesn't fit, split
+/// the run in half and extract each half, so busy stretches still succeed.
+fn extract_facts(llm_state: &llm::LlmState, model_path: &Path, segments: &[&Segment]) -> Result<notes_quality::Facts, String> {
     let messages = [
         ("system", notes_quality::PROMPT.to_string()),
         ("user", chunk_text(segments)),
     ];
     let mut messages=messages.to_vec();
     for attempt in 0..2 {
-        let value=llm::chat_json(llm_state, model_path, &messages, &notes_quality::schema(segments), 4000)?;
+        let value=match llm::chat_json(llm_state, model_path, &messages, &notes_quality::schema(segments), 6000) {
+            Ok(value)=>value,
+            Err(error) if truncated(&error) && segments.len()>=2 => {
+                let (first,second)=segments.split_at(segments.len()/2);
+                let mut facts=extract_facts(llm_state,model_path,first)?;
+                facts.facts.extend(extract_facts(llm_state,model_path,second)?.facts);
+                return Ok(facts);
+            }
+            Err(error)=>return Err(error),
+        };
         match notes_quality::validate(value.clone(),segments) {
-            Ok(facts)=>return serde_json::to_string(&facts).map_err(|e|e.to_string()),
+            Ok(facts)=>return Ok(facts),
             Err(error) if attempt==0 => {
                 messages.push(("assistant",value.to_string()));
                 messages.push(("user",format!("Evidence validation failed: {error} Return a corrected complete object. Copy exact contiguous words from each cited source; do not paraphrase inside quotations. Remove facts you cannot support.")));
@@ -256,6 +278,14 @@ mod tests {
             end_ms: start_ms + 2000,
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn detects_replies_cut_off_by_the_token_limit() {
+        let cut = crate::llm::parse_json_reply(r#"{ "facts": [ { "due": "", "evidence": [ { "quote": "x", "segmentId": 1 }"#).unwrap_err();
+        assert!(truncated(&cut), "{cut}");
+        let wrong = crate::llm::parse_json_reply(r#"{ "facts": 3 } trailing }"#).unwrap_err();
+        assert!(!truncated(&wrong), "{wrong}");
     }
 
     #[test]
