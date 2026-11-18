@@ -1,0 +1,104 @@
+/* ── unsound · Studio ─────────────────────────────────────────────
+   Token names follow glint (rail, paper, ink, muted, line, accent, tint,
+   deep, shine) so components read the same in both apps; the palette is
+   unsound's own warm amber. Light by default; dark follows the system.
+   Floating windows (.floating-root) always use the dark set. */
+
+:root {
+  --rail: #f4f1ec;        /* page background, segmented tracks */
+  --paper: #fbf9f6;       /* cards and panels */
+  --raised: #ffffff;      /* inputs, popovers, selected segments */
+  --ink: #2a2420;         /* primary text */
+  --muted: #6b6058;       /* secondary text, icons */
+  --faint: #8c8178;       /* meta, timestamps, placeholders */
+  --line: #e3dcd3;        /* borders and dividers */
+  --line-strong: #d3c9bd;
+  --accent: #a4561a;      /* primary buttons, selection, links */
+  --accent-hover: #8e4914;
+  --accent-ink: #ffffff;  /* text on accent */
+  --tint: #f5e6d4;        /* hover and selected fills, badges */
+  --tint-strong: #efd6ba;
+  --deep: #2a2320;        /* the recording stage */
+  --glow: #e9a964;        /* light on the stage */
+  --shine: #fbe9d2;       /* text and icons on the stage */
+  --hl: #fbe6a2;          /* highlighter: flags, search hits, cited lines */
+  --rec: #d6453a;
+  --ok: #2f7a4a;
+  --ok-tint: #e3efe5;
+  --warn: #8a5d0c;
+  --warn-tint: #f8ecd0;
+  --danger: #b3433a;
+  --danger-tint: #f7e1de;
+
+  --shadow-sm: 0 1px 2px rgba(42, 36, 32, 0.06);
+  --shadow: 0 1px 2px rgba(42, 36, 32, 0.05), 0 8px 22px rgba(42, 36, 32, 0.06);
+  --shadow-lg: 0 24px 60px -16px rgba(42, 36, 32, 0.28), 0 0 0 1px rgba(42, 36, 32, 0.06);
+
+  --font-ui: "Inter Variable", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  --font-serif: "Source Serif 4 Variable", Charter, "Iowan Old Style", Georgia, serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --r-sm: 6px;
+  --r: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+
+  /* Accessibility: scales the reading text (transcripts, summaries, dictations). */
+  --text-scale: 1;
+  --read: calc(15px * var(--text-scale));
+  --read-serif: calc(16.5px * var(--text-scale));
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rail: #171513;
+    --paper: #1f1c19;
+    --raised: #29251f;
+    --ink: #efe9e2;
+    --muted: #b0a69c;
+    --faint: #82776e;
+    --line: #322d28;
+    --line-strong: #433c35;
+    --accent: #e9a964;
+    --accent-hover: #f1bb80;
+    --accent-ink: #1d150c;
+    --tint: #3a2d1f;
+    --tint-strong: #4a3926;
+    --deep: #0f0d0b;
+    --glow: #e9a964;
+    --shine: #fbe9d2;
+    --hl: rgba(251, 220, 120, 0.22);
+    --rec: #ef6a5b;
+    --ok: #86c29b;
+    --ok-tint: #1e2c22;
+    --warn: #e0b877;
+    --warn-tint: #3a2f1a;
+    --danger: #e08a80;
+    --danger-tint: #3a2220;
+    --shadow-sm: none;
+    --shadow: none;
+    --shadow-lg: 0 24px 60px -12px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    color-scheme: dark;
+  }
+}
+
+/* Windows that float over other apps keep the dark palette in every theme. */
+.floating-root {
+  --rail: #171513;
+  --paper: #1f1c19;
+  --raised: #29251f;
+  --ink: #efe9e2;
+  --muted: #b0a69c;
+  --faint: #82776e;
+  --line: #322d28;
+  --accent: #e9a964;
+  --accent-hover: #f1bb80;
+  --accent-ink: #1d150c;
+  --tint: #3a2d1f;
+  --rec: #ef6a5b;
+  --ok: #86c29b;
+  --danger: #e08a80;
+  color-scheme: dark;
+}

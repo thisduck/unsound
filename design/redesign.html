@@ -1,0 +1,817 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>unsound redesign</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet">
+<style>
+/* ───────────── page chrome ───────────── */
+:root{
+  --pg-bg:#f4f4f2; --pg-card:#ffffff; --pg-fg:#1b1d21; --pg-muted:#5d636d; --pg-faint:#8d929b; --pg-line:#e2e2de;
+  --pg-accent:#9a5f14; --pg-tint:#f6ead8; --pg-good:#2f7a4a;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --pg-bg:#121316; --pg-card:#1a1c20; --pg-fg:#ecebe6; --pg-muted:#a3a7b0; --pg-faint:#6e737d; --pg-line:#2a2d33;
+    --pg-accent:#e9b25e; --pg-tint:#2e2719; --pg-good:#8cc09a;
+  }
+}
+:root[data-theme="dark"]{
+  --pg-bg:#121316; --pg-card:#1a1c20; --pg-fg:#ecebe6; --pg-muted:#a3a7b0; --pg-faint:#6e737d; --pg-line:#2a2d33;
+  --pg-accent:#e9b25e; --pg-tint:#2e2719; --pg-good:#8cc09a;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--pg-bg);color:var(--pg-fg);font:15px/1.55 "Geist",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:inherit}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+@media (max-width:640px){.wrap{padding:0 16px}}
+header.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--pg-bg) 88%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--pg-line)}
+header.top .wrap{display:flex;align-items:center;gap:20px;height:56px}
+.lock{display:flex;align-items:center;gap:10px;font-weight:500;font-size:17px;letter-spacing:-.02em;text-decoration:none}
+.lock svg{width:26px;height:26px}
+.lock small{font-weight:400;color:var(--pg-faint);font-size:13px;letter-spacing:0;margin-left:2px}
+nav.jump{display:flex;gap:4px;margin-left:auto;overflow-x:auto}
+nav.jump a{font-size:13px;color:var(--pg-muted);text-decoration:none;padding:6px 10px;border-radius:8px;white-space:nowrap}
+nav.jump a:hover{background:var(--pg-card);color:var(--pg-fg)}
+@media (max-width:760px){nav.jump{display:none}}
+section{padding:72px 0 8px}
+.eyebrow{font:500 12px/1 "Geist Mono",ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase;color:var(--pg-accent);margin-bottom:14px}
+h1.hero{font-size:44px;line-height:1.08;letter-spacing:-.035em;font-weight:600;max-width:820px}
+h2{font-size:28px;line-height:1.15;letter-spacing:-.025em;font-weight:600;margin-bottom:10px}
+h3{font-size:16px;font-weight:600;letter-spacing:-.01em}
+.lede{font-size:18px;color:var(--pg-muted);max-width:720px;margin-top:16px}
+.sub{color:var(--pg-muted);max-width:720px}
+@media (max-width:640px){h1.hero{font-size:32px}.lede{font-size:16px}}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:32px}
+.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:24px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:28px}
+@media (max-width:900px){.grid3,.grid4{grid-template-columns:1fr 1fr}}
+@media (max-width:640px){.grid3,.grid2,.grid4{grid-template-columns:1fr}}
+.card{background:var(--pg-card);border:1px solid var(--pg-line);border-radius:14px;padding:20px}
+.card p{color:var(--pg-muted);font-size:14px;margin-top:6px}
+.card ul{margin:10px 0 0 18px;color:var(--pg-muted);font-size:14px}
+.card li{margin:4px 0}
+.who{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.who i{width:30px;height:30px;border-radius:8px;background:var(--pg-tint);color:var(--pg-accent);display:grid;place-items:center;font:600 13px "Geist";font-style:normal}
+.pick{border-color:var(--pg-accent);box-shadow:0 0 0 1px var(--pg-accent) inset}
+.tag{display:inline-block;font:500 11px/1 "Geist Mono",monospace;padding:4px 7px;border-radius:6px;background:var(--pg-tint);color:var(--pg-accent);letter-spacing:.02em;vertical-align:middle}
+.tag.gray{background:color-mix(in srgb,var(--pg-faint) 18%,transparent);color:var(--pg-muted)}
+
+/* option controls */
+.controls{position:sticky;top:56px;z-index:15;background:color-mix(in srgb,var(--pg-bg) 92%,transparent);backdrop-filter:blur(12px);padding:12px 0;margin-top:24px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid var(--pg-line)}
+.seg{display:inline-flex;background:var(--pg-card);border:1px solid var(--pg-line);border-radius:10px;padding:3px;gap:2px;overflow-x:auto;max-width:100%}
+.seg button{font:500 13px "Geist",sans-serif;color:var(--pg-muted);background:none;border:0;padding:6px 12px;border-radius:7px;cursor:pointer;white-space:nowrap}
+.seg button[aria-pressed="true"]{background:var(--pg-fg);color:var(--pg-bg)}
+.seg button:focus-visible{outline:2px solid var(--pg-accent);outline-offset:1px}
+.controls .hint{font-size:13px;color:var(--pg-faint);margin-left:auto}
+@media (max-width:760px){.controls .hint{display:none}}
+
+.option{margin-top:48px}
+.ohead{display:grid;grid-template-columns:1.3fr 1fr;gap:24px;align-items:start;margin-bottom:18px}
+@media (max-width:900px){.ohead{grid-template-columns:1fr}}
+.ohead h3{font-size:24px;letter-spacing:-.025em;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.ohead .num{font:500 13px "Geist Mono";color:var(--pg-faint)}
+.spec{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:13px;color:var(--pg-muted);margin-top:10px}
+.spec b{font-weight:500;color:var(--pg-fg)}
+.sw{display:flex;gap:6px;margin-top:12px;flex-wrap:wrap}
+.sw span{width:50px;height:34px;border-radius:8px;border:1px solid rgba(128,128,128,.25);position:relative}
+.sw span::after{content:attr(data-n);position:absolute;top:38px;left:0;font:10px "Geist Mono";color:var(--pg-faint);white-space:nowrap}
+.sw{padding-bottom:16px}
+.stage-wrap{overflow-x:auto;border-radius:14px;padding-bottom:4px}
+.notes{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:12px;font-size:13px;color:var(--pg-muted)}
+.notes span::before{content:"→ ";color:var(--pg-accent)}
+
+/* logo section */
+.logo-card{padding:0;overflow:hidden}
+.logo-card .big{display:grid;place-items:center;padding:28px;background:#202226}
+.logo-card .big svg{width:148px;height:148px;filter:drop-shadow(0 10px 24px rgba(0,0,0,.35))}
+.logo-card .sizes{display:flex;align-items:end;gap:14px;padding:14px 18px;border-top:1px solid var(--pg-line)}
+.logo-card .sizes.l{background:#f3f3f0}
+.logo-card .sizes.d{background:#16171a}
+.logo-card .menubar{display:flex;align-items:center;gap:14px;height:26px;padding:0 12px;font:500 12px system-ui;}
+.mb-l{background:#e9e8e6;color:#1d1d1f}.mb-d{background:#262628;color:#f2f2f2}
+.menubar .g{width:17px;height:17px;display:block}
+.menubar .fake{opacity:.55}
+.logo-card .meta{padding:16px 18px 20px}
+.logo-card .meta h3{display:flex;gap:8px;align-items:center}
+.logo-card .word{display:flex;align-items:center;gap:9px;margin:12px 0 2px;font:500 20px "Geist";letter-spacing:-.03em}
+.logo-card .word svg{width:26px;height:26px}
+
+/* type specimens */
+.spec-card .row{display:grid;grid-template-columns:92px 1fr;gap:12px;padding:10px 0;border-top:1px solid var(--pg-line);align-items:baseline}
+.spec-card .row:first-of-type{border-top:0}
+.spec-card .lbl{font:500 11px "Geist Mono";color:var(--pg-faint);text-transform:uppercase;letter-spacing:.04em}
+
+/* ux tables */
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:10px 12px;border-top:1px solid var(--pg-line);vertical-align:top}
+th{font-weight:500;color:var(--pg-faint);font-size:12px;text-transform:uppercase;letter-spacing:.04em;border-top:0}
+td.b{color:var(--pg-faint);text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--pg-faint) 60%,transparent)}
+td.a{font-weight:500}
+.tbl{overflow-x:auto;background:var(--pg-card);border:1px solid var(--pg-line);border-radius:14px;margin-top:20px}
+ol.probs{counter-reset:p;list-style:none;margin-top:20px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:760px){ol.probs{grid-template-columns:1fr}}
+ol.probs li{counter-increment:p;background:var(--pg-card);border:1px solid var(--pg-line);border-radius:12px;padding:14px 16px 14px 52px;position:relative;font-size:14px;color:var(--pg-muted)}
+ol.probs li::before{content:counter(p);position:absolute;left:16px;top:14px;width:24px;height:24px;border-radius:7px;background:var(--pg-tint);color:var(--pg-accent);font:600 12px/24px "Geist Mono";text-align:center}
+ol.probs b{color:var(--pg-fg);font-weight:600;display:block;margin-bottom:2px}
+ol.steps{margin:16px 0 0 20px;color:var(--pg-muted)}
+ol.steps li{margin:8px 0}ol.steps b{color:var(--pg-fg);font-weight:500}
+footer{padding:72px 0 64px;color:var(--pg-faint);font-size:13px}
+
+/* ───────────── mock windows ───────────── */
+.win{
+  --side:var(--bg);
+  width:100%;min-width:900px;height:620px;background:var(--bg);color:var(--ink);font-family:var(--f-ui);font-size:13px;line-height:1.45;
+  border-radius:12px;overflow:hidden;display:flex;flex-direction:column;position:relative;
+  box-shadow:0 0 0 1px rgba(127,127,127,.22),0 24px 60px -20px rgba(0,0,0,.45);
+  font-feature-settings:var(--ff,normal);
+}
+.win *{font-family:inherit}
+/* option 1 · Booth */
+.t1-dark{--bg:#191b20;--side:#15171b;--surface:#20232a;--raised:#292d35;--ink:#ecebe6;--muted:#a3a7b0;--faint:#6e737d;--line:#2c3038;--accent:#e9b25e;--accent-ink:#1d1a14;--tint:#3a3123;--hl:rgba(233,178,94,.20);--hl-line:#e9b25e;--rec:#ef6a5b;--ok:#8cc09a;--danger:#e48b7f;--shadow:none}
+.t1-light{--bg:#f3f3f1;--side:#ebebe8;--surface:#fbfbf9;--raised:#ffffff;--ink:#1c1f24;--muted:#5c626c;--faint:#8d929b;--line:#e2e2dd;--accent:#9a5f14;--accent-ink:#fffaf2;--tint:#f6e8d2;--hl:#f8e3b8;--hl-line:#c98a2c;--rec:#d9473a;--ok:#2f7a4a;--danger:#b83c30;--shadow:0 1px 2px rgba(20,22,28,.06),0 6px 18px rgba(20,22,28,.05)}
+.t1-dark,.t1-light{--f-ui:system-ui,-apple-system,"Inter",sans-serif;--f-read:system-ui,-apple-system,"Inter",sans-serif;--f-sum:system-ui,-apple-system,"Inter",sans-serif;--f-title:system-ui,-apple-system,"Inter",sans-serif;--f-mono:ui-monospace,"SF Mono","JetBrains Mono",monospace;--r:10px;--rc:14px}
+/* option 2 · Studio */
+.t2-light{--bg:#f4f1ec;--side:#f4f1ec;--surface:#fbf9f6;--raised:#ffffff;--ink:#2a2420;--muted:#6b6058;--faint:#9a8f86;--line:#e3dcd3;--accent:#a4561a;--accent-ink:#ffffff;--tint:#f5e6d4;--deep:#2a2320;--glow:#e9a964;--hl:#fbe6a2;--hl-line:#d9a520;--rec:#d6453a;--ok:#2f7a4a;--danger:#b3433a;--shadow:0 1px 2px rgba(42,36,32,.06),0 8px 22px rgba(42,36,32,.06)}
+.t2-dark{--bg:#171513;--side:#171513;--surface:#1f1c19;--raised:#29251f;--ink:#efe9e2;--muted:#b0a69c;--faint:#7a7068;--line:#322d28;--accent:#e9a964;--accent-ink:#1d150c;--tint:#3a2d1f;--deep:#0f0d0b;--glow:#e9a964;--hl:rgba(251,220,120,.20);--hl-line:#e9c35a;--rec:#ef6a5b;--ok:#86c29b;--danger:#e08a80;--shadow:none}
+.t2-light,.t2-dark{--f-ui:"Inter",system-ui,sans-serif;--f-read:"Inter",system-ui,sans-serif;--f-sum:"Source Serif 4",Charter,Georgia,serif;--f-title:"Inter",system-ui,sans-serif;--f-mono:"JetBrains Mono",ui-monospace,monospace;--ff:"cv11","ss01";--r:8px;--rc:12px}
+/* option 3 · Margin after dark */
+.t3-dark{--bg:#15191c;--side:#121518;--surface:#1c2125;--raised:#252b30;--ink:#e6e8e5;--muted:#a2aaa8;--faint:#6f7876;--line:#2a3135;--accent:#6fae96;--accent-ink:#0f201a;--tint:#22332e;--hl:rgba(243,220,107,.24);--hl-line:#f3dc6b;--rec:#ef6a5b;--ok:#86c29b;--danger:#e08a80;--shadow:none}
+.t3-light{--bg:#f5f6f4;--side:#eef0ed;--surface:#fbfbfa;--raised:#ffffff;--ink:#1c2430;--muted:#586270;--faint:#8a929c;--line:#dfe2e0;--accent:#24564a;--accent-ink:#f4f7f5;--tint:#dde9e4;--hl:#f6e27f;--hl-line:#c9a915;--rec:#d6453a;--ok:#2e6f4e;--danger:#b4413a;--shadow:0 1px 2px rgba(28,36,48,.06),0 8px 24px rgba(28,36,48,.05)}
+.t3-dark,.t3-light{--f-ui:"Instrument Sans",system-ui,sans-serif;--f-read:"Instrument Sans",system-ui,sans-serif;--f-sum:"Newsreader",Charter,Georgia,serif;--f-title:"Newsreader",Charter,Georgia,serif;--f-mono:"Geist Mono",ui-monospace,monospace;--r:8px;--rc:12px}
+
+.tb{height:40px;flex:none;display:flex;align-items:center;gap:8px;padding:0 14px;position:relative}
+.lights{display:flex;gap:8px}
+.lights i{width:12px;height:12px;border-radius:50%;background:#ff5f57}.lights i:nth-child(2){background:#febc2e}.lights i:nth-child(3){background:#28c840}
+.wb{flex:1;display:flex;min-height:0}
+.side{width:184px;flex:none;background:var(--side);padding:4px 10px 12px;display:flex;flex-direction:column;gap:2px;border-right:1px solid var(--line)}
+.side .brand{display:flex;align-items:center;gap:8px;padding:4px 8px 14px;font:500 15px "Geist",sans-serif;letter-spacing:-.03em}
+.side .brand svg{width:20px;height:20px}
+.nv{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;color:var(--muted);font-weight:500}
+.nv svg{width:15px;height:15px;opacity:.9}
+.nv.on{background:var(--raised);color:var(--ink);box-shadow:var(--shadow)}
+.nv .ct{margin-left:auto;font:500 11px var(--f-mono);background:var(--tint);color:var(--accent);padding:1px 6px;border-radius:99px}
+.side .sp{flex:1}
+.recnav{display:flex;align-items:center;gap:8px;padding:8px;border-radius:8px;background:var(--surface);border:1px solid var(--line);margin:10px 0 6px;font-weight:500}
+.recnav .t{margin-left:auto;font:500 12px var(--f-mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--rec);flex:none;position:relative}
+.dot::after{content:"";position:absolute;inset:0;border-radius:50%;background:var(--rec);animation:pulse 1.6s ease-out infinite}
+@keyframes pulse{from{transform:scale(1);opacity:.7}to{transform:scale(2.4);opacity:0}}
+@media (prefers-reduced-motion:reduce){.dot::after,.wv i,.caret{animation:none!important}}
+.main{flex:1;overflow:hidden;padding:12px 36px 24px;position:relative;min-width:0}
+.col{max-width:660px;margin:0 auto}
+.ttl{font:600 22px/1.2 var(--f-title);letter-spacing:-.02em}
+.t3-dark .ttl,.t3-light .ttl{font-weight:500;font-size:26px;letter-spacing:-.01em}
+.hrow{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.hrow .sp{flex:1}
+.lbl{font-size:12px;font-weight:600;color:var(--muted);margin:22px 0 8px;display:flex;align-items:center;gap:8px}
+.lbl .n{font:500 11px var(--f-mono);color:var(--faint);font-weight:500}
+.btn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:var(--r);font-weight:500;font-size:13px;border:0;white-space:nowrap;cursor:default}
+.btn svg{width:14px;height:14px}
+.btn.p{background:var(--accent);color:var(--accent-ink)}
+.btn.s{background:var(--raised);color:var(--ink);box-shadow:var(--shadow),inset 0 0 0 1px var(--line)}
+.btn.q{background:transparent;color:var(--muted);padding:0 8px}
+.btn.sm{height:26px;font-size:12px;padding:0 10px}
+.btn .k,.k{font:500 11px var(--f-mono);color:var(--faint);border:1px solid var(--line);border-radius:5px;padding:0 4px;line-height:16px}
+.search{display:flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:var(--r);background:var(--surface);border:1px solid var(--line);color:var(--faint);min-width:260px}
+.search svg{width:14px;height:14px}.search .k{margin-left:auto}
+.card-m{background:var(--surface);border-radius:var(--rc);box-shadow:var(--shadow);border:1px solid var(--line)}
+.t1-dark .card-m,.t3-dark .card-m{border-color:transparent}
+.rec-card{padding:18px 20px;display:flex;align-items:center;gap:14px}
+.rec-card .ic{width:36px;height:36px;border-radius:10px;background:var(--tint);color:var(--accent);display:grid;place-items:center;flex:none}
+.rec-card .ic svg{width:18px;height:18px}
+.rec-card h4{font-size:15px;font-weight:600;letter-spacing:-.01em}
+.rec-card p{color:var(--muted);font-size:13px}
+.rec-card .acts{margin-left:auto;display:flex;gap:4px;align-items:center}
+.stagecard{background:var(--deep);color:#fff;border-radius:var(--rc);padding:20px 22px;display:flex;align-items:center;gap:14px;position:relative;overflow:hidden}
+.stagecard::before{content:"";position:absolute;right:-80px;top:-120px;width:320px;height:320px;border-radius:50%;background:radial-gradient(var(--glow),transparent 70%);opacity:.35}
+.stagecard>*{position:relative}
+.stagecard p{color:rgba(255,255,255,.7)}
+.stagecard .btn.w{background:#fff;color:var(--deep)}
+.stagecard .btn.q{color:rgba(255,255,255,.75)}
+.stagecard .ic{background:rgba(255,255,255,.1);color:#fff}
+.rows{padding:4px}
+.row{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:calc(var(--rc) - 4px)}
+.row+.row{box-shadow:0 -1px 0 var(--line)}
+.row .ri{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:var(--raised);color:var(--muted);flex:none}
+.row .ri svg{width:14px;height:14px}
+.row .tx{min-width:0;flex:1}
+.row .tx b{font-weight:500;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .tx span{color:var(--faint);font-size:12px}
+.row .rt{display:flex;gap:4px;align-items:center;color:var(--faint);font-size:12px;flex:none}
+.mrow{display:grid;grid-template-columns:76px 1fr auto;gap:2px 14px;padding:12px 4px;border-top:1px solid var(--line)}
+.mrow:first-of-type{border-top:0}
+.mrow .tm{font:500 12px var(--f-mono);color:var(--faint);padding-top:2px;font-variant-numeric:tabular-nums}
+.mrow b{font-weight:600;font-size:14px;letter-spacing:-.01em}
+.mrow p{grid-column:2;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mrow .st{grid-row:1/3;grid-column:3;align-self:center;font-size:12px;color:var(--faint);display:flex;gap:6px;align-items:center}
+.pillc{font:500 11px var(--f-mono);padding:2px 7px;border-radius:99px;background:var(--tint);color:var(--accent)}
+.spin{width:12px;height:12px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--accent);animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.daygrp{font-size:12px;font-weight:600;color:var(--faint);margin:20px 0 2px}
+
+/* live */
+.livebar{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 20px 0 92px;border-bottom:1px solid var(--line);position:relative}
+.livebar .lights{position:absolute;left:14px;top:14px}
+.recpill{display:flex;align-items:center;gap:8px;height:28px;padding:0 10px;border-radius:99px;background:var(--raised);font-weight:500;font-size:12px}
+.recpill .t,.mono{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.livebar .ti b{display:block;font-weight:600;font-size:14px;letter-spacing:-.01em}
+.livebar .ti span{color:var(--faint);font-size:12px}
+.livebar .sp{flex:1}
+.btn.stop{background:var(--raised);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.btn.stop i{width:9px;height:9px;border-radius:2px;background:var(--rec)}
+.stageband{flex:none;background:var(--deep);color:#fff;padding:14px 24px 18px 24px;display:flex;align-items:center;gap:18px;position:relative;overflow:hidden}
+.stageband::before{content:"";position:absolute;right:-60px;top:-160px;width:420px;height:360px;border-radius:50%;background:radial-gradient(var(--glow),transparent 70%);opacity:.33}
+.stageband>*{position:relative}
+.stageband .timer{font:300 40px/1 var(--f-ui);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.stageband .ti b{display:block;font-weight:500;font-size:15px}
+.stageband .ti span{color:rgba(255,255,255,.62);font-size:12px}
+.stageband .btn.w{background:#fff;color:var(--deep)}
+.stageband .btn.ol{background:transparent;color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.3)}
+.stageband .lights{position:absolute;left:14px;top:12px}
+.wv{display:flex;gap:3px;align-items:center;height:22px}
+.wv i{width:3px;border-radius:2px;background:var(--accent);animation:wv 1.1s ease-in-out infinite}
+.stageband .wv i{background:var(--glow)}
+@keyframes wv{0%,100%{transform:scaleY(.35)}50%{transform:scaleY(1)}}
+.livegrid{flex:1;display:grid;grid-template-columns:1fr 300px;min-height:0}
+.livegrid.solo{grid-template-columns:1fr}
+.tr{overflow:hidden;padding:24px 40px;position:relative}
+.tr .inner{max-width:600px;margin:0 auto;font-family:var(--f-read);font-size:15px;line-height:1.6}
+.turn{margin-bottom:18px}
+.turn .who{display:flex;gap:8px;align-items:baseline;margin-bottom:2px}
+.turn .who b{font-family:var(--f-ui);font-size:13px;font-weight:600}
+.turn .who span{font:12px var(--f-mono);color:var(--faint)}
+.turn.me .who b{color:var(--accent)}
+.turn.me p{color:var(--muted)}
+.turn p.part{color:var(--faint)}
+mark{background:var(--hl);color:inherit;border-radius:3px;padding:1px 2px;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+.t1-dark mark,.t3-dark mark,.t2-dark mark{box-shadow:inset 2px 0 0 var(--hl-line)}
+.caret{display:inline-block;width:2px;height:1.05em;background:var(--accent);vertical-align:-2px;margin-left:2px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+.gut .turn{display:grid;grid-template-columns:72px 1fr;gap:16px;margin-bottom:16px}
+.gut .turn .who{flex-direction:column;align-items:flex-end;gap:0;text-align:right}
+.gut .turn.cont .who{visibility:hidden}
+.chipline{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);display:flex;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:99px;background:var(--raised);color:var(--muted);font-size:12px;font-weight:500;box-shadow:var(--shadow),inset 0 0 0 1px var(--line)}
+.chip svg{width:12px;height:12px}
+.rail{border-left:1px solid var(--line);background:var(--side);display:flex;flex-direction:column;min-height:0}
+.rail .tabs{display:flex;gap:2px;margin:14px 16px 0;background:var(--surface);padding:3px;border-radius:9px;border:1px solid var(--line)}
+.rail .tabs span{flex:1;text-align:center;padding:4px 0;border-radius:6px;font-weight:500;color:var(--muted);font-size:12px}
+.rail .tabs span.on{background:var(--raised);color:var(--ink);box-shadow:var(--shadow)}
+.t1-dark .rail .tabs span.on,.t3-dark .rail .tabs span.on,.t2-dark .rail .tabs span.on{background:var(--bg)}
+.rail .body{flex:1;overflow:hidden;padding:14px 18px;font-size:13px}
+.rail .upd{font-size:11px;color:var(--faint);margin-bottom:10px}
+.rail h5{font-size:12px;font-weight:600;color:var(--muted);margin:14px 0 6px}
+.rail ul{list-style:none}
+.rail li{padding-left:14px;position:relative;margin:5px 0;line-height:1.45}
+.rail li::before{content:"";position:absolute;left:2px;top:.6em;width:5px;height:5px;border-radius:50%;background:var(--faint)}
+.composer{margin:0 14px 14px;border-radius:12px;background:var(--surface);border:1px solid var(--line);padding:8px 10px 10px;box-shadow:var(--shadow)}
+.composer .mini{display:flex;gap:2px;font-size:11px;font-weight:500;margin-bottom:6px}
+.composer .mini span{padding:2px 8px;border-radius:5px;color:var(--faint)}
+.composer .mini span.on{background:var(--tint);color:var(--accent)}
+.composer .in{color:var(--faint);font-size:13px;display:flex;align-items:center;gap:8px}
+.composer .in svg{width:14px;height:14px;margin-left:auto}
+.sheet.rail{border-left:0}
+.fl svg.g{width:18px;height:18px;flex:none}
+.sheet{position:absolute;right:14px;top:14px;bottom:14px;width:290px;background:var(--raised);border-radius:14px;box-shadow:0 20px 50px -10px rgba(0,0,0,.35),0 0 0 1px var(--line);display:flex;flex-direction:column}
+.t2-dark .sheet{background:var(--surface)}
+
+/* detail */
+.back{display:inline-flex;align-items:center;gap:4px;color:var(--muted);font-weight:500;font-size:12px;margin-bottom:10px}
+.back svg{width:13px;height:13px}
+.meta{color:var(--faint);font-size:12px;margin-top:4px}
+.dtabs{display:flex;gap:20px;border-bottom:1px solid var(--line);margin:18px 0 16px}
+.dtabs span{padding:0 0 9px;color:var(--muted);font-weight:500;position:relative}
+.dtabs span.on{color:var(--ink)}
+.dtabs span.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--ink);border-radius:2px}
+.dgrid{display:grid;grid-template-columns:1fr 250px;gap:32px}
+.sum{font-family:var(--f-sum);font-size:15px;line-height:1.65}
+.t2-light .sum,.t2-dark .sum,.t3-dark .sum,.t3-light .sum{font-size:16.5px;line-height:1.6}
+.sum h6{font-family:var(--f-ui);font-size:12px;font-weight:600;color:var(--muted);margin:18px 0 6px}
+.sum ul{margin-left:18px}.sum li{margin:4px 0}
+.cite{font:500 11px var(--f-mono);color:var(--accent);background:var(--tint);border-radius:5px;padding:1px 5px;vertical-align:1px;margin-left:2px}
+.stale{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:9px;background:var(--surface);border:1px solid var(--line);font-size:12px;color:var(--muted);margin-bottom:14px}
+.stale .btn{margin-left:auto}
+.dr h5{font-size:12px;font-weight:600;color:var(--muted);margin:0 0 8px;display:flex;justify-content:space-between}
+.dr h5 .n{font:500 11px var(--f-mono);color:var(--faint)}
+.ai{display:flex;gap:9px;padding:7px 0;font-size:13px;line-height:1.4}
+.ai .cb{width:15px;height:15px;border-radius:4px;box-shadow:inset 0 0 0 1.5px var(--faint);flex:none;margin-top:1px}
+.ai .cb.on{background:var(--accent);box-shadow:none;display:grid;place-items:center;color:var(--accent-ink)}
+.ai .cb.on svg{width:11px;height:11px}
+.ai.done span b{text-decoration:line-through;color:var(--faint)}
+.ai span b{font-weight:500;display:block}
+.ai span i{font-style:normal;font-size:12px;color:var(--faint)}
+.addl{font-size:12px;color:var(--faint);padding:6px 0 0 24px}
+.req{border-radius:10px;background:var(--surface);border:1px solid var(--line);padding:10px 12px;margin-top:6px}
+.req .h{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--ok);font-weight:600}
+.req .h svg{width:12px;height:12px}
+.req b{display:block;font-weight:500;margin:3px 0 8px;font-size:13px}
+.askin{display:flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:var(--r);background:var(--surface);border:1px solid var(--line);color:var(--faint);font-size:12px;margin-top:6px}
+.askin svg{width:13px;height:13px}
+
+/* dictations */
+.dsplit{display:grid;grid-template-columns:250px 1fr;gap:0;border-radius:var(--rc);overflow:hidden;height:440px}
+.dlist{border-right:1px solid var(--line);padding:6px;overflow:hidden}
+.di{padding:9px 10px;border-radius:8px;margin-bottom:2px}
+.di.on{background:var(--tint)}
+.di .m{display:flex;gap:8px;font-size:11px;color:var(--faint)}
+.di .m .mono{font-size:11px}
+.di p{font-size:13px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:2px}
+.dview{padding:20px 24px;font-family:var(--f-read)}
+.dview .txt{font-size:16px;line-height:1.6;max-width:52ch}
+.sel{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:7px;background:var(--surface);border:1px solid var(--line);font-size:12px;color:var(--muted);font-weight:500}
+.sel svg{width:12px;height:12px}
+.hintline{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;margin:-8px 0 16px}
+
+/* floating */
+.desk{min-width:900px;height:620px;border-radius:12px;position:relative;overflow:hidden;background:
+  radial-gradient(600px 400px at 20% 30%,#3b4a6b,transparent 60%),radial-gradient(500px 400px at 85% 70%,#5b3d52,transparent 60%),#1d2130;
+  box-shadow:0 0 0 1px rgba(127,127,127,.22),0 24px 60px -20px rgba(0,0,0,.45)}
+.zoom{position:absolute;left:40px;top:40px;width:520px;height:340px;border-radius:12px;background:#111;box-shadow:0 30px 60px rgba(0,0,0,.4);display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:34px 8px 8px}
+.zoom div{border-radius:8px;background:linear-gradient(160deg,#2a2f3a,#1a1d24);display:flex;align-items:flex-end;padding:8px;color:#bbb;font:500 11px system-ui}
+.fl{position:absolute;font-family:var(--f-ui);color:var(--ink);background:var(--surface);box-shadow:0 18px 40px rgba(0,0,0,.45),inset 0 0 0 1px rgba(255,255,255,.07)}
+.flabel{position:absolute;font:500 11px "Geist Mono",monospace;color:rgba(255,255,255,.55);letter-spacing:.04em;text-transform:uppercase}
+.ind{border-radius:99px;height:40px;display:flex;align-items:center;gap:10px;padding:0 6px 0 12px;font-size:13px;font-weight:500}
+.ind svg.g{width:18px;height:18px}
+.ind .t{font-family:var(--f-mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.ind .ib{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:var(--muted)}
+.ind .ib svg{width:14px;height:14px}
+.ind .btn{height:28px;border-radius:99px}
+.ended{border-radius:16px;padding:12px 14px;width:300px}
+.ended .r1{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px}
+.ended .r2{display:flex;align-items:center;gap:6px;margin-top:8px;color:var(--muted);font-size:13px}
+.prompt{border-radius:16px;padding:14px 14px 12px;width:300px}
+.prompt .r1{display:flex;gap:10px}
+.prompt .r1 svg{width:30px;height:30px;flex:none}
+.prompt b{font-weight:600;font-size:13px;display:block}
+.prompt p{color:var(--muted);font-size:12.5px}
+.prompt .acts{display:flex;justify-content:flex-end;gap:6px;margin-top:10px}
+.ov{border-radius:99px;height:44px;padding:0 18px;display:flex;align-items:center;gap:12px;background:#121316}
+.ov .wv i{background:var(--accent)}
+.cap{border-radius:14px;padding:10px 14px;max-width:340px;font-family:var(--f-read);font-size:14px;line-height:1.5;color:var(--ink)}
+.toast{border-radius:99px;height:34px;padding:0 14px;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500}
+.toast svg{width:14px;height:14px;color:var(--ok)}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="lock" href="#top" id="toplogo"></a>
+    <nav class="jump">
+      <a href="#verdict">Verdict</a>
+      <a href="#options">Options</a>
+      <a href="#logo">Logo</a>
+      <a href="#type">Type</a>
+      <a href="#ux">UX changes</a>
+      <a href="#plan">Plan</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap" id="top">
+
+<section style="padding-top:64px">
+  <div class="eyebrow">Redesign session · Nov 17, 2026</div>
+  <h1 class="hero">unsound, rebuilt around reading the call, not running it.</h1>
+  <p class="lede">A designer, a UX lead and a critic each went through unsound and glint on their own. This page shows three directions you can compare screen by screen, four logo candidates, and the UX changes all three agreed on.</p>
+</section>
+
+<section id="verdict">
+  <div class="eyebrow">The panel</div>
+  <h2>Where they agreed, and where they didn't</h2>
+  <div class="grid3">
+    <div class="card">
+      <div class="who"><i>D</i><h3>Designer</h3></div>
+      <p>Take glint's system: named tokens, surface separation instead of borders, one "stage" moment, Radix primitives. Don't take its per-theme display fonts or its light-first default.</p>
+      <ul><li>Proposed Booth, Margin and Tide</li><li>Recommended Tide (a glint sibling) plus Margin's highlighter</li></ul>
+    </div>
+    <div class="card">
+      <div class="who"><i>U</i><h3>UX lead</h3></div>
+      <p>The IA stopped at v0.7. Meetings features got bolted onto a dictation screen.</p>
+      <ul><li>Six names for "to-dos" in five places</li><li>The live AI summary is never shown</li><li>Four "ask" boxes with two meanings</li><li>Proposed a sidebar, an Inbox and a vocabulary table</li></ul>
+    </div>
+    <div class="card pick">
+      <div class="who"><i>C</i><h3>Critic <span class="tag">deciding vote</span></h3></div>
+      <p>Tide reads as a glint theme, not a brand. Light-first is hostile next to Zoom at 11pm. Serif ASR text makes raw speech look edited.</p>
+      <ul><li>Cut Home; make Meetings the default view</li><li>Live view goes full-focus, with no sidebar</li><li>Proposed the "rotation" logo</li><li><b>Ship Booth</b></li></ul>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px;display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+    <span class="tag">Recommendation</span>
+    <span style="flex:1;min-width:260px"><b style="font-weight:600">Option 1, Booth</b>: dark-first, a single amber accent, SF Pro, the rotation logo, Margin's highlighter for flagged moments, glint's token names and shadcn primitives under the hood. Every option below already includes the UX changes.</span>
+  </div>
+</section>
+
+<section id="options">
+  <div class="eyebrow">Three options</div>
+  <h2>Same product, three personalities</h2>
+  <p class="sub">Choose a screen and all three options switch together. Use "Alternate theme" to see each one in its second theme. Floating windows always stay dark because they sit over other apps.</p>
+  <div class="controls">
+    <div class="seg" id="screenSeg" role="group" aria-label="Screen"></div>
+    <div class="seg" id="modeSeg" role="group" aria-label="Theme">
+      <button data-m="def" aria-pressed="true">Default theme</button>
+      <button data-m="alt" aria-pressed="false">Alternate theme</button>
+    </div>
+    <span class="hint">Mocks are 1060-wide window crops</span>
+  </div>
+  <div id="optionsHost"></div>
+</section>
+
+<section id="logo">
+  <div class="eyebrow">Logo</div>
+  <h2>Four marks, tested at 16px and in the menu bar</h2>
+  <p class="sub">The name means sound turned into something else. The two strongest marks say that literally: amber for sound, ink for text. The menu-bar strip uses each mark as a one-color template image, the way macOS draws it.</p>
+  <div class="grid4" id="logoHost"></div>
+</section>
+
+<section id="type">
+  <div class="eyebrow">Type</div>
+  <h2>Fonts, by job</h2>
+  <p class="sub">All three options follow the same rule: <b>reading text never changes with the theme</b>. Transcripts stay sans because ASR output is fragmented speech, and a serif dresses it up as edited prose. A serif appears only on the AI summary, which really is prose (Options 2 and 3). Numbers always use tabular figures.</p>
+  <div class="grid3" id="typeHost"></div>
+</section>
+
+<section id="ux">
+  <div class="eyebrow">UX changes (in all three options)</div>
+  <h2>Ten problems, ranked</h2>
+  <ol class="probs">
+    <li><b>Six names for to-dos, in five places.</b>Action items, follow-ups, reminders and requests all exist, and the tab called "tasks" doesn't hold your tasks. Fix: one Inbox with Ready to send, Due and Action items.</li>
+    <li><b>The live view hides the AI summary.</b>It shows only "notes ready through 12:40", and every transcript line repeats its speaker label. Fix: turn-grouped transcript, Summary rail, Jump to live.</li>
+    <li><b>Meeting detail is an unranked 8-section scroll.</b>The transcript comes last, speaker editing interrupts reading, and Delete has no confirmation. Fix: Summary, Transcript and Your notes tabs, a rail for actions, delete behind ··· with a confirmation.</li>
+    <li><b>Four "ask" boxes with two meanings.</b>Two of them run commands and two answer questions. Fix: "Ask unsound to…" for commands and ⌘K "Search or ask your meetings" for questions, never both on one screen.</li>
+    <li><b>The Meetings page is a stack of banners.</b>Copy like "3 audio ranges remaining · mic saved through 12.3s". Fix: status chips appear only when something is wrong, and details sit behind a disclosure.</li>
+    <li><b>Settings are duplicated.</b>The voice model is stored in two places, and the meeting language is borrowed from the Dictate tab. Fix: 5 groups instead of 11, one store each.</li>
+    <li><b>The app opens on a dictation pill.</b>Dictation actually happens through the hotkey in other apps. Fix: Meetings is the default view, and Dictations becomes a searchable library.</li>
+    <li><b>Onboarding sets up half the product.</b>It never mentions meetings, the system-audio permission or Calendar. Fix: 4 steps that cover both products.</li>
+    <li><b>Every button looks the same.</b>They are all 12.5px dim text, with mixed lowercase and Title Case, and <code>--line</code> is never defined. Fix: primary, secondary and quiet styles, with sentence case.</li>
+    <li><b>The floating indicator only offers Stop.</b>"Call ended?" hides its explanation in a tooltip. Fix: add Flag, click to open the live view, and a real "Stop recording? Keep / Stop" prompt.</li>
+  </ol>
+
+  <h2 style="margin-top:56px">One vocabulary</h2>
+  <div class="tbl"><table>
+    <tr><th>Concept</th><th>Say</th><th>Never</th></tr>
+    <tr><td>Capturing a call</td><td class="a">Record · Recording</td><td class="b">start a meeting</td></tr>
+    <tr><td>AI write-up</td><td class="a">Summary</td><td class="b">notes</td></tr>
+    <tr><td>What you type</td><td class="a">Your notes</td><td class="b">my notes</td></tr>
+    <tr><td>Commitments from the call</td><td class="a">Action items</td><td class="b">follow-ups, reminders</td></tr>
+    <tr><td>Drafts unsound writes for you</td><td class="a">Requests</td><td class="b">tasks</td></tr>
+    <tr><td>Command input</td><td class="a">Ask unsound to…</td><td class="b">ask AI</td></tr>
+    <tr><td>Question over transcripts</td><td class="a">Search or ask your meetings</td><td class="b">ask AI, ask this meeting</td></tr>
+    <tr><td>One dictation</td><td class="a">Dictation</td><td class="b">take</td></tr>
+    <tr><td>LLM cleanup</td><td class="a">Clean up</td><td class="b">refine, re-refine</td></tr>
+  </table></div>
+
+  <h2 style="margin-top:56px">Copy, before and after</h2>
+  <div class="tbl"><table>
+    <tr><th>Where</th><th>Before</th><th>After</th></tr>
+    <tr><td>Meetings</td><td class="b">start a meeting</td><td class="a">Record a meeting</td></tr>
+    <tr><td>Status</td><td class="b">finishing transcript · 3 audio ranges remaining · mic saved through 12.3s…</td><td class="a">Finishing transcript · about 1 min left</td></tr>
+    <tr><td>Prompt</td><td class="b">Zoom is using your mic · Start unsound meeting</td><td class="a">Zoom call started · Record it and get notes when it ends? [Record]</td></tr>
+    <tr><td>Indicator</td><td class="b">Call ended? · 41:02 (tooltip)</td><td class="a">Zoom left the call · Stop recording? Keep / Stop</td></tr>
+    <tr><td>Live</td><td class="b">⚑ mark moment</td><td class="a">Flag ⌘M</td></tr>
+    <tr><td>Detail</td><td class="b">regenerate</td><td class="a">Rewrite summary</td></tr>
+    <tr><td>Detail</td><td class="b">delete (no confirm)</td><td class="a">··· → Delete meeting… → “The transcript, summary and audio are removed from this Mac.”</td></tr>
+    <tr><td>Dictation</td><td class="b">tap to speak · re-refine · raw transcript</td><td class="a">Dictate · Clean up again · Original</td></tr>
+    <tr><td>Inbox</td><td class="b">needs your ok / in progress / didn't work</td><td class="a">Ready to send / Due / Action items</td></tr>
+    <tr><td>Empty</td><td class="b">your meetings land here. Start one above…</td><td class="a">No meetings yet. Record a call, or unsound will offer when Zoom, Meet or Teams starts.</td></tr>
+  </table></div>
+</section>
+
+<section id="plan">
+  <div class="eyebrow">Plan</div>
+  <h2>How to ship it without a big bang</h2>
+  <ol class="steps">
+    <li><b>Tokens and primitives.</b> Add Tailwind and glint's token names (rail/paper/ink/muted/line/accent/tint), plus faint, rec and hl. Port glint's Radix controls. Define the button tiers. Replace the hard-coded hex values in <code>App.css</code> step by step.</li>
+    <li><b>Vocabulary and Inbox.</b> Rename everything to the vocabulary above. Merge Tasks, FollowUps and ReminderInbox into Inbox. This is the biggest clarity gain for the least code.</li>
+    <li><b>Live view.</b> Focus mode, a turn-grouped transcript, a Summary/Requests rail, one composer, Jump to live, chips only when something is wrong.</li>
+    <li><b>Detail view.</b> Tabs plus a rail, citations that highlight their source lines, and ··· with delete confirmations.</li>
+    <li><b>Sidebar shell.</b> Meetings as the default view, a Dictations library replacing the tab and the drawer, and a contextual record card replacing the banners.</li>
+    <li><b>Settings, onboarding and floating windows.</b> 5 settings groups, onboarding that covers both products, Flag and the call-ended prompt on the indicator, and the new icon and tray glyph.</li>
+  </ol>
+</section>
+
+<footer>Made in a redesign session with designer, UX and critic agents. Mock content is illustrative.</footer>
+</main>
+
+<script>
+/* ───────────── icons (lucide-style) ───────────── */
+const P = {
+  meetings:'<path d="M2 10v3M6 6v11M10 3v18M14 8v7M18 5v13M22 10v3"/>',
+  mic:'<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/>',
+  inbox:'<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  settings:'<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  search:'<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+  flag:'<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1zM4 22v-7"/>',
+  mail:'<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+  clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  more:'<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
+  check:'<path d="M20 6 9 17l-5-5"/>',
+  back:'<path d="m12 19-7-7 7-7M19 12H5"/>',
+  down:'<path d="M12 5v14M19 12l-7 7-7-7"/>',
+  copy:'<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/>',
+  video:'<path d="m22 8-6 4 6 4V8Z"/><rect x="2" y="6" width="14" height="12" rx="2"/>',
+  upload:'<path d="M12 15V3M7 8l5-5 5 5M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>',
+  chev:'<path d="m6 9 6 6 6-6"/>',
+  ticket:'<path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/>',
+  wifi:'<path d="M5 13a10 10 0 0 1 14 0M8.5 16.5a5 5 0 0 1 7 0M12 20h.01"/>',
+};
+const I = (n, sw=2) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round">${P[n]}</svg>`;
+
+/* ───────────── logos ───────────── */
+const TILE = (fill='#1f2227') => `<rect x="100" y="100" width="824" height="824" rx="184" fill="${fill}"/><rect x="101" y="101" width="822" height="822" rx="183" fill="none" stroke="#fff" stroke-opacity=".07" stroke-width="2"/>`;
+const LOGO = {
+  rotation: () => `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">${TILE()}<g fill="none" stroke-linecap="round"><path d="M268 476v72M362 404v216M456 332v360" stroke="#e9b25e" stroke-width="66"/><path d="M572 420h196M572 512h196M572 604h112" stroke="#ecebe6" stroke-width="58"/></g></svg>`,
+  caret: () => `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">${TILE()}<g fill="none" stroke-linecap="round" stroke-width="66"><path d="M298 452v120M408 352v320M518 422v180" stroke="#e9b25e"/></g><path d="M700 280v464" stroke="#ecebe6" stroke-width="54" stroke-linecap="round"/></svg>`,
+  margin: () => `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">${TILE('#1c2125')}<g transform="translate(0 -64)"><rect x="236" y="560" width="552" height="112" rx="20" fill="#f3dc6b"/><g fill="none" stroke-width="56" stroke-linecap="round"><path d="M292 410v-28M372 434v-76M452 452v-112M532 426v-60M612 404v-16M692 396h40" stroke="#e6e8e5"/><path d="M292 616h440" stroke="#1c2430"/><path d="M292 776h260" stroke="#e6e8e5"/></g></g></svg>`,
+  cup: () => `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><rect x="100" y="100" width="824" height="824" rx="184" fill="#123b44"/><path d="M332 300v232a180 180 0 0 0 360 0V300" fill="none" stroke="#e3f4f3" stroke-width="64" stroke-linecap="round"/><g stroke="#9fd6d6" stroke-width="52" stroke-linecap="round"><path d="M452 470v100M572 420v150"/></g></svg>`,
+};
+const GLYPH = {
+  rotation:'<svg class="g" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M4 14.5v3M9 10.5v11M14 6.5v19M19.5 11h8M19.5 16h8M19.5 21h4.5"/></svg>',
+  caret:'<svg class="g" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M5 13v6M11 8.5v15M17 11.5v9" stroke-width="3.4"/><path d="M26 5v22" stroke-width="3"/></svg>',
+  margin:'<svg class="g" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 11V9M11 13V7M16 12V8M21 10.5v-1M25 10h1"/><path d="M6 18h20"/><path d="M6 25h11"/></svg>',
+  cup:'<svg class="g" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M9 6v11a7 7 0 0 0 14 0V6" stroke-width="3"/><path d="M14 14v4M18 12v6" stroke-width="2.5"/></svg>',
+};
+const LOGOS = [
+  {k:'rotation', name:'Rotation', tag:'Pick', by:'Critic', d:'Vertical bars of sound turn into horizontal lines of text. It says “un-sound” directly and is still five clean strokes at 16px.'},
+  {k:'caret', name:'Caret', tag:'Runner-up', by:'Designer · refined', d:'The voice ends in a text cursor. Redrawn with 3 bars, an ink caret and a wider gap, so it no longer blurs at 16px.'},
+  {k:'margin', name:'Margin', tag:'', by:'Designer', d:'A waveform settles into lines with one highlighted. Charming at large sizes, but it reads as a Notes icon and as a hamburger menu in the menu bar.'},
+  {k:'cup', name:'Cup', tag:'Passed', by:'Designer', d:'A “u” holding level bars. Monogram logos are generic, and next to glint it looks like a glint theme. Shown for completeness.'},
+];
+
+/* ───────────── options ───────────── */
+const OPTS = [
+  {id:1, name:'Booth', tagline:'Dark-first and native. A quiet control room with one warm amber accent.', pick:true,
+   def:'dark', alt:'light', layout:'sidebar', rail:true, stage:false, gutter:false, logo:'rotation',
+   fonts:[['UI and transcript','SF Pro (system-ui), 15/24'],['Summary','SF Pro'],['Numbers','SF Mono, tabular'],['Wordmark','Geist Medium, outlined to SVG']],
+   sw:[['#191b20','bg'],['#20232a','surface'],['#ecebe6','ink'],['#a3a7b0','muted'],['#e9b25e','accent'],['#ef6a5b','rec']],
+   notes:['Sidebar: Meetings · Dictations · Inbox','Live view hides the sidebar (focus mode)','Flags use an amber highlighter','"You" text muted, "them" in ink']},
+  {id:2, name:'Studio', tagline:'A utility, not a workspace. Toolbar tabs, one centered column, and glint\'s stage reserved for recording.',
+   def:'light', alt:'dark', layout:'toolbar', rail:false, stage:true, gutter:false, logo:'caret',
+   fonts:[['UI and transcript','Inter 14/20 (cv11, ss01)'],['Summary','Source Serif 4, 16.5/26'],['Numbers','JetBrains Mono'],['Wordmark','Geist Medium']],
+   sw:[['#f4f1ec','rail'],['#fbf9f6','paper'],['#2a2420','ink'],['#a4561a','accent'],['#2a2320','deep'],['#fbe6a2','hl']],
+   notes:['Segmented control in the titlebar','Glint token names, its own warm palette','Summary opens as a slide-over sheet','Serif only on AI prose']},
+  {id:3, name:'Margin, after dark', tagline:'Editorial. A screenplay-style transcript, a serif summary, and a yellow highlighter as the signature.',
+   def:'dark', alt:'light', layout:'sidebar', rail:true, stage:false, gutter:true, logo:'margin',
+   fonts:[['UI and transcript','Instrument Sans'],['Summary and titles','Newsreader 17/28'],['Numbers','Geist Mono'],['Wordmark','Geist Medium']],
+   sw:[['#15191c','bg'],['#1c2125','surface'],['#e6e8e5','ink'],['#6fae96','accent'],['#f3dc6b','highlight'],['#ef6a5b','rec']],
+   notes:['Speaker names in a 72px gutter','Continuation lines show no name','Highlighter for flags and citations','Most distinctive, least native']},
+];
+
+const SCREENS = [['meetings','Meetings'],['live','Live recording'],['detail','Meeting detail'],['dictations','Dictations'],['inbox','Inbox'],['floating','Floating windows']];
+let screen = 'meetings', mode = 'def';
+
+const lights = '<div class="lights"><i></i><i></i><i></i></div>';
+const wv = (n=7) => `<div class="wv">${Array.from({length:n},(_,i)=>`<i style="height:${[8,14,20,12,18,10,16,9,13][i%9]}px;animation-delay:${(i*.13).toFixed(2)}s"></i>`).join('')}</div>`;
+
+function sidebar(o, on, rec){
+  const nav = [['meetings','Meetings'],['mic','Dictations'],['inbox','Inbox']];
+  return `<aside class="side">
+    <div class="brand">${LOGO[o.logo]()}unsound</div>
+    ${nav.map(([ic,l])=>`<div class="nv ${on===l?'on':''}">${I(ic)}${l}${l==='Inbox'?'<span class="ct">2</span>':''}</div>`).join('')}
+    <div class="sp"></div>
+    ${rec?`<div class="recnav"><span class="dot"></span>Recording<span class="t">23:41</span></div>`:''}
+    <div class="nv">${I('settings')}Settings</div>
+  </aside>`;
+}
+function toolbar(o, on){
+  const tabs=['Meetings','Dictations','Inbox'];
+  return `<div class="tb" style="border-bottom:1px solid var(--line)">${lights}
+    <div style="position:absolute;left:50%;transform:translateX(-50%);display:flex;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:3px;gap:2px">
+      ${tabs.map(t=>`<span style="padding:3px 14px;border-radius:6px;font-weight:500;font-size:12px;${t===on?'background:var(--raised);color:var(--ink);box-shadow:var(--shadow)':'color:var(--muted)'}">${t}${t==='Inbox'?' <span class="pillc" style="margin-left:2px">2</span>':''}</span>`).join('')}
+    </div>
+    <div style="margin-left:auto;display:flex;gap:10px;align-items:center;color:var(--muted)"><span style="width:15px;height:15px;display:block">${I('settings')}</span></div>
+  </div>`;
+}
+function frame(o, on, inner, rec){
+  if(o.layout==='sidebar') return `<div class="tb">${lights}</div><div class="wb" style="margin-top:-40px">${sidebar(o,on,rec).replace('<aside class="side">','<aside class="side" style="padding-top:44px">')}<div class="main" style="padding-top:48px">${inner}</div></div>`;
+  return `${toolbar(o,on)}<div class="wb"><div class="main" style="padding-top:28px">${inner}</div></div>`;
+}
+
+function recordCard(o){
+  if(o.stage) return `<div class="stagecard"><div class="ic" style="width:36px;height:36px;border-radius:10px;display:grid;place-items:center"><span style="width:18px;height:18px;display:block">${I('video')}</span></div>
+    <div><h4 style="font-size:15px;font-weight:600">Zoom call started</h4><p style="font-size:13px">Pricing review with Priya · 2:00 PM, from your calendar</p></div>
+    <div style="margin-left:auto;display:flex;gap:4px"><span class="btn q">Not now</span><span class="btn w"><span class="dot" style="background:var(--rec)"></span>Record this call</span></div></div>`;
+  return `<div class="card-m rec-card"><div class="ic">${I('video')}</div>
+    <div><h4>Zoom call started</h4><p>Pricing review with Priya · 2:00 PM, from your calendar</p></div>
+    <div class="acts"><span class="btn q">Not now</span><span class="btn p"><span class="dot" style="background:currentColor;opacity:.8"></span>Record this call</span></div></div>`;
+}
+
+function meetings(o){
+  const inner = `<div class="col">
+    <div class="hrow"><div class="ttl">Meetings</div><div class="sp"></div><div class="search">${I('search')}Search or ask your meetings…<span class="k">⌘K</span></div></div>
+    ${recordCard(o)}
+    <div class="lbl">Needs you <span class="n">2</span></div>
+    <div class="card-m rows">
+      <div class="row"><div class="ri">${I('mail')}</div><div class="tx"><b>Email Priya the revised tiers</b><span>Draft ready · from Pricing review, yesterday</span></div><div class="rt"><span class="btn s sm">Review</span></div></div>
+      <div class="row"><div class="ri">${I('clock')}</div><div class="tx"><b>Send the Q3 deck to Marcus</b><span>Due today, 3:00 PM</span></div><div class="rt"><span class="btn q sm">Snooze</span><span class="btn s sm">Mark done</span></div></div>
+    </div>
+    <div class="daygrp">Today</div>
+    <div class="mrow"><span class="tm">9:30 AM</span><b>Weekly eng sync</b><p>42 min · Dana, Lena, Omar, +3</p><span class="st"><span class="spin"></span>Writing summary…</span></div>
+    <div class="mrow"><span class="tm">11:00 AM</span><b>Acme onboarding call</b><p>Acme wants SSO by January; Dana owns the rollout plan.</p><span class="st"><span class="pillc">3 open</span></span></div>
+    <div class="daygrp">Yesterday</div>
+    <div class="mrow"><span class="tm">4:00 PM</span><b>Pricing review with Priya</b><p>Agreed to move SSO into Team at $15 for new accounts.</p><span class="st"><span class="pillc">2 open</span></span></div>
+    <div class="mrow"><span class="tm">1:30 PM</span><b>Design crit: onboarding v2</b><p>Cut step 3; Lena will prototype the permission screen.</p><span class="st" style="color:var(--ok)"><span style="width:13px;height:13px;display:block">${I('check')}</span></span></div>
+  </div>`;
+  return frame(o,'Meetings',inner,false);
+}
+
+function transcript(o){
+  const T = [
+    ['Priya','21:58',false,'The Team tier at $12 is landing, but enterprise keeps asking for SSO in the base plan. We lost two deals on it last month.'],
+    ['You','22:15',true,'Could we move SSO into Team and raise it to $15?'],
+    ['Marcus','22:31',false,'<mark>That’s fine for new accounts. Existing ones stay grandfathered through March.</mark>'],
+    ['Marcus','',false,'I’d rather not touch annual pricing in the same release, though.',true],
+    ['Priya','23:02',false,'Okay. Then the pricing page has to change before the newsletter goes out on the twentieth,'],
+    ['Priya','',false,'<span style="color:var(--faint)">and someone should give Acme a heads-up before they see it</span><span class="caret"></span>',true],
+  ];
+  return `<div class="inner ${o.gutter?'gut':''}">${T.map(([w,t,me,txt,cont])=>{
+    if(!o.gutter && cont) return `<p style="margin:-14px 0 18px">${txt}</p>`;
+    return `<div class="turn ${me?'me':''} ${cont?'cont':''}"><div class="who"><b>${w}</b><span>${t||'&nbsp;'}</span></div><p>${txt}</p></div>`;
+  }).join('')}</div>`;
+}
+function summaryRail(){
+  return `<div class="upd">Updated through 22:40</div>
+    <h5 style="margin-top:0">Key points</h5><ul><li>Team tier at $12 is converting well</li><li>Enterprise wants SSO in the base plan; 2 deals lost</li></ul>
+    <h5>Decisions</h5><ul><li>SSO moves to Team at $15, new accounts only</li><li>Annual pricing unchanged this release</li></ul>
+    <h5>Open questions</h5><ul><li>Who tells Acme, and when?</li></ul>`;
+}
+function composer(){
+  return `<div class="composer"><div class="mini"><span class="on">Note</span><span>Ask unsound to…</span></div><div class="in">Type what matters · ⌘M flags this moment<span style="display:flex;width:14px;margin-left:auto">${I('mic')}</span></div></div>`;
+}
+function live(o){
+  const top = o.stage
+    ? `<div class="stageband">${lights}<div style="display:flex;align-items:center;gap:18px;padding-top:22px;width:100%">
+        <span class="dot"></span><span class="timer">23:41</span>${wv(9)}
+        <div class="ti"><b>Pricing review with Priya</b><span>Priya Shah, Marcus Lee · Zoom</span></div>
+        <div style="flex:1"></div><span class="btn ol">${I('flag')}Flag <span class="k" style="color:rgba(255,255,255,.6);border-color:rgba(255,255,255,.25)">⌘M</span></span><span class="btn w"><i style="width:9px;height:9px;border-radius:2px;background:var(--rec)"></i>Stop recording</span></div></div>`
+    : `<div class="livebar">${lights}<span class="recpill"><span class="dot"></span>Recording<span class="t" style="color:var(--muted)">23:41</span></span>
+        <div class="ti"><b>Pricing review with Priya</b><span>Priya Shah, Marcus Lee · Zoom</span></div><div class="sp"></div>
+        <span class="btn q">${I('flag')}Flag <span class="k">⌘M</span></span><span class="btn stop"><i></i>Stop recording</span></div>`;
+  const railHtml = `<div class="tabs"><span class="on">Summary</span><span>Requests · 1</span></div><div class="body">${summaryRail()}</div>${composer()}`;
+  const body = o.rail
+    ? `<div class="livegrid"><div class="tr">${transcript(o)}<div class="chipline"><span class="chip">${I('down')}Jump to live</span></div></div><div class="rail">${railHtml}</div></div>`
+    : `<div class="livegrid solo"><div class="tr" style="padding-right:330px">${transcript(o)}<div class="chipline" style="left:calc(50% - 150px)"><span class="chip">${I('down')}Jump to live</span></div></div></div><div class="sheet rail" style="top:${o.stage?'110px':'70px'}">${railHtml}</div>`;
+  return `${top}<div style="flex:1;display:flex;flex-direction:column;min-height:0;position:relative">${body}</div>`;
+}
+
+function detailRail(){
+  return `<div class="dr">
+    <h5>Action items <span class="n">3</span></h5>
+    <div class="ai"><span class="cb"></span><span><b>Update pricing page with $15 Team tier</b><i>Marcus · Fri</i></span></div>
+    <div class="ai"><span class="cb"></span><span><b>Draft grandfathering email</b><i>You · remind Thu 10 AM</i></span></div>
+    <div class="ai done"><span class="cb on">${I('check',3)}</span><span><b>Share churn data</b><i>Priya</i></span></div>
+    <div class="addl">+ Add action item</div>
+    <h5 style="margin-top:20px">Requests <span class="n">1</span></h5>
+    <div class="req"><div class="h">${I('check',3)}Ready</div><b>Email Priya the revised tiers</b><span class="btn p sm">${I('mail')}Open in Mail</span></div>
+    <h5 style="margin-top:20px">Ask about this meeting</h5>
+    <div class="askin">${I('search')}What did Marcus say about Acme?</div>
+  </div>`;
+}
+function detail(o){
+  const sum = `<div class="stale">The transcript changed since this summary was written.<span class="btn s sm">Update summary</span></div>
+    <div class="sum"><p>Priya and Marcus agreed to move SSO into the Team tier and raise it to $15 per seat for new accounts <span class="cite">22:31</span>. Existing customers keep current pricing through March.</p>
+    <h6>Decisions</h6><ul><li>Annual discount stays at 20% <span class="cite">18:04</span></li><li>No annual pricing changes in this release <span class="cite">22:44</span></li></ul>
+    <h6>Open questions</h6><ul><li>How do we tell Acme before the newsletter? <span class="cite">23:02</span></li></ul></div>`;
+  const head = `<div class="back">${I('back')}Meetings</div>
+    <div class="hrow" style="margin-bottom:0;align-items:flex-start"><div><div class="ttl">Pricing review with Priya</div><div class="meta">Mon, Nov 16 · 4:00 PM · 47 min · Priya Shah, Marcus Lee</div></div><div class="sp"></div><span class="btn s sm">${I('copy')}Copy as Markdown</span><span class="btn q sm" style="padding:0 6px">${I('more')}</span></div>
+    <div class="dtabs"><span class="on">Summary</span><span>Transcript</span><span>Your notes</span></div>`;
+  const inner = o.rail
+    ? `<div style="max-width:none">${head}<div class="dgrid"><div>${sum}</div>${detailRail()}</div></div>`
+    : `<div class="col">${head}${sum}<div style="height:22px"></div><div class="card-m" style="padding:16px 18px">${detailRail().replace('<h5 style="margin-top:20px">Ask about this meeting</h5>','').replace(/<div class="askin">.*?<\/div>/,'')}</div></div>`;
+  return frame(o,'Meetings',inner,true);
+}
+
+function dictations(o){
+  const items = [
+    ['10:42','Slack','Sounds good, let’s move the launch to Thursday so design has time for the pricing page.',true],
+    ['10:15','Mail','Hi Dana, following up on the Acme SSO timeline. Can we lock the January date by Friday?'],
+    ['9:58','Linear','Pricing page still shows the old Team tier on mobile Safari. Repro on iOS 19.'],
+    ['Yesterday','Notes','Remind the team the retro moved to Friday at 2, and bring one thing to stop doing.'],
+    ['Yesterday','Slack','Can someone own the newsletter copy for the twentieth? I can review.'],
+  ];
+  const inner = `<div class="col" style="max-width:740px">
+    <div class="hrow"><div class="ttl">Dictations</div><div class="sp"></div><span class="sel">Speaking: Auto ${I('chev')}</span><span class="btn q">${I('upload')}Transcribe a file</span><span class="btn s">${I('mic')}Dictate</span></div>
+    <div class="hintline">Press <span class="k">⌥ Space</span> in any app. The text is typed where your cursor is.</div>
+    <div class="card-m dsplit"><div class="dlist"><div class="daygrp" style="margin:6px 10px 6px">Today</div>
+      ${items.map(([t,a,x,on])=>`<div class="di ${on?'on':''}"><div class="m"><span class="mono">${t}</span><span>${a}</span></div><p>${x}</p></div>`).join('')}
+    </div>
+    <div class="dview"><div class="meta" style="margin:0 0 12px">10:42 AM · Typed into Slack · 6 s</div>
+      <div class="txt">Sounds good, let’s move the launch to Thursday so design has time for the pricing page. I’ll update the ticket and ping Marcus about the newsletter.</div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:20px;font-family:var(--f-ui)"><span class="sel">Style: Casual ${I('chev')}</span><span class="sel">Language: Keep ${I('chev')}</span><div style="flex:1"></div><span class="btn q sm">Clean up again</span><span class="btn s sm">${I('copy')}Copy</span></div>
+      <div style="margin-top:22px;padding-top:14px;border-top:1px solid var(--line);font-family:var(--f-ui);font-size:12px;color:var(--faint)">▸ Original <span style="opacity:.8">· “uh sounds good lets move the launch to thursday so design has time for the um pricing page…”</span></div>
+    </div></div>
+  </div>`;
+  return frame(o,'Dictations',inner,false);
+}
+
+function inbox(o){
+  const inner = `<div class="col">
+    <div class="hrow"><div class="ttl">Inbox</div></div>
+    <div class="card-m" style="padding:10px 12px;display:flex;align-items:center;gap:10px;color:var(--faint)"><span style="width:15px;height:15px;display:block;color:var(--accent)">${I('mic')}</span>Ask unsound to… draft an email, set a reminder, file a ticket<span class="k" style="margin-left:auto">⌥⇧Space</span></div>
+    <div class="lbl">Ready to send <span class="n">2</span></div>
+    <div class="card-m rows">
+      <div class="row"><div class="ri">${I('mail')}</div><div class="tx"><b>Email Priya the revised tiers</b><span>From Pricing review · drafted yesterday</span></div><div class="rt"><span class="btn q sm">Review</span><span class="btn p sm">Open in Mail</span></div></div>
+      <div class="row"><div class="ri">${I('ticket')}</div><div class="tx"><b>Jira: SSO for the Team tier</b><span>From Pricing review</span></div><div class="rt"><span class="spin"></span>Drafting…</div></div>
+    </div>
+    <div class="lbl">Due <span class="n">1</span></div>
+    <div class="card-m rows"><div class="row"><div class="ri">${I('clock')}</div><div class="tx"><b>Send the Q3 deck to Marcus</b><span>Due today, 3:00 PM</span></div><div class="rt"><span class="btn q sm">Snooze 1 hour</span><span class="btn s sm">Mark done</span></div></div></div>
+    <div class="lbl">Action items <span class="n">4</span><span style="flex:1"></span><span class="sel" style="font-weight:500">Mine ${I('chev')}</span></div>
+    <div class="card-m" style="padding:6px 14px">
+      <div class="ai"><span class="cb"></span><span><b>Draft grandfathering email</b><i>Pricing review · Thu 10 AM</i></span></div>
+      <div class="ai" style="border-top:1px solid var(--line)"><span class="cb"></span><span><b>Confirm SSO date with Acme</b><i>Acme onboarding call · Fri</i></span></div>
+      <div class="ai" style="border-top:1px solid var(--line)"><span class="cb"></span><span><b>Review newsletter copy</b><i>Weekly eng sync</i></span></div>
+    </div>
+  </div>`;
+  return frame(o,'Inbox',inner,false);
+}
+
+function floating(o){
+  const g = GLYPH[o.logo].replace('class="g"','class="g" style="color:var(--accent)"');
+  return `<div class="desk t${o.id}-dark" style="font-family:var(--f-ui)">
+    <div class="zoom"><div>Priya Shah</div><div>Marcus Lee</div><div>You</div><div style="background:#1b1e25"></div></div>
+    <div class="flabel" style="left:600px;top:44px">Recording indicator</div>
+    <div class="fl ind" style="left:600px;top:66px">${g}<span class="dot"></span>Recording<span class="t">23:41</span><span class="ib" title="Flag">${I('flag')}</span><span class="btn stop" style="height:28px"><i></i>Stop</span></div>
+    <div class="flabel" style="left:600px;top:130px">When the call ends</div>
+    <div class="fl ended" style="left:600px;top:152px"><div class="r1">${g}Zoom left the call<span class="mono" style="margin-left:auto;color:var(--faint);font-weight:500">41:02</span></div><div class="r2">Stop recording?<span style="flex:1"></span><span class="btn q sm">Keep</span><span class="btn p sm">Stop</span></div></div>
+    <div class="flabel" style="left:600px;top:262px">Call detected</div>
+    <div class="fl prompt" style="left:600px;top:284px"><div class="r1">${LOGO[o.logo]()}<div><b>Zoom call started</b><p>Record it and get notes when it ends?</p></div></div><div class="acts"><span class="btn q sm">Not now</span><span class="btn p sm">Record</span></div></div>
+    <div class="flabel" style="left:40px;top:420px">Dictation overlay (hotkey)</div>
+    <div class="fl cap" style="left:40px;top:444px">so let’s move the launch to Thursday so design has time for the</div>
+    <div class="fl ov" style="left:40px;top:512px">${wv(9)}<span style="font:500 12px var(--f-mono);color:var(--muted)">⌥ Space</span></div>
+    <div class="flabel" style="left:420px;top:420px">After it types</div>
+    <div class="fl toast" style="left:420px;top:444px">${I('check',3)}Typed into Slack</div>
+  </div>`;
+}
+
+const RENDER = {meetings, live, detail, dictations, inbox, floating};
+
+function renderOptions(){
+  const host = document.getElementById('optionsHost');
+  host.innerHTML = OPTS.map(o=>{
+    const theme = `t${o.id}-${mode==='def'?o.def:o.alt}`;
+    const inner = RENDER[screen](o);
+    const win = screen==='floating' ? inner : `<div class="win ${theme}">${inner}</div>`;
+    return `<article class="option" id="opt${o.id}">
+      <div class="ohead">
+        <div><h3><span class="num">0${o.id}</span>${o.name} ${o.pick?'<span class="tag">Recommended</span>':''}</h3>
+          <p class="sub" style="margin-top:6px">${o.tagline}</p>
+          <div class="notes">${o.notes.map(n=>`<span>${n}</span>`).join('')}</div></div>
+        <div><div class="spec">${o.fonts.map(([a,b])=>`<span>${a}</span><b>${b}</b>`).join('')}</div>
+          <div class="sw">${o.sw.map(([c,n])=>`<span style="background:${c}" data-n="${n}"></span>`).join('')}</div></div>
+      </div>
+      <div class="stage-wrap">${win}</div>
+    </article>`;
+  }).join('');
+}
+function renderControls(){
+  const seg = document.getElementById('screenSeg');
+  seg.innerHTML = SCREENS.map(([k,l])=>`<button data-s="${k}" aria-pressed="${k===screen}">${l}</button>`).join('');
+  seg.onclick = e => { const b=e.target.closest('button'); if(!b) return; screen=b.dataset.s; save(); renderControls(); renderOptions(); };
+  const ms = document.getElementById('modeSeg');
+  ms.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed', b.dataset.m===mode));
+  ms.onclick = e => { const b=e.target.closest('button'); if(!b) return; mode=b.dataset.m; save(); renderControls(); renderOptions(); };
+}
+function save(){ try{ localStorage.setItem('unsound-redesign', JSON.stringify({screen,mode})); }catch(e){} }
+try{ const s=JSON.parse(localStorage.getItem('unsound-redesign')||'{}'); if(s.screen&&RENDER[s.screen]) screen=s.screen; if(s.mode) mode=s.mode; }catch(e){}
+{ const q=new URLSearchParams(location.search); if(RENDER[q.get('screen')]) screen=q.get('screen'); if(q.get('mode')) mode=q.get('mode'); }
+
+function renderLogos(){
+  document.getElementById('logoHost').innerHTML = LOGOS.map(l=>`<div class="card logo-card ${l.tag==='Pick'?'pick':''}">
+    <div class="big">${LOGO[l.k]()}</div>
+    <div class="sizes l">${[64,32,16].map(s=>`<div style="width:${s}px;height:${s}px">${LOGO[l.k]()}</div>`).join('')}</div>
+    <div class="sizes d">${[64,32,16].map(s=>`<div style="width:${s}px;height:${s}px">${LOGO[l.k]()}</div>`).join('')}</div>
+    <div class="menubar mb-l"><span class="fake">⌘</span>${GLYPH[l.k]}<span class="fake">Wi-Fi</span><span style="margin-left:auto" class="fake">Tue 2:04</span></div>
+    <div class="menubar mb-d"><span class="fake">⌘</span>${GLYPH[l.k]}<span class="fake">Wi-Fi</span><span style="margin-left:auto" class="fake">Tue 2:04</span></div>
+    <div class="meta"><h3>${l.name} ${l.tag?`<span class="tag ${l.tag==='Passed'?'gray':''}">${l.tag}</span>`:''}</h3>
+      <div class="word">${LOGO[l.k]()}unsound</div>
+      <p style="font-size:12px;color:var(--pg-faint);margin:0 0 6px">${l.by}</p><p style="margin:0;font-size:13.5px;color:var(--pg-muted)">${l.d}</p></div>
+  </div>`).join('');
+  document.getElementById('toplogo').innerHTML = LOGO.rotation()+'unsound<small>redesign</small>';
+}
+
+function renderType(){
+  const S = [
+    {n:'01 · Booth', ui:'system-ui,-apple-system,Inter,sans-serif', read:'system-ui,-apple-system,Inter,sans-serif', sum:'system-ui,-apple-system,Inter,sans-serif', mono:'ui-monospace,"SF Mono","JetBrains Mono",monospace', why:'Native. It matches the menus, the overlay and the macOS fonts, and needs no webfont. Hinting at 13px is unbeatable. The one brand moment is the Geist wordmark.'},
+    {n:'02 · Studio', ui:'Inter,sans-serif', read:'Inter,sans-serif', sum:'"Source Serif 4",Georgia,serif', mono:'"JetBrains Mono",monospace', why:'Inter with cv11 and ss01 gives an unambiguous 1/l/I in names and times. Source Serif makes the summary feel like a written brief.', ff:'"cv11","ss01"'},
+    {n:'03 · Margin', ui:'"Instrument Sans",sans-serif', read:'"Instrument Sans",sans-serif', sum:'Newsreader,Georgia,serif', mono:'"Geist Mono",monospace', why:'The most distinctive voice. Instrument Sans is warmer than Inter, and Newsreader is designed for screens at reading sizes. Less native.'},
+  ];
+  document.getElementById('typeHost').innerHTML = S.map(s=>`<div class="card spec-card" style="font-feature-settings:${s.ff||'normal'}">
+    <h3 style="margin-bottom:10px">${s.n}</h3>
+    <div class="row"><span class="lbl">Title</span><span style="font:600 22px/1.2 ${s.n.includes('Margin')?s.sum:s.ui};letter-spacing:-.02em">Pricing review with Priya</span></div>
+    <div class="row"><span class="lbl">UI 13</span><span style="font:500 13px ${s.ui}">Record this call · Stop recording · Mark done</span></div>
+    <div class="row"><span class="lbl">Transcript</span><span style="font:400 15px/1.6 ${s.read}"><b style="font-weight:600;font-size:13px">Marcus</b> That’s fine for new accounts. Existing ones stay grandfathered.</span></div>
+    <div class="row"><span class="lbl">Summary</span><span style="font:400 16px/1.6 ${s.sum}">SSO moves into Team at $15 per seat for new accounts.</span></div>
+    <div class="row"><span class="lbl">Numbers</span><span style="font:500 15px ${s.mono};font-variant-numeric:tabular-nums">23:41 · 1:07:12 · ⌥ Space</span></div>
+    <p style="margin-top:10px">${s.why}</p>
+  </div>`).join('');
+}
+
+renderControls(); renderOptions(); renderLogos(); renderType();
+</script>
+</body>
+</html>

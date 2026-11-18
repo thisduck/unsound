@@ -96,11 +96,10 @@ function inline(text: string, onTime?: (ms: number) => void): ReactNode {
 
 function Times({ raw, onTime }: { raw: string; onTime?: (ms: number) => void }) {
   const inner = raw.slice(1, -1);
-  if (!onTime) return <span className="md-time">{raw}</span>;
+  if (!onTime) return <span className="md-time">{inner}</span>;
   const parts = inner.split(/(\s*[,–-]\s*)/);
   return (
-    <span className="md-time">
-      {raw[0]}
+    <span className="md-times">
       {parts.map((p, i) => {
         const ms = parseClock(p);
         return ms === null ? (
@@ -111,7 +110,6 @@ function Times({ raw, onTime }: { raw: string; onTime?: (ms: number) => void }) 
           </button>
         );
       })}
-      {raw[raw.length - 1]}
     </span>
   );
 }
