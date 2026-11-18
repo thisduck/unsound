@@ -4,6 +4,7 @@ import {
   AssistantSettings,
   CalAccess,
   formatShortcut,
+  LANGUAGES,
   McpServer,
   MeetingSettings,
   ModelInfo,
@@ -11,11 +12,15 @@ import {
   ToolGuide,
 } from "./api";
 import { ACTION_LABELS } from "./meetings/TaskCard";
+import { PrefCard, PrefCheck, PrefGroup, PrefRow } from "./sections";
+import { Icon, useConfirm } from "./ui";
 
 const JIRA_TOKEN = "jira-api-token";
 const ENDPOINT_KEY = "assistant-endpoint-key";
 const OPENAI_KEY = "openai-api-key";
 const ANTHROPIC_KEY = "anthropic-api-key";
+
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /// OpenAI-compatible providers, by base URL.
 const PROVIDERS: { name: string; url: string; local?: boolean }[] = [
@@ -30,6 +35,8 @@ const PROVIDERS: { name: string; url: string; local?: boolean }[] = [
   { name: "llama-server (this Mac)", url: "http://localhost:8080/v1", local: true },
 ];
 
+type Status = { ok: boolean; model?: string; error?: string; cloud?: boolean } | null;
+
 /* ── which model thinks ──────────────────────────────────────────── */
 
 function ModelSection({
@@ -43,7 +50,7 @@ function ModelSection({
   s: AssistantSettings;
   llms: ModelInfo[];
   recommended: ModelInfo[];
-  status: { ok: boolean; model?: string; error?: string; cloud?: boolean } | null;
+  status: Status;
   patch: (p: Partial<AssistantSettings>) => void;
   onError: (msg: string | null) => void;
 }) {
@@ -79,11 +86,11 @@ function ModelSection({
     }
   };
   const fetchModels = async () => {
-    setListing("loading…");
+    setListing("Loading…");
     try {
       const ids = await api.listCloudModels(backend, backend === "compatible" ? s.endpointUrl : undefined);
       setCloudModels(ids);
-      setListing(ids.length ? null : "no models listed");
+      setListing(ids.length ? null : "The provider didn't list any models.");
     } catch (e) {
       setListing(String(e));
     }
@@ -92,106 +99,104 @@ function ModelSection({
   const setModel = (m: string) => patch(backend === "compatible" ? { endpointModel: m } : { cloudModel: m });
 
   return (
-    <section className="sheet-section">
-      <div className="sheet-section-head">
-        <h3>model</h3>
-      </div>
+    <PrefGroup title="Model">
       {status && (
-        <p className={"sheet-hint block" + (status.ok ? "" : " warn")}>
-          {status.ok ? `now using: ${status.model}` : status.error}
-        </p>
-      )}
-      <div className="row">
-        <div className="row-info">
-          <div className="row-name">thinks with</div>
-          <div className="row-desc">understands your requests, drafts, and drives the browser</div>
+        <div className={"alert " + (status.ok ? "" : "warn")}>
+          <Icon name={status.ok ? "check" : "alert"} />
+          <div className="alert-body">{status.ok ? `Using ${status.model}` : status.error}</div>
         </div>
-        <div className="row-action">
-          <select className="chip-select" value={backend} onChange={(e) => patch({ backend: e.target.value })}>
-            <option value="local">this Mac — a downloaded model</option>
+      )}
+      <PrefCard>
+        <PrefRow label="Runs on" desc="Understands your requests, writes drafts and works in the browser.">
+          <select
+            className="select"
+            aria-label="Runs on"
+            value={backend}
+            onChange={(e) => patch({ backend: e.target.value })}
+          >
+            <option value="local">This Mac (downloaded model)</option>
             <option value="claude" disabled={!clis.claude}>
-              my Claude subscription{clis.claude ? "" : " (needs Claude Code)"}
+              Your Claude subscription{clis.claude ? "" : " (needs Claude Code)"}
             </option>
             <option value="codex" disabled={!clis.codex}>
-              my ChatGPT subscription{clis.codex ? "" : " (needs Codex CLI)"}
+              Your ChatGPT subscription{clis.codex ? "" : " (needs Codex CLI)"}
             </option>
-            <option value="anthropic">Anthropic API (key)</option>
-            <option value="openai">OpenAI API (key)</option>
-            <option value="compatible">another provider (Fireworks, Groq, Ollama…)</option>
+            <option value="anthropic">Anthropic API key</option>
+            <option value="openai">OpenAI API key</option>
+            <option value="compatible">Another provider (Fireworks, Groq, Ollama…)</option>
           </select>
-        </div>
-      </div>
+        </PrefRow>
 
-      {backend === "local" && (
-        <>
-          <div className="row">
-            <div className="row-info">
-              <div className="row-name">local model</div>
-              <div className="row-desc">bigger models understand requests and write drafts much better</div>
-            </div>
-            <div className="row-action">
-              <select className="chip-select" value={s.localModel} onChange={(e) => patch({ localModel: e.target.value })}>
-                <option value="">automatic (best downloaded)</option>
-                {llms.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          {recommended.some((m) => !m.downloaded) && (
-            <p className="sheet-hint block">
-              recommended: {recommended.map((m) => `${m.name}${m.downloaded ? " ✓" : ""}`).join(" · ")} — download in
-              Settings → models (E4B for 8–16 GB, 12B for 16–32 GB, 26B-A4B for 32 GB+).
-            </p>
-          )}
-        </>
-      )}
-
-      {(backend === "claude" || backend === "codex") && (
-        <>
-          <div className="row">
-            <div className="row-info">
-              <div className="row-name">model</div>
-              <div className="row-desc">
-                {backend === "claude"
-                  ? "uses the Claude account Claude Code is signed into — no API key"
-                  : "uses the ChatGPT account the Codex CLI is signed into — no API key"}
-              </div>
-            </div>
-            <div className="row-action">
-              {backend === "claude" ? (
-                <select className="chip-select" value={s.cliModel} onChange={(e) => patch({ cliModel: e.target.value })}>
-                  <option value="">its default</option>
-                  <option value="sonnet">Sonnet</option>
-                  <option value="opus">Opus</option>
-                  <option value="haiku">Haiku (fastest)</option>
-                </select>
-              ) : (
-                <input className="text-input" defaultValue={s.cliModel} placeholder="its default" onBlur={(e) => patch({ cliModel: e.target.value.trim() })} />
-              )}
-            </div>
-          </div>
-          <p className="sheet-hint block">
-            each step starts the CLI, so it's a few seconds slower per step than an API key.
-          </p>
-        </>
-      )}
-
-      {backend === "compatible" && (
-        <div className="row">
-          <div className="row-info">
-            <div className="row-name">provider</div>
-            <div className="row-desc">any OpenAI-compatible server</div>
-          </div>
-          <div className="row-action">
+        {backend === "local" && (
+          <PrefRow
+            label="Local model"
+            desc={
+              recommended.some((m) => !m.downloaded)
+                ? `Bigger models write better drafts. Try ${recommended
+                    .slice(0, 3)
+                    .map((m) => m.name)
+                    .join(", ")} from Models.`
+                : "Bigger models write better drafts."
+            }
+          >
             <select
-              className="chip-select"
+              className="select"
+              aria-label="Local model"
+              value={s.localModel}
+              onChange={(e) => patch({ localModel: e.target.value })}
+            >
+              <option value="">Automatic (best downloaded)</option>
+              {llms.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </PrefRow>
+        )}
+
+        {(backend === "claude" || backend === "codex") && (
+          <PrefRow
+            label="Model"
+            desc={
+              backend === "claude"
+                ? "Uses the account Claude Code is signed in to. Each step takes a few seconds longer than with an API key."
+                : "Uses the account the Codex CLI is signed in to. Each step takes a few seconds longer than with an API key."
+            }
+          >
+            {backend === "claude" ? (
+              <select
+                className="select"
+                aria-label="Claude model"
+                value={s.cliModel}
+                onChange={(e) => patch({ cliModel: e.target.value })}
+              >
+                <option value="">Default</option>
+                <option value="sonnet">Sonnet</option>
+                <option value="opus">Opus</option>
+                <option value="haiku">Haiku (fastest)</option>
+              </select>
+            ) : (
+              <input
+                className="input"
+                aria-label="Codex model"
+                defaultValue={s.cliModel}
+                placeholder="Default"
+                onBlur={(e) => patch({ cliModel: e.target.value.trim() })}
+              />
+            )}
+          </PrefRow>
+        )}
+
+        {backend === "compatible" && (
+          <PrefRow label="Provider" desc="Any OpenAI-compatible server." className="stack">
+            <select
+              className="select"
+              aria-label="Provider"
               value={PROVIDERS.find((p) => p.url === s.endpointUrl)?.url ?? ""}
               onChange={(e) => e.target.value && patch({ endpointUrl: e.target.value })}
             >
-              <option value="">custom URL</option>
+              <option value="">Custom URL</option>
               {PROVIDERS.map((p) => (
                 <option key={p.url} value={p.url}>
                   {p.name}
@@ -199,54 +204,56 @@ function ModelSection({
               ))}
             </select>
             <input
-              className="text-input wide"
+              className="input wide"
+              aria-label="Provider URL"
               key={s.endpointUrl}
               defaultValue={s.endpointUrl}
               placeholder="https://…/v1"
               onBlur={(e) => e.target.value.trim() !== s.endpointUrl && patch({ endpointUrl: e.target.value.trim() })}
             />
-          </div>
-        </div>
-      )}
+          </PrefRow>
+        )}
 
-      {(backend === "anthropic" || backend === "openai" || backend === "compatible") && (
-        <>
-          <div className="row">
-            <div className="row-info">
-              <div className="row-name">API key</div>
-              <div className="row-desc">
-                {hasKey[keyName]
-                  ? "saved in your Keychain"
+        {(backend === "anthropic" || backend === "openai" || backend === "compatible") && (
+          <>
+            <PrefRow
+              label="API key"
+              desc={
+                hasKey[keyName]
+                  ? "Saved in your Keychain."
                   : backend === "compatible"
-                    ? "not needed for servers on this Mac"
+                    ? "Not needed for servers on this Mac."
                     : backend === "anthropic"
-                      ? "from platform.claude.com → API keys"
-                      : "from platform.openai.com → API keys"}
-              </div>
-            </div>
-            <div className="row-action">
+                      ? "Create one at platform.claude.com, under API keys."
+                      : "Create one at platform.openai.com, under API keys."
+              }
+            >
               <input
-                className="text-input wide"
+                className="input wide"
                 type="password"
+                aria-label="API key"
                 value={keyInput}
-                placeholder={hasKey[keyName] ? "••••••••" : "paste key"}
+                placeholder={hasKey[keyName] ? "••••••••" : "Paste key"}
                 onChange={(e) => setKeyInput(e.target.value)}
                 onBlur={saveKey}
                 onKeyDown={(e) => e.key === "Enter" && saveKey()}
               />
-            </div>
-          </div>
-          <div className="row">
-            <div className="row-info">
-              <div className="row-name">model</div>
-              <div className="row-desc">
-                {listing ?? (backend === "anthropic" ? "default: claude-opus-5-5" : "pick from the provider's list, or type an id")}
-              </div>
-            </div>
-            <div className="row-action">
+            </PrefRow>
+            <PrefRow
+              label="Model"
+              desc={
+                listing ??
+                (backend === "anthropic" ? "Default: claude-opus-5-5" : "Pick from the provider's list, or type an ID.")
+              }
+            >
               {cloudModels && cloudModels.length > 0 ? (
-                <select className="chip-select" value={modelValue} onChange={(e) => setModel(e.target.value)}>
-                  <option value="">—</option>
+                <select
+                  className="select"
+                  aria-label="Model"
+                  value={modelValue}
+                  onChange={(e) => setModel(e.target.value)}
+                >
+                  <option value="">Choose…</option>
                   {[...new Set([modelValue, ...cloudModels].filter(Boolean))].map((m) => (
                     <option key={m} value={m}>
                       {m}
@@ -255,28 +262,32 @@ function ModelSection({
                 </select>
               ) : (
                 <input
-                  className="text-input wide"
+                  className="input"
+                  aria-label="Model ID"
                   key={backend + modelValue}
                   defaultValue={modelValue}
-                  placeholder={backend === "anthropic" ? "claude-opus-5-5" : "model id"}
+                  placeholder={backend === "anthropic" ? "claude-opus-5-5" : "Model ID"}
                   onBlur={(e) => e.target.value.trim() !== modelValue && setModel(e.target.value.trim())}
                 />
               )}
-              <button className="quiet accent" onClick={fetchModels}>
-                list models
+              <button className="btn btn-secondary btn-sm" onClick={fetchModels}>
+                List models
               </button>
-            </div>
-          </div>
-        </>
-      )}
+            </PrefRow>
+          </>
+        )}
+      </PrefCard>
 
       {status?.cloud && (
-        <p className="sheet-hint block warn">
-          This sends your requests, drafts and the relevant part of the meeting transcript to the provider. Meeting
-          notes and transcription stay on this Mac.
-        </p>
+        <div className="alert warn">
+          <Icon name="info" />
+          <div className="alert-body">
+            Requests, drafts and the relevant part of the transcript are sent to this provider. Transcripts and
+            summaries are still made on this Mac.
+          </div>
+        </div>
       )}
-    </section>
+    </PrefGroup>
   );
 }
 
@@ -348,7 +359,7 @@ export function AssistantSection({
 }) {
   const [s, setS] = useState<AssistantSettings | null>(null);
   const [commandKey, setCommandKey] = useState<string | null>(null);
-  const [status, setStatus] = useState<{ ok: boolean; model?: string; error?: string; cloud?: boolean } | null>(null);
+  const [status, setStatus] = useState<Status>(null);
   const [hasJiraToken, setHasJiraToken] = useState(false);
   const [jiraToken, setJiraToken] = useState("");
   const [jiraResult, setJiraResult] = useState<string | null>(null);
@@ -357,6 +368,7 @@ export function AssistantSection({
   const [mcpJson, setMcpJson] = useState("");
   const [probe, setProbe] = useState<Record<number, string>>({});
   const [browserTest, setBrowserTest] = useState<string | null>(null);
+  const { confirm, dialog } = useConfirm();
 
   const load = () =>
     api.getSettings().then((st) => {
@@ -400,6 +412,22 @@ export function AssistantSection({
         },
       ],
     });
+  const removeGuide = (g: ToolGuide) =>
+    confirm({
+      title: `Remove ${g.name || "this tool"}?`,
+      description: "Its rules are deleted. This can't be undone.",
+      confirm: "Remove",
+      danger: true,
+      onConfirm: () => patch({ guides: s.guides.filter((x) => x.id !== g.id) }),
+    });
+  const removeServer = (i: number) =>
+    confirm({
+      title: `Remove ${s.mcpServers[i].name || "this server"}?`,
+      description: "The assistant can no longer use its tools.",
+      confirm: "Remove",
+      danger: true,
+      onConfirm: () => patch({ mcpServers: s.mcpServers.filter((_, j) => j !== i) }),
+    });
 
   const saveSecret = async (key: string, value: string, done: (v: boolean) => void) => {
     try {
@@ -412,228 +440,251 @@ export function AssistantSection({
 
   return (
     <>
-      <section className="sheet-section">
-        <div className="sheet-section-head">
-          <h3>requests</h3>
-        </div>
-        <p className="sheet-hint block">
-          Ask unsound to do things during a meeting — “unsound, create a Jira ticket from what we just
-          discussed”, “…draft an email to Priya about the launch”, “…remind me to send the deck after
-          the call”. It drafts from the conversation; nothing leaves your Mac until you approve it.
-        </p>
-        <label className="check-row">
-          <input type="checkbox" checked={s.enabled} onChange={(e) => patch({ enabled: e.target.checked })} />
-          assistant on
-        </label>
-        <label className="check-row">
-          <input
-            type="checkbox"
+      <PrefGroup
+        title="Requests"
+        hint={
+          <>
+            Ask unsound to… “create a Jira ticket from what we just discussed”, “draft an email to Priya about the
+            launch”. It drafts from the conversation, and nothing is sent until you approve it.
+          </>
+        }
+      >
+        <PrefCard>
+          <PrefCheck label="Turn on requests" checked={s.enabled} onChange={(v) => patch({ enabled: v })} />
+          <PrefCheck
+            label="Listen for its name while recording"
+            desc="Only your mic is checked, so others on the call can't trigger it."
             checked={s.listenForWakeWord}
             disabled={!s.enabled}
-            onChange={(e) => patch({ listenForWakeWord: e.target.checked })}
+            onChange={(v) => patch({ listenForWakeWord: v })}
           />
-          listen for its name during meetings (your mic only — others on the call can't trigger it)
-        </label>
-        <div className="row">
-          <div className="row-info">
-            <div className="row-name">name to listen for</div>
-            <div className="row-desc">say it at the start of a sentence, then the request</div>
-          </div>
-          <div className="row-action">
+          <PrefRow label="Name to listen for" desc="Say it at the start of a sentence, then the request.">
             <input
-              className="text-input"
+              className="input"
+              aria-label="Name to listen for"
               defaultValue={s.wakeWord}
               onBlur={(e) => e.target.value.trim() && patch({ wakeWord: e.target.value.trim() })}
             />
-          </div>
-        </div>
-        <div className="row">
-          <div className="row-info">
-            <div className="row-name">command key</div>
-            <div className="row-desc">hold it and speak a request — in a meeting or any time</div>
-          </div>
-          <div className="row-action">
-            <span className="shortcut-keys">{commandKey ? formatShortcut(commandKey) : "not set"}</span>
-            <button className="quiet accent" onClick={onOpenShortcuts}>
-              {commandKey ? "change" : "set one"}
+          </PrefRow>
+          <PrefRow label="Ask unsound shortcut" desc="Hold it and speak a request, any time.">
+            <span className="shortcut-keys">{commandKey ? formatShortcut(commandKey) : "Not set"}</span>
+            <button className="btn btn-secondary btn-sm" onClick={onOpenShortcuts}>
+              {commandKey ? "Change" : "Set shortcut"}
             </button>
-          </div>
-        </div>
-      </section>
+          </PrefRow>
+        </PrefCard>
+      </PrefGroup>
 
       <ModelSection s={s} llms={llms} recommended={recommended} status={status} patch={patch} onError={onError} />
-      <section className="sheet-section">
-        <div className="sheet-section-head">
-          <h3>about you</h3>
-        </div>
-        <p className="sheet-hint block">included with every draft — who you are, your team, how you sign off.</p>
+
+      <PrefGroup title="About you" hint="Included with every draft: who you are, your team, how you sign off.">
         <textarea
-          className="meet-notes"
+          className="textarea"
+          aria-label="About you"
           defaultValue={s.aboutMe}
-          placeholder="e.g. I'm Adnan, eng lead on the web team at Acme. Sign emails “Adnan”. Our sprint ends Fridays."
+          placeholder="I'm Sam, design lead at Acme. Sign emails “Sam”. Our sprint ends on Fridays."
           onBlur={(e) => e.target.value !== s.aboutMe && patch({ aboutMe: e.target.value })}
         />
-      </section>
+      </PrefGroup>
 
-      <section className="sheet-section">
-        <div className="sheet-section-head">
-          <h3>your tools</h3>
-        </div>
-        <p className="sheet-hint block">
-          Describe the tools you use in your own words — no integration needed. unsound picks one by
-          “use it for”, follows your rules when drafting, and (in browser mode) does the work on the site in
-          your browser, where you're already signed in.
-        </p>
+      <PrefGroup
+        title="Your tools"
+        hint="Describe the tools you use in your own words. unsound picks one by what it's for, follows your rules, and can do the work in your browser, where you're already signed in."
+      >
         {s.guides.map((g) => (
-          <div className="guide" key={g.id}>
+          <div className="card guide-card" key={g.id}>
             <div className="guide-row">
-              <input type="checkbox" checked={g.enabled} onChange={(e) => setGuide(g.id, { enabled: e.target.checked })} />
-              <input className="text-input" defaultValue={g.name} placeholder="name, e.g. Jira" onBlur={(e) => setGuide(g.id, { name: e.target.value.trim() })} />
-              <select className="chip-select" value={g.mode} onChange={(e) => setGuide(g.id, { mode: e.target.value })}>
-                <option value="browser">do it in my browser</option>
-                <option value="auto">built-in if there is one, else my browser</option>
-                <option value="draft">just draft it for me</option>
+              <input
+                type="checkbox"
+                aria-label={`Use ${g.name || "this tool"}`}
+                checked={g.enabled}
+                onChange={(e) => setGuide(g.id, { enabled: e.target.checked })}
+              />
+              <input
+                className="input guide-name"
+                aria-label="Tool name"
+                defaultValue={g.name}
+                placeholder="Name, like Jira"
+                onBlur={(e) => setGuide(g.id, { name: e.target.value.trim() })}
+              />
+              <select
+                className="select"
+                aria-label="How to do it"
+                value={g.mode}
+                onChange={(e) => setGuide(g.id, { mode: e.target.value })}
+              >
+                <option value="browser">Do it in my browser</option>
+                <option value="auto">Built-in if available, else my browser</option>
+                <option value="draft">Only draft it</option>
               </select>
-              <button className="quiet danger" onClick={() => patch({ guides: s.guides.filter((x) => x.id !== g.id) })}>
-                ✕
+              <button
+                className="btn btn-quiet btn-icon btn-sm danger"
+                aria-label={`Remove ${g.name || "tool"}`}
+                title="Remove"
+                onClick={() => removeGuide(g)}
+              >
+                <Icon name="trash" />
               </button>
             </div>
-            <div className="guide-row">
-              <input className="text-input" defaultValue={g.when} placeholder="use it for… e.g. creating or updating Jira tickets" onBlur={(e) => setGuide(g.id, { when: e.target.value.trim() })} />
-            </div>
-            <div className="guide-row">
-              <input className="text-input" defaultValue={g.site} placeholder="start at (URL)" onBlur={(e) => setGuide(g.id, { site: e.target.value.trim() })} />
-            </div>
+            <input
+              className="input"
+              aria-label="Use it for"
+              defaultValue={g.when}
+              placeholder="Use it for… like creating or updating Jira tickets"
+              onBlur={(e) => setGuide(g.id, { when: e.target.value.trim() })}
+            />
+            <input
+              className="input"
+              aria-label="Start at URL"
+              defaultValue={g.site}
+              placeholder="Start at (URL)"
+              onBlur={(e) => setGuide(g.id, { site: e.target.value.trim() })}
+            />
             <textarea
-              className="meet-notes"
+              className="textarea"
+              aria-label="Your rules"
               defaultValue={g.guidance}
-              placeholder="your rules — e.g. If no project is mentioned, use BLAH. Always add the label from-meeting."
+              placeholder="Your rules, like “If no project is mentioned, use ENG. Always add the label from-meeting.”"
               onBlur={(e) => e.target.value !== g.guidance && setGuide(g.id, { guidance: e.target.value })}
             />
             {g.mode !== "draft" && (
-              <label className="check-row">
-                <input type="checkbox" checked={g.leaveFinalStep} onChange={(e) => setGuide(g.id, { leaveFinalStep: e.target.checked })} />
-                fill it in, but leave the final click (Create / Send / Save) to me
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={g.leaveFinalStep}
+                  onChange={(e) => setGuide(g.id, { leaveFinalStep: e.target.checked })}
+                />
+                Fill it in, but leave the final click (Create, Send, Save) to me
               </label>
             )}
           </div>
         ))}
         <div className="guide-templates">
-          <button className="quiet accent" onClick={() => addGuide()}>
-            + add a tool
+          <button className="btn btn-secondary btn-sm" onClick={() => addGuide()}>
+            Add tool
           </button>
           {TEMPLATES.filter((t) => !s.guides.some((g) => g.name === t.name)).map((t) => (
-            <button key={t.name} className="quiet" onClick={() => addGuide(t)}>
-              + {t.name}
+            <button key={t.name} className="chip" onClick={() => addGuide(t)} aria-label={`Add ${t.name}`}>
+              {t.name}
             </button>
           ))}
         </div>
-      </section>
+      </PrefGroup>
 
-      <section className="sheet-section">
-        <div className="sheet-section-head">
-          <h3>browser</h3>
-        </div>
-        <p className="sheet-hint block">
-          How website work gets done — in your own Chrome, signed in as you. It only runs after you approve a
-          draft, and each run is shown on the task.
-        </p>
-        <div className="engine-pick">
-          <label>
-            <input type="radio" checked={s.browser === "chrome"} disabled={!claudePath} onChange={() => patch({ browser: "chrome" })} />
-            Claude in Chrome, through Claude Code (recommended)
+      <PrefGroup
+        title="Browser"
+        hint="How website work gets done, in your own Chrome and signed in as you. It only runs after you approve a draft."
+      >
+        <PrefCard>
+          <label className="pref-row pref-radio">
+            <input
+              type="radio"
+              name="assistant-browser"
+              checked={s.browser === "chrome"}
+              disabled={!claudePath}
+              onChange={() => patch({ browser: "chrome" })}
+            />
+            <span className="pref-text">
+              <span className="pref-label">
+                Claude in Chrome <span className="badge">Recommended</span>
+              </span>
+              <span className="pref-desc">
+                {claudePath
+                  ? "Most reliable. Runs through Claude Code with your claude.ai account. The task and approved content are sent to Claude."
+                  : "Needs Claude Code (claude.com/claude-code) and the Claude in Chrome extension."}
+              </span>
+            </span>
           </label>
-          <div className="row-desc">
-            {claudePath
-              ? "Most reliable. Uses your claude.ai sign-in and the Claude in Chrome extension; the task and its approved content are sent to Claude."
-              : "Needs Claude Code (claude.com/claude-code) and the Claude in Chrome extension."}
-          </div>
-          <label>
-            <input type="radio" checked={s.browser === "local"} onChange={() => patch({ browser: "local" })} />
-            the assistant's model (above) + a browser connector
+          <label className="pref-row pref-radio">
+            <input
+              type="radio"
+              name="assistant-browser"
+              checked={s.browser === "local"}
+              onChange={() => patch({ browser: "local" })}
+            />
+            <span className="pref-text">
+              <span className="pref-label">Assistant model with a browser connector</span>
+              <span className="pref-desc">
+                Works with the model above. A local model stays on this Mac but is less reliable on complex sites.
+                Default connector: Playwright MCP, with the Playwright MCP Bridge extension.
+              </span>
+            </span>
           </label>
-          <div className="row-desc">
-            Works with any model you pick above — a local one stays on this Mac but is less sure-footed on
-            complex sites. Default connector: Playwright MCP — install the “Playwright MCP Bridge” Chrome
-            extension once.
-          </div>
-          <label>
-            <input type="radio" checked={s.browser === "off" || !s.browser} onChange={() => patch({ browser: "off" })} />
-            off
+          <label className="pref-row pref-radio">
+            <input
+              type="radio"
+              name="assistant-browser"
+              checked={s.browser === "off" || !s.browser}
+              onChange={() => patch({ browser: "off" })}
+            />
+            <span className="pref-text">
+              <span className="pref-label">Off</span>
+            </span>
           </label>
-        </div>
-        {s.browser === "chrome" && (
-          <div className="row">
-            <div className="row-info">
-              <div className="row-name">Claude model</div>
-              <div className="row-desc">Sonnet is quicker and cheaper for clicking through sites</div>
-            </div>
-            <div className="row-action">
-              <select className="chip-select" value={s.claudeModel} onChange={(e) => patch({ claudeModel: e.target.value })}>
-                <option value="">your default</option>
+          {s.browser === "chrome" && (
+            <PrefRow label="Claude model" desc="Sonnet is quicker and cheaper for clicking through sites.">
+              <select
+                className="select"
+                aria-label="Claude model"
+                value={s.claudeModel}
+                onChange={(e) => patch({ claudeModel: e.target.value })}
+              >
+                <option value="">Default</option>
                 <option value="sonnet">Sonnet</option>
                 <option value="opus">Opus</option>
                 <option value="haiku">Haiku</option>
               </select>
-            </div>
-          </div>
-        )}
-        {s.browser === "local" && (
-          <div className="row">
-            <div className="row-info">
-              <div className="row-name">browser connector</div>
-              <div className="row-desc">
-                any MCP browser server — e.g. <code>npx -y @playwright/mcp@latest --extension</code> or{" "}
-                <code>npx -y chrome-devtools-mcp@latest --autoConnect</code> (turn on chrome://inspect/#remote-debugging)
-              </div>
-            </div>
-            <div className="row-action">
+            </PrefRow>
+          )}
+          {s.browser === "local" && (
+            <PrefRow
+              label="Browser connector"
+              className="stack"
+              desc={
+                <>
+                  Any MCP browser server, like <code>npx -y @playwright/mcp@latest --extension</code> or{" "}
+                  <code>npx -y chrome-devtools-mcp@latest --autoConnect</code>
+                </>
+              }
+            >
               <input
-                className="text-input wide"
+                className="input wide mono"
+                aria-label="Browser connector command"
                 defaultValue={[s.browserServer.command, ...s.browserServer.args].join(" ")}
                 onBlur={(e) => {
                   const [command, ...args] = e.target.value.trim().split(/\s+/);
                   patch({ browserServer: { ...s.browserServer, command: command ?? "", args, url: "" } });
                 }}
               />
-            </div>
-          </div>
-        )}
-        {s.browser !== "off" && s.browser && (
-          <div className="row">
-            <div className="row-info">
-              <div className="row-desc">{browserTest}</div>
-            </div>
-            <div className="row-action">
+            </PrefRow>
+          )}
+          {s.browser !== "off" && s.browser && (
+            <PrefRow label="Try it" desc={browserTest ?? "Opens Wikipedia in your browser and reads the page."}>
               <button
-                className="quiet accent"
+                className="btn btn-secondary btn-sm"
                 onClick={async () => {
-                  setBrowserTest("opening Wikipedia in your browser…");
+                  setBrowserTest("Opening Wikipedia in your browser…");
                   try {
-                    setBrowserTest(`works — read: “${(await api.browserTest()).trim()}”`);
+                    setBrowserTest(`Works. Read: “${(await api.browserTest()).trim()}”`);
                   } catch (e) {
                     setBrowserTest(String(e));
                   }
                 }}
               >
-                test it
+                Test browser
               </button>
-            </div>
-          </div>
-        )}
-      </section>
+            </PrefRow>
+          )}
+        </PrefCard>
+      </PrefGroup>
 
-      <section className="sheet-section">
-        <div className="sheet-section-head">
-          <h3>do these without asking</h3>
-        </div>
-        <p className="sheet-hint block">
-          drafts are always made right away; these kinds also run as soon as they're drafted. Anything done in
-          your browser always waits for you.
-        </p>
-        <div className="check-grid">
+      <PrefGroup
+        title="Run without asking"
+        hint="Drafts are always made right away. These kinds also run as soon as they're drafted. Browser work always waits for you."
+      >
+        <PrefCard className="check-grid">
           {(Object.keys(ACTION_LABELS) as TaskAction[]).map((a) => (
-            <label key={a} className="check-row">
+            <label key={a} className="check">
               <input
                 type="checkbox"
                 checked={s.autoRun.includes(a)}
@@ -641,64 +692,60 @@ export function AssistantSection({
                   patch({ autoRun: e.target.checked ? [...s.autoRun, a] : s.autoRun.filter((x) => x !== a) })
                 }
               />
-              {ACTION_LABELS[a]}
+              {cap(ACTION_LABELS[a])}
             </label>
           ))}
-        </div>
-      </section>
+        </PrefCard>
+      </PrefGroup>
 
-      <section className="sheet-section">
-        <div className="sheet-section-head">
-          <h3>jira api (optional)</h3>
-        </div>
-        <p className="sheet-hint block">
-          Only if you want tickets created without the browser. Otherwise a Jira tool above (or browser use)
-          handles it.
-        </p>
-        <div className="row">
-          <div className="row-info">
-            <div className="row-name">site</div>
-          </div>
-          <div className="row-action">
-            <input className="text-input wide" placeholder="https://yourteam.atlassian.net" defaultValue={s.jira.site} onBlur={(e) => patchJira({ site: e.target.value.trim() })} />
-          </div>
-        </div>
-        <div className="row">
-          <div className="row-info">
-            <div className="row-name">your Atlassian email</div>
-          </div>
-          <div className="row-action">
-            <input className="text-input wide" defaultValue={s.jira.email} onBlur={(e) => patchJira({ email: e.target.value.trim() })} />
-          </div>
-        </div>
-        <div className="row">
-          <div className="row-info">
-            <div className="row-name">API token</div>
-            <div className="row-desc">
-              {hasJiraToken ? "saved in your Keychain" : "create one at id.atlassian.com → Security → API tokens"}
-            </div>
-          </div>
-          <div className="row-action">
+      <PrefGroup
+        title="Jira API (optional)"
+        hint="Only needed to create tickets without the browser. Without it, unsound opens Jira's create page with the ticket on your clipboard."
+      >
+        <PrefCard>
+          <PrefRow label="Site">
             <input
-              className="text-input wide"
+              className="input wide"
+              aria-label="Jira site"
+              placeholder="https://yourteam.atlassian.net"
+              defaultValue={s.jira.site}
+              onBlur={(e) => patchJira({ site: e.target.value.trim() })}
+            />
+          </PrefRow>
+          <PrefRow label="Atlassian email">
+            <input
+              className="input wide"
+              type="email"
+              aria-label="Atlassian email"
+              defaultValue={s.jira.email}
+              onBlur={(e) => patchJira({ email: e.target.value.trim() })}
+            />
+          </PrefRow>
+          <PrefRow
+            label="API token"
+            desc={hasJiraToken ? "Saved in your Keychain." : "Create one at id.atlassian.com, under Security."}
+          >
+            <input
+              className="input wide"
               type="password"
+              aria-label="Jira API token"
               value={jiraToken}
-              placeholder={hasJiraToken ? "••••••••" : ""}
+              placeholder={hasJiraToken ? "••••••••" : "Paste token"}
               onChange={(e) => setJiraToken(e.target.value)}
               onBlur={() => {
                 if (jiraToken) saveSecret(JIRA_TOKEN, jiraToken, setHasJiraToken).then(() => setJiraToken(""));
               }}
             />
-          </div>
-        </div>
-        <div className="row">
-          <div className="row-info">
-            <div className="row-name">default project</div>
-          </div>
-          <div className="row-action">
+          </PrefRow>
+          <PrefRow label="Default project">
             {projects.length > 0 ? (
-              <select className="chip-select" value={s.jira.defaultProject} onChange={(e) => patchJira({ defaultProject: e.target.value })}>
-                <option value="">—</option>
+              <select
+                className="select"
+                aria-label="Default project"
+                value={s.jira.defaultProject}
+                onChange={(e) => patchJira({ defaultProject: e.target.value })}
+              >
+                <option value="">None</option>
                 {projects.map((p) => (
                   <option key={p.key} value={p.key}>
                     {p.key} · {p.name}
@@ -706,165 +753,203 @@ export function AssistantSection({
                 ))}
               </select>
             ) : (
-              <input className="text-input" placeholder="ENG" defaultValue={s.jira.defaultProject} onBlur={(e) => patchJira({ defaultProject: e.target.value.trim().toUpperCase() })} />
+              <input
+                className="input narrow"
+                aria-label="Default project key"
+                placeholder="ENG"
+                defaultValue={s.jira.defaultProject}
+                onBlur={(e) => patchJira({ defaultProject: e.target.value.trim().toUpperCase() })}
+              />
             )}
-            <select className="chip-select" value={s.jira.defaultIssueType || "Task"} onChange={(e) => patchJira({ defaultIssueType: e.target.value })}>
+            <select
+              className="select"
+              aria-label="Default issue type"
+              value={s.jira.defaultIssueType || "Task"}
+              onChange={(e) => patchJira({ defaultIssueType: e.target.value })}
+            >
               {["Task", "Bug", "Story"].map((t) => (
                 <option key={t}>{t}</option>
               ))}
             </select>
-          </div>
-        </div>
-        <div className="row">
-          <div className="row-info">
-            <div className="row-desc">{jiraResult}</div>
-          </div>
-          <div className="row-action">
+          </PrefRow>
+          <PrefRow label="Connection" desc={jiraResult ?? "Checks your site, email and token."}>
             <button
-              className="quiet accent"
+              className="btn btn-secondary btn-sm"
               onClick={async () => {
-                setJiraResult("checking…");
+                setJiraResult("Checking…");
                 try {
                   const r = await api.jiraTest();
                   setProjects(r.projects);
-                  setJiraResult(`connected as ${r.user} · ${r.projects.length} projects`);
+                  setJiraResult(`Connected as ${r.user} · ${r.projects.length} projects`);
                 } catch (e) {
                   setJiraResult(String(e));
                 }
               }}
             >
-              test connection
+              Test connection
             </button>
-          </div>
-        </div>
-        <p className="sheet-hint block">
-          without a token or browser use, unsound opens Jira's create page with the ticket on your clipboard.
-        </p>
-      </section>
+          </PrefRow>
+        </PrefCard>
+      </PrefGroup>
 
-      <section className="sheet-section">
-        <div className="sheet-section-head">
-          <h3>tools (MCP)</h3>
-        </div>
-        <p className="sheet-hint block">
-          Give the assistant other tools — Notion, Linear, Slack, GitHub, a browser — through MCP servers.
-          Requests that need them run step by step after you approve, and each step is shown. Remote
-          servers that need sign-in work through <code>npx mcp-remote &lt;url&gt;</code>.
-        </p>
-        {s.mcpServers.map((m, i) => (
-          <div className="mcp-row" key={i}>
-            <label className="check-row">
-              <input type="checkbox" checked={m.enabled} onChange={(e) => setServer(i, { enabled: e.target.checked })} />
-            </label>
-            <input className="text-input" defaultValue={m.name} placeholder="name" onBlur={(e) => setServer(i, { name: e.target.value.trim() })} />
-            <input
-              className="text-input wide"
-              defaultValue={m.url || [m.command, ...m.args].join(" ")}
-              placeholder="command and args, or https://… URL"
-              onBlur={(e) => {
-                const v = e.target.value.trim();
-                if (/^https?:\/\//.test(v)) setServer(i, { url: v, command: "", args: [] });
-                else {
-                  const [command, ...args] = v.split(/\s+/);
-                  setServer(i, { command: command ?? "", args, url: "" });
-                }
-              }}
-            />
-            <button
-              className="quiet"
-              onClick={async () => {
-                setProbe((p) => ({ ...p, [i]: "connecting…" }));
-                try {
-                  const tools = await api.mcpProbe(s.mcpServers[i]);
-                  setProbe((p) => ({ ...p, [i]: `${tools.length} tools: ${tools.slice(0, 6).map((t) => t.name).join(", ")}${tools.length > 6 ? "…" : ""}` }));
-                } catch (e) {
-                  setProbe((p) => ({ ...p, [i]: String(e) }));
-                }
-              }}
-            >
-              test
-            </button>
-            <button className="quiet danger" onClick={() => patch({ mcpServers: s.mcpServers.filter((_, j) => j !== i) })}>
-              ✕
-            </button>
-            {probe[i] && <div className="mcp-probe">{probe[i]}</div>}
-          </div>
-        ))}
-        <div className="row">
-          <div className="row-action">
-            <button
-              className="quiet accent"
-              onClick={() =>
-                patch({ mcpServers: [...s.mcpServers, { name: "", command: "", args: [], env: {}, url: "", headers: {}, enabled: true }] })
-              }
-            >
-              + add server
-            </button>
-          </div>
-        </div>
-        <details className="meet-options">
-          <summary>import from a Claude / Cursor config</summary>
+      <PrefGroup
+        title="MCP servers"
+        hint={
+          <>
+            Give the assistant more tools, like Notion, Linear, Slack or GitHub. Each step runs after you approve and
+            is shown on the request. Servers that need sign-in work through <code>npx mcp-remote &lt;url&gt;</code>.
+          </>
+        }
+        action={
+          <button
+            className="btn btn-quiet btn-sm"
+            onClick={() =>
+              patch({
+                mcpServers: [
+                  ...s.mcpServers,
+                  { name: "", command: "", args: [], env: {}, url: "", headers: {}, enabled: true },
+                ],
+              })
+            }
+          >
+            Add server
+          </button>
+        }
+      >
+        <PrefCard>
+          {s.mcpServers.length === 0 && <div className="pref-empty">No servers yet.</div>}
+          {s.mcpServers.map((m, i) => (
+            <div className="pref-row mcp-row" key={i}>
+              <input
+                type="checkbox"
+                aria-label={`Use ${m.name || "server"}`}
+                checked={m.enabled}
+                onChange={(e) => setServer(i, { enabled: e.target.checked })}
+              />
+              <input
+                className="input mcp-name"
+                aria-label="Server name"
+                defaultValue={m.name}
+                placeholder="Name"
+                onBlur={(e) => setServer(i, { name: e.target.value.trim() })}
+              />
+              <input
+                className="input mono mcp-cmd"
+                aria-label="Command or URL"
+                defaultValue={m.url || [m.command, ...m.args].join(" ")}
+                placeholder="Command and arguments, or https://… URL"
+                onBlur={(e) => {
+                  const v = e.target.value.trim();
+                  if (/^https?:\/\//.test(v)) setServer(i, { url: v, command: "", args: [] });
+                  else {
+                    const [command, ...args] = v.split(/\s+/);
+                    setServer(i, { command: command ?? "", args, url: "" });
+                  }
+                }}
+              />
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={async () => {
+                  setProbe((p) => ({ ...p, [i]: "Connecting…" }));
+                  try {
+                    const tools = await api.mcpProbe(s.mcpServers[i]);
+                    setProbe((p) => ({
+                      ...p,
+                      [i]: `${tools.length} tools: ${tools
+                        .slice(0, 6)
+                        .map((t) => t.name)
+                        .join(", ")}${tools.length > 6 ? "…" : ""}`,
+                    }));
+                  } catch (e) {
+                    setProbe((p) => ({ ...p, [i]: String(e) }));
+                  }
+                }}
+              >
+                Test
+              </button>
+              <button
+                className="btn btn-quiet btn-icon btn-sm danger"
+                aria-label={`Remove ${m.name || "server"}`}
+                title="Remove"
+                onClick={() => removeServer(i)}
+              >
+                <Icon name="trash" />
+              </button>
+              {probe[i] && <div className="mcp-probe">{probe[i]}</div>}
+            </div>
+          ))}
+        </PrefCard>
+        <details className="pref-disclosure">
+          <summary>
+            <Icon name="chevronRight" />
+            Import from a Claude or Cursor config
+          </summary>
           <textarea
-            className="meet-notes"
+            className="textarea mono"
+            aria-label="MCP config JSON"
             value={mcpJson}
             onChange={(e) => setMcpJson(e.target.value)}
             placeholder='{"mcpServers": {"notion": {"command": "npx", "args": ["-y", "@notionhq/notion-mcp-server"]}}}'
           />
-          <button
-            className="quiet accent"
-            onClick={async () => {
-              try {
-                const parsed = await api.mcpParse(mcpJson);
-                patch({ mcpServers: [...s.mcpServers, ...parsed] });
-                setMcpJson("");
-              } catch (e) {
-                onError(String(e));
-              }
-            }}
-          >
-            import
-          </button>
+          <div>
+            <button
+              className="btn btn-secondary btn-sm"
+              disabled={!mcpJson.trim()}
+              onClick={async () => {
+                try {
+                  const parsed = await api.mcpParse(mcpJson);
+                  patch({ mcpServers: [...s.mcpServers, ...parsed] });
+                  setMcpJson("");
+                } catch (e) {
+                  onError(String(e));
+                }
+              }}
+            >
+              Import servers
+            </button>
+          </div>
         </details>
-      </section>
+      </PrefGroup>
 
-      <section className="sheet-section">
-        <div className="sheet-section-head">
-          <h3>claude code</h3>
-        </div>
-        <label className="check-row">
-          <input
-            type="checkbox"
+      <PrefGroup title="Claude Code">
+        <PrefCard>
+          <PrefCheck
+            label="Hand open-ended requests to Claude Code"
+            desc={
+              claudePath === undefined
+                ? "Looking for Claude Code…"
+                : claudePath
+                  ? `Uses your Claude account, MCP servers and browser tools. Found at ${claudePath}. Only the request and relevant context are sent, after you approve.`
+                  : "Claude Code isn't installed (claude.com/claude-code)."
+            }
             checked={s.claudeCode}
             disabled={!claudePath}
-            onChange={(e) => patch({ claudeCode: e.target.checked })}
+            onChange={(v) => patch({ claudeCode: v })}
           />
-          hand open-ended requests to Claude Code (uses your Claude account, MCP servers and browser tools)
-        </label>
-        <p className="sheet-hint block">
-          {claudePath === undefined
-            ? "looking for Claude Code…"
-            : claudePath
-              ? `found at ${claudePath}. Only the request and the relevant meeting context are sent, and only after you approve.`
-              : "Claude Code isn't installed (claude.com/claude-code)."}
-        </p>
-        {s.claudeCode && (
-          <div className="row">
-            <div className="row-info">
-              <div className="row-name">allowed tools</div>
-              <div className="row-desc">comma-separated, e.g. mcp__atlassian, mcp__claude-in-chrome, WebFetch — tools not listed are refused</div>
-            </div>
-            <div className="row-action">
+          {s.claudeCode && (
+            <PrefRow
+              label="Allowed tools"
+              className="stack"
+              desc="Comma-separated, like mcp__atlassian, mcp__claude-in-chrome, WebFetch. Tools not listed are refused."
+            >
               <input
-                className="text-input wide"
+                className="input wide mono"
+                aria-label="Allowed tools"
                 defaultValue={s.claudeAllowedTools.join(", ")}
                 onBlur={(e) =>
-                  patch({ claudeAllowedTools: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })
+                  patch({
+                    claudeAllowedTools: e.target.value
+                      .split(",")
+                      .map((x) => x.trim())
+                      .filter(Boolean),
+                  })
                 }
               />
-            </div>
-          </div>
-        )}
-      </section>
+            </PrefRow>
+          )}
+        </PrefCard>
+      </PrefGroup>
+      {dialog}
     </>
   );
 }
@@ -875,6 +960,7 @@ export function MeetingsSection({ models, onError }: { models: ModelInfo[]; onEr
   const [s, setS] = useState<MeetingSettings | null>(null);
   const [cal, setCal] = useState<CalAccess | null>(null);
   const [voices, setVoices] = useState<[string, number][]>([]);
+  const { confirm, dialog } = useConfirm();
 
   useEffect(() => {
     api.getSettings().then((st) => setS(st.meetings));
@@ -889,27 +975,121 @@ export function MeetingsSection({ models, onError }: { models: ModelInfo[]; onEr
   };
 
   if (!s) return null;
+  const stts = models.filter((m) => m.kind === "stt" && m.downloaded);
+  const llms = models.filter((m) => m.kind === "llm" && m.downloaded);
   const embs = models.filter((m) => m.kind === "diarize" && m.id !== "diarize-segmentation" && m.downloaded);
+  // "" means the default speaker model (CAM++).
+  const embValue = s.embeddingModel || "diarize-embedding";
+  const langValue = s.language === null ? "same" : s.language === "" ? "auto" : s.language;
+
+  const forget = (name: string) =>
+    confirm({
+      title: `Forget ${name}'s voice?`,
+      description: "Past recordings keep their labels. New recordings won't recognize them.",
+      confirm: "Forget",
+      danger: true,
+      onConfirm: () =>
+        api
+          .deleteVoice(name)
+          .then(() => setVoices((v) => v.filter(([x]) => x !== name)))
+          .catch((e) => onError(String(e))),
+    });
 
   return (
     <>
-      <section className="sheet-section">
-        <div className="sheet-section-head">
-          <h3>starting meetings</h3>
-        </div>
-        <label className="check-row">
-          <input type="checkbox" checked={s.detectMeetings} onChange={(e) => save({ ...s, detectMeetings: e.target.checked })} />
-          offer to record when a supported meeting is detected
-        </label>
-        <p className="sheet-hint block">
-          General mic use won’t trigger a prompt. Browser calls need a recognized meeting page in the foreground and Accessibility access. Automatic detection requires macOS 14.2 or later.
-        </p>
-        <label className="check-row">
-          <input
-            type="checkbox"
+      <PrefGroup title="Models" hint="Download more in Models.">
+        <PrefCard>
+          <PrefRow label="Speech model" desc="Turns the call into a transcript.">
+            <select
+              className="select"
+              aria-label="Meeting speech model"
+              value={s.speechModel}
+              onChange={(e) => save({ ...s, speechModel: e.target.value })}
+            >
+              <option value="">Same as dictation</option>
+              {stts.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+              {s.speechModel && !stts.some((m) => m.id === s.speechModel) && (
+                <option value={s.speechModel}>{s.speechModel} (not installed)</option>
+              )}
+            </select>
+          </PrefRow>
+          <PrefRow label="Spoken language" desc="Pick one if auto-detect gets it wrong.">
+            <select
+              className="select"
+              aria-label="Meeting spoken language"
+              value={langValue}
+              onChange={(e) => {
+                const v = e.target.value;
+                save({ ...s, language: v === "same" ? null : v === "auto" ? "" : v });
+              }}
+            >
+              <option value="same">Same as dictation</option>
+              <option value="auto">Auto-detect</option>
+              {LANGUAGES.filter((l) => l.code !== "").map((l) => (
+                <option key={l.code} value={l.code}>
+                  {l.name}
+                </option>
+              ))}
+            </select>
+          </PrefRow>
+          <PrefRow label="Summary model" desc="Writes the summary and action items.">
+            <select
+              className="select"
+              aria-label="Summary model"
+              value={s.summaryModel}
+              onChange={(e) => save({ ...s, summaryModel: e.target.value })}
+            >
+              <option value="">Automatic</option>
+              {llms.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+              {s.summaryModel && !llms.some((m) => m.id === s.summaryModel) && (
+                <option value={s.summaryModel}>{s.summaryModel} (not installed)</option>
+              )}
+            </select>
+          </PrefRow>
+          <PrefRow label="Speaker detection" desc="Tells the other people on the call apart.">
+            <select
+              className="select"
+              aria-label="Speaker detection model"
+              value={embValue}
+              disabled={embs.length === 0}
+              onChange={(e) => save({ ...s, embeddingModel: e.target.value })}
+            >
+              {embs.length === 0 && <option value={embValue}>None installed</option>}
+              {embs.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+              {embs.length > 0 && !embs.some((m) => m.id === embValue) && (
+                <option value={embValue}>{embValue} (not installed)</option>
+              )}
+            </select>
+          </PrefRow>
+        </PrefCard>
+      </PrefGroup>
+
+      <PrefGroup title="Recording">
+        <PrefCard>
+          <PrefCheck
+            label="Offer to record calls"
+            desc="When Zoom, Meet, Teams or another supported call starts. Browser calls need the meeting tab in front and Accessibility access. Needs macOS 14.2 or later."
+            checked={s.detectMeetings}
+            onChange={(v) => save({ ...s, detectMeetings: v })}
+          />
+          <PrefCheck
+            label="Use my calendar"
+            desc="Names recordings and attendees from the current event."
             checked={s.useCalendar && cal === "granted"}
-            onChange={async (e) => {
-              if (!e.target.checked) return save({ ...s, useCalendar: false });
+            onChange={async (checked) => {
+              if (!checked) return save({ ...s, useCalendar: false });
               let access = cal;
               if (access !== "granted") {
                 const ok = await api.calendarRequest().catch(() => false);
@@ -919,61 +1099,40 @@ export function MeetingsSection({ models, onError }: { models: ModelInfo[]; onEr
               save({ ...s, useCalendar: access === "granted" });
             }}
           />
-          name meetings and attendees from my calendar
-        </label>
+        </PrefCard>
         {cal === "denied" && (
-          <p className="sheet-hint block warn">
-            calendar access is off — allow unsound in System Settings → Privacy &amp; Security → Calendars.
-          </p>
-        )}
-      </section>
-
-      <section className="sheet-section">
-        <div className="sheet-section-head">
-          <h3>voices</h3>
-        </div>
-        <div className="row">
-          <div className="row-info">
-            <div className="row-name">voice model</div>
-            <div className="row-desc">tells remote speakers apart as they talk</div>
-          </div>
-          <div className="row-action">
-            <select className="chip-select" value={s.embeddingModel} onChange={(e) => save({ ...s, embeddingModel: e.target.value })}>
-              <option value="">default (CAM++)</option>
-              {embs.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <p className="sheet-hint block">
-          people you name in a meeting are remembered by voice and labeled automatically next time.
-        </p>
-        {voices.length === 0 ? (
-          <p className="dim">no remembered voices yet.</p>
-        ) : (
-          voices.map(([name, n]) => (
-            <div className="row" key={name}>
-              <div className="row-info">
-                <div className="row-name">{name}</div>
-                <div className="row-desc">from {n} lines</div>
-              </div>
-              <div className="row-action">
-                <button
-                  className="quiet danger"
-                  onClick={() =>
-                    api.deleteVoice(name).then(() => setVoices((v) => v.filter(([x]) => x !== name)))
-                  }
-                >
-                  forget
-                </button>
-              </div>
+          <div className="alert warn">
+            <Icon name="alert" />
+            <div className="alert-body">
+              Calendar access is off. Allow unsound in System Settings › Privacy &amp; Security › Calendars.
             </div>
-          ))
+          </div>
         )}
-      </section>
+      </PrefGroup>
+
+      <PrefGroup
+        title="Remembered voices"
+        hint="People you name in a recording are recognized by voice and labeled next time."
+      >
+        <PrefCard>
+          {voices.length === 0 ? (
+            <div className="pref-empty">No remembered voices yet.</div>
+          ) : (
+            voices.map(([name, n]) => (
+              <PrefRow key={name} label={name} desc={`Learned from ${n} ${n === 1 ? "line" : "lines"}`}>
+                <button
+                  className="btn btn-quiet btn-sm danger"
+                  aria-label={`Forget ${name}`}
+                  onClick={() => forget(name)}
+                >
+                  Forget
+                </button>
+              </PrefRow>
+            ))
+          )}
+        </PrefCard>
+      </PrefGroup>
+      {dialog}
     </>
   );
 }

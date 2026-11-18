@@ -1,34 +1,55 @@
+import { useEffect, useId, useRef, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { openUpdates } from "./UpdateCenter";
-import { useState } from "react";
 import { api, ModelInfo, ModelKind } from "./api";
-import { DictionarySection, MicPicker, ModelLibrary, PermissionsSection, ShortcutsSection, StylesSection } from "./sections";
+import {
+  DictionarySection,
+  MicPicker,
+  ModelLibrary,
+  PermissionsSection,
+  PrefCard,
+  PrefCheck,
+  PrefGroup,
+  PrefRow,
+  ShortcutsSection,
+  StylesSection,
+} from "./sections";
 import { AssistantSection, MeetingsSection } from "./AssistantSettings";
+import { Icon, IconName, Segmented, useConfirm } from "./ui";
 
-type Section =
-  | "assistant"
-  | "meetings"
-  | "models"
-  | "shortcuts"
-  | "styles"
-  | "dictionary"
-  | "microphone"
-  | "prompt"
-  | "accessibility"
-  | "permissions"
-  | "updates";
+export type SettingsSection = "general" | "dictation" | "meetings" | "assistant" | "models";
 
-const SECTIONS: { id: Section; label: string }[] = [
-  { id: "shortcuts", label: "shortcuts" },
-  { id: "assistant", label: "assistant" },
-  { id: "meetings", label: "meetings" },
-  { id: "styles", label: "styles" },
-  { id: "dictionary", label: "dictionary" },
-  { id: "models", label: "models" },
-  { id: "microphone", label: "microphone" },
-  { id: "prompt", label: "prompt" },
-  { id: "accessibility", label: "accessibility" },
-  { id: "permissions", label: "permissions" },
-  { id: "updates", label: "updates" },
+const SECTIONS: { id: SettingsSection; label: string; icon: IconName; desc: string }[] = [
+  {
+    id: "general",
+    label: "General",
+    icon: "settings",
+    desc: "Shortcuts, microphone, permissions and updates.",
+  },
+  {
+    id: "dictation",
+    label: "Dictation",
+    icon: "mic",
+    desc: "How your speech becomes clean text.",
+  },
+  {
+    id: "meetings",
+    label: "Meetings",
+    icon: "meetings",
+    desc: "Models and options for recording calls.",
+  },
+  {
+    id: "assistant",
+    label: "Assistant",
+    icon: "sparkle",
+    desc: "What unsound does when you ask it to. Connected tools use the network only as you allow.",
+  },
+  {
+    id: "models",
+    label: "Models",
+    icon: "download",
+    desc: "Download and manage the models that run on this Mac.",
+  },
 ];
 
 const TEXT_SIZES: { label: string; value: string }[] = [
@@ -38,6 +59,8 @@ const TEXT_SIZES: { label: string; value: string }[] = [
   { label: "Larger", value: "1.4" },
   { label: "Largest", value: "1.6" },
 ];
+
+const AUTO_UPDATE_KEY = "unsound.auto-check-updates";
 
 interface Props {
   models: ModelInfo[];
@@ -53,6 +76,9 @@ interface Props {
   onClose: () => void;
   onChanged: () => void;
   onReplayOnboarding: () => void;
+  initialSection?: SettingsSection;
+  dictationCount: number;
+  onClearDictations: () => void;
 }
 
 export function SettingsSheet({
@@ -69,19 +95,381 @@ export function SettingsSheet({
   onClose,
   onChanged,
   onReplayOnboarding,
+  initialSection = "general",
+  dictationCount,
+  onClearDictations,
 }: Props) {
-  const [section, setSection] = useState<Section>("shortcuts");
+  const [section, setSection] = useState<SettingsSection>(initialSection);
   const [err, setErr] = useState<string | null>(null);
+  const titleId = useId();
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Escape closes, unless something inside (a confirm dialog, shortcut
+  // capture) already handled it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    dialogRef.current?.focus();
+  }, []);
+
+  const go = (id: SettingsSection) => {
+    setErr(null);
+    setSection(id);
+    bodyRef.current?.scrollTo(0, 0);
+  };
+
+  const current = SECTIONS.find((s) => s.id === section)!;
+
+  const body = () => {
+    switch (section) {
+      case "general":
+        return (
+          <GeneralPane
+            textScale={textScale}
+            onTextScaleChange={onTextScaleChange}
+            onReplayOnboarding={onReplayOnboarding}
+            onError={setErr}
+          />
+        );
+      case "dictation":
+        return (
+          <DictationPane
+            models={models}
+            sttId={sttId}
+            llmId={llmId}
+            onSttChange={onSttChange}
+            onLlmChange={onLlmChange}
+            prompt={prompt}
+            defaultPrompt={defaultPrompt}
+            onPromptChange={onPromptChange}
+            dictationCount={dictationCount}
+            onClearDictations={onClearDictations}
+            onOpenModels={() => go("models")}
+            onError={setErr}
+          />
+        );
+      case "meetings":
+        return <MeetingsSection models={models} onError={setErr} />;
+      case "assistant":
+        return <AssistantSection models={models} onError={setErr} onOpenShortcuts={() => go("general")} />;
+      case "models":
+        return <ModelsPane models={models} onChanged={onChanged} onError={setErr} />;
+    }
+  };
+
+  return (
+    <div className="settings-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div
+        className="settings"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        ref={dialogRef}
+      >
+        <nav className="settings-nav" aria-label="Settings sections">
+          <div className="settings-nav-title">Settings</div>
+          {SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              className="settings-nav-item"
+              aria-current={section === s.id ? "page" : undefined}
+              onClick={() => go(s.id)}
+            >
+              <Icon name={s.icon} />
+              {s.label}
+            </button>
+          ))}
+        </nav>
+        <div className="settings-pane">
+          <header className="settings-head">
+            <div className="settings-head-text">
+              <h2 className="page-title" id={titleId}>
+                {current.label}
+              </h2>
+              <p className="settings-desc">{current.desc}</p>
+            </div>
+            <button className="btn btn-quiet btn-icon" aria-label="Close settings" title="Close" onClick={onClose}>
+              <Icon name="x" />
+            </button>
+          </header>
+          <div className="settings-body" ref={bodyRef}>
+            {err && (
+              <div className="alert danger" role="alert">
+                <Icon name="alert" />
+                <div className="alert-body">{err}</div>
+                <div className="alert-actions">
+                  <button className="btn btn-quiet btn-icon btn-sm" aria-label="Dismiss" onClick={() => setErr(null)}>
+                    <Icon name="x" />
+                  </button>
+                </div>
+              </div>
+            )}
+            {body()}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── General ─────────────────────────────────────────────────────── */
+
+function GeneralPane({
+  textScale,
+  onTextScaleChange,
+  onReplayOnboarding,
+  onError,
+}: {
+  textScale: string;
+  onTextScaleChange: (v: string) => void;
+  onReplayOnboarding: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const [version, setVersion] = useState<string | null>(null);
+  const [autoCheck, setAutoCheck] = useState(() => {
+    try {
+      return localStorage.getItem(AUTO_UPDATE_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => setVersion(null));
+  }, []);
+
+  const setAuto = (on: boolean) => {
+    setAutoCheck(on);
+    try {
+      localStorage.setItem(AUTO_UPDATE_KEY, on ? "true" : "false");
+    } catch {
+      /* storage unavailable; the toggle still applies for this session */
+    }
+  };
+
+  return (
+    <>
+      <PrefGroup title="Shortcuts" hint="Work in any app. The text is typed at your cursor.">
+        <ShortcutsSection onError={onError} />
+      </PrefGroup>
+
+      <PrefGroup title="Input">
+        <PrefCard>
+          <PrefRow label="Microphone" desc="You can also switch it from the menu bar.">
+            <MicPicker />
+          </PrefRow>
+        </PrefCard>
+      </PrefGroup>
+
+      <PrefGroup title="Text size" hint="Scales transcripts, summaries and dictations.">
+        <PrefCard>
+          <div className="pref-row text-size">
+            <Segmented
+              label="Text size"
+              value={TEXT_SIZES.some((s) => s.value === textScale) ? textScale : "1"}
+              options={TEXT_SIZES}
+              onChange={onTextScaleChange}
+            />
+            <p className="text-size-preview" style={{ fontSize: `calc(15px * ${textScale})` }}>
+              The quick brown fox jumps over the lazy dog.
+            </p>
+          </div>
+        </PrefCard>
+      </PrefGroup>
+
+      <PrefGroup title="Permissions">
+        <PermissionsSection onError={onError} />
+      </PrefGroup>
+
+      <PrefGroup title="Updates">
+        <PrefCard>
+          <PrefRow
+            label="unsound"
+            desc={version ? `Version ${version}` : "Checking version…"}
+          >
+            <button className="btn btn-secondary btn-sm" onClick={openUpdates}>
+              Check for updates…
+            </button>
+          </PrefRow>
+          <PrefCheck
+            label="Check for updates automatically"
+            desc="Contacts GitHub to look for new versions. You choose when to install."
+            checked={autoCheck}
+            onChange={setAuto}
+          />
+        </PrefCard>
+      </PrefGroup>
+
+      <PrefGroup title="Help">
+        <PrefCard>
+          <PrefRow label="Welcome guide" desc="Walk through setup again.">
+            <button className="btn btn-secondary btn-sm" onClick={onReplayOnboarding}>
+              Show welcome guide
+            </button>
+          </PrefRow>
+        </PrefCard>
+      </PrefGroup>
+    </>
+  );
+}
+
+/* ── Dictation ───────────────────────────────────────────────────── */
+
+function DictationPane({
+  models,
+  sttId,
+  llmId,
+  onSttChange,
+  onLlmChange,
+  prompt,
+  defaultPrompt,
+  onPromptChange,
+  dictationCount,
+  onClearDictations,
+  onOpenModels,
+  onError,
+}: {
+  models: ModelInfo[];
+  sttId: string;
+  llmId: string;
+  onSttChange: (id: string) => void;
+  onLlmChange: (id: string) => void;
+  prompt: string;
+  defaultPrompt: string;
+  onPromptChange: (p: string) => void;
+  dictationCount: number;
+  onClearDictations: () => void;
+  onOpenModels: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const { confirm, dialog } = useConfirm();
+  const promptId = useId();
+  const sttModels = models.filter((m) => m.kind === "stt" && m.downloaded);
+  const llmModels = models.filter((m) => m.kind === "llm" && m.downloaded);
+
+  const activePicker = (
+    label: string,
+    desc: string,
+    value: string,
+    onChange: (id: string) => void,
+    options: ModelInfo[],
+  ) => (
+    <PrefRow label={label} desc={desc}>
+      {options.length === 0 ? (
+        <button className="btn btn-secondary btn-sm" onClick={onOpenModels}>
+          Download a model
+        </button>
+      ) : (
+        <select className="select" aria-label={label} value={value} onChange={(e) => onChange(e.target.value)}>
+          {!options.some((m) => m.id === value) && <option value="">Choose…</option>}
+          {options.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+      )}
+    </PrefRow>
+  );
+
+  return (
+    <>
+      <PrefGroup title="Models">
+        <PrefCard>
+          {activePicker("Speech model", "Turns your speech into text.", sttId, onSttChange, sttModels)}
+          {activePicker("Cleanup model", "Fixes punctuation and removes filler words.", llmId, onLlmChange, llmModels)}
+        </PrefCard>
+      </PrefGroup>
+
+      <PrefGroup title="Writing styles" hint="Cleaned-up text matches the samples in your default style.">
+        <StylesSection onError={onError} />
+      </PrefGroup>
+
+      <PrefGroup title="Dictionary" hint="Names and words unsound should get right. Used by both models.">
+        <DictionarySection onError={onError} />
+      </PrefGroup>
+
+      <PrefGroup title="Custom instructions">
+        <label className="visually-hidden" htmlFor={promptId}>
+          Custom instructions
+        </label>
+        <textarea
+          id={promptId}
+          className="textarea"
+          placeholder="Added to every clean up. For example: never use em dashes; spell it “colour”; keep numbers as digits."
+          value={prompt}
+          onChange={(e) => onPromptChange(e.target.value)}
+          rows={5}
+          spellCheck={false}
+        />
+        <details className="pref-disclosure">
+          <summary>
+            <Icon name="chevronRight" />
+            View built-in instructions
+          </summary>
+          <pre className="builtin-prompt">{defaultPrompt}</pre>
+        </details>
+      </PrefGroup>
+
+      <PrefGroup title="Data">
+        <PrefCard>
+          <PrefRow
+            label="Dictations"
+            desc={`${dictationCount} ${dictationCount === 1 ? "dictation" : "dictations"} saved on this Mac.`}
+          >
+            <button
+              className="btn btn-quiet btn-sm danger"
+              disabled={dictationCount === 0}
+              onClick={() =>
+                confirm({
+                  title: `Delete all ${dictationCount} dictations?`,
+                  description: "They're removed from this Mac. This can't be undone.",
+                  confirm: "Delete all",
+                  danger: true,
+                  onConfirm: onClearDictations,
+                })
+              }
+            >
+              Delete all dictations…
+            </button>
+          </PrefRow>
+        </PrefCard>
+      </PrefGroup>
+      {dialog}
+    </>
+  );
+}
+
+/* ── Models ──────────────────────────────────────────────────────── */
+
+function ModelsPane({
+  models,
+  onChanged,
+  onError,
+}: {
+  models: ModelInfo[];
+  onChanged: () => void;
+  onError: (msg: string | null) => void;
+}) {
   const [addOpen, setAddOpen] = useState(false);
   const [customName, setCustomName] = useState("");
   const [customUrl, setCustomUrl] = useState("");
   const [customKind, setCustomKind] = useState<ModelKind>("llm");
-
-  const sttModels = models.filter((m) => m.kind === "stt" && m.downloaded);
-  const llmModels = models.filter((m) => m.kind === "llm" && m.downloaded);
+  const id = useId();
 
   const addCustom = async () => {
-    setErr(null);
+    if (!customUrl.trim()) return;
+    onError(null);
     try {
       await api.addCustomModel(
         customName.trim() || customUrl.split("/").pop() || "custom",
@@ -93,253 +481,67 @@ export function SettingsSheet({
       setAddOpen(false);
       onChanged();
     } catch (e) {
-      setErr(String(e));
-    }
-  };
-
-  const activePicker = (
-    label: string,
-    value: string,
-    onChange: (id: string) => void,
-    options: ModelInfo[],
-  ) => (
-    <div className="row">
-      <div className="row-info">
-        <div className="row-name">{label}</div>
-      </div>
-      <div className="row-action">
-        <select
-          className="chip-select"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          disabled={options.length === 0}
-        >
-          {options.length === 0 && <option value="">none installed</option>}
-          {options.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name}
-            </option>
-          ))}
-        </select>
-      </div>
-    </div>
-  );
-
-  const body = () => {
-    switch (section) {
-      case "assistant":
-        return <AssistantSection models={models} onError={setErr} onOpenShortcuts={() => setSection("shortcuts")} />;
-      case "meetings":
-        return <MeetingsSection models={models} onError={setErr} />;
-      case "models":
-        return (
-          <>
-            <section className="sheet-section">
-              <div className="sheet-section-head">
-                <h3>active models</h3>
-                <span className="sheet-hint">which installed model each stage uses</span>
-              </div>
-              {activePicker("voice → text", sttId, onSttChange, sttModels)}
-              {activePicker("text cleanup", llmId, onLlmChange, llmModels)}
-            </section>
-            <ModelLibrary models={models} onChanged={onChanged} onError={setErr} />
-            <section className="sheet-section">
-              {addOpen ? (
-                <div className="add-form">
-                  <div className="add-row">
-                    <select
-                      value={customKind}
-                      onChange={(e) => setCustomKind(e.target.value as ModelKind)}
-                    >
-                      <option value="stt">voice (GGML)</option>
-                      <option value="llm">cleanup (GGUF)</option>
-                    </select>
-                    <input
-                      placeholder="display name (optional)"
-                      value={customName}
-                      onChange={(e) => setCustomName(e.target.value)}
-                    />
-                  </div>
-                  <input
-                    placeholder="direct download URL, e.g. https://huggingface.co/…/resolve/main/model.gguf"
-                    value={customUrl}
-                    onChange={(e) => setCustomUrl(e.target.value)}
-                  />
-                  <div className="add-row">
-                    <button className="quiet accent" disabled={!customUrl.trim()} onClick={addCustom}>
-                      add model
-                    </button>
-                    <button className="quiet" onClick={() => setAddOpen(false)}>
-                      cancel
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <button className="quiet add-btn" onClick={() => setAddOpen(true)}>
-                  + add a custom model by URL
-                </button>
-              )}
-            </section>
-          </>
-        );
-      case "shortcuts":
-        return (
-          <section className="sheet-section">
-            <div className="sheet-section-head">
-              <h3>global shortcuts</h3>
-              <span className="sheet-hint">dictate into any app; the text lands at your cursor</span>
-            </div>
-            <ShortcutsSection onError={setErr} />
-          </section>
-        );
-      case "styles":
-        return (
-          <section className="sheet-section">
-            <div className="sheet-section-head">
-              <h3>writing styles</h3>
-              <span className="sheet-hint">refined text imitates the samples of the active style</span>
-            </div>
-            <StylesSection onError={setErr} />
-          </section>
-        );
-      case "dictionary":
-        return (
-          <section className="sheet-section">
-            <div className="sheet-section-head">
-              <h3>personal dictionary</h3>
-              <span className="sheet-hint">corrections that bias recognition and cleanup</span>
-            </div>
-            <DictionarySection onError={setErr} />
-          </section>
-        );
-      case "microphone":
-        return (
-          <section className="sheet-section">
-            <div className="sheet-section-head">
-              <h3>microphone</h3>
-              <span className="sheet-hint">also switchable from the main window and the menu bar</span>
-            </div>
-            <div className="row">
-              <div className="row-info">
-                <div className="row-name">input source</div>
-              </div>
-              <div className="row-action">
-                <MicPicker />
-              </div>
-            </div>
-          </section>
-        );
-      case "prompt":
-        return (
-          <>
-            <section className="sheet-section">
-              <div className="sheet-section-head">
-                <h3>system prompt</h3>
-                <span className="sheet-hint">what the cleanup model is told — fixed</span>
-              </div>
-              <textarea className="prompt-editor readonly" value={defaultPrompt} readOnly rows={12} />
-            </section>
-            <section className="sheet-section">
-              <div className="sheet-section-head">
-                <h3>your additions</h3>
-                <span className="sheet-hint">appended to the system prompt on every refine</span>
-              </div>
-              <textarea
-                className="prompt-editor"
-                placeholder="e.g. never use em dashes; spell it “colour”; keep numbers as digits"
-                value={prompt}
-                onChange={(e) => onPromptChange(e.target.value)}
-                rows={6}
-                spellCheck={false}
-              />
-            </section>
-          </>
-        );
-      case "accessibility":
-        return (
-          <section className="sheet-section">
-            <div className="sheet-section-head">
-              <h3>text size</h3>
-              <span className="sheet-hint">scales the transcript and refined text</span>
-            </div>
-            <div className="size-row">
-              {TEXT_SIZES.map((s) => (
-                <button
-                  key={s.value}
-                  className={"size-btn" + (textScale === s.value ? " on" : "")}
-                  onClick={() => onTextScaleChange(s.value)}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
-            <div
-              className="size-preview"
-              style={{ fontSize: `calc(15.5px * ${textScale})` }}
-            >
-              The quick brown fox jumps over the lazy dog.
-            </div>
-          </section>
-        );
-      case "updates":
-        return <section className="sheet-section">
-          <h3>Keep unsound up to date</h3>
-          <p>Check for new versions, read release notes, and install signed updates. You choose when to restart.</p>
-          <button className="quiet accent" onClick={openUpdates}>Check for updates…</button>
-        </section>;
-      case "permissions":
-        return (
-          <section className="sheet-section">
-            <div className="sheet-section-head">
-              <h3>permissions</h3>
-              <span className="sheet-hint">what macOS needs to allow</span>
-            </div>
-            <PermissionsSection onError={setErr} />
-          </section>
-        );
+      onError(String(e));
     }
   };
 
   return (
-    <div className="sheet-overlay" onClick={onClose}>
-      <div className="sheet settings" onClick={(e) => e.stopPropagation()}>
-        <nav className="settings-nav">
-          <div className="settings-nav-title">settings</div>
-          {SECTIONS.map((s) => (
-            <button
-              key={s.id}
-              className={"settings-nav-item" + (section === s.id ? " on" : "")}
-              onClick={() => {
-                setErr(null);
-                setSection(s.id);
-              }}
-            >
-              {s.label}
+    <>
+      <ModelLibrary models={models} onChanged={onChanged} onError={onError} />
+      <PrefGroup title="Custom models">
+        {addOpen ? (
+          <form
+            className="card add-model"
+            onSubmit={(e) => {
+              e.preventDefault();
+              addCustom();
+            }}
+          >
+            <div className="add-model-grid">
+              <label className="field">
+                <span className="field-label">Type</span>
+                <select
+                  className="select"
+                  value={customKind}
+                  onChange={(e) => setCustomKind(e.target.value as ModelKind)}
+                >
+                  <option value="stt">Speech model (GGML)</option>
+                  <option value="llm">Cleanup model (GGUF)</option>
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">Name (optional)</span>
+                <input className="input" value={customName} onChange={(e) => setCustomName(e.target.value)} />
+              </label>
+            </div>
+            <label className="field" htmlFor={`${id}-url`}>
+              <span className="field-label">Download URL</span>
+            </label>
+            <input
+              id={`${id}-url`}
+              className="input"
+              placeholder="https://huggingface.co/…/resolve/main/model.gguf"
+              value={customUrl}
+              onChange={(e) => setCustomUrl(e.target.value)}
+              autoFocus
+            />
+            <div className="add-model-actions">
+              <button type="button" className="btn btn-quiet" onClick={() => setAddOpen(false)}>
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={!customUrl.trim()}>
+                Add model
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div>
+            <button className="btn btn-secondary" onClick={() => setAddOpen(true)}>
+              Add model from URL…
             </button>
-          ))}
-          <div className="spacer" />
-          <button className="settings-nav-item" onClick={onReplayOnboarding}>
-            welcome guide
-          </button>
-        </nav>
-        <div className="settings-pane">
-          <header className="sheet-head">
-            <h2>{SECTIONS.find((s) => s.id === section)?.label}</h2>
-            <span className="sheet-note">
-              {section === "assistant"
-                ? "connected tools use the network only as configured and approved"
-                : "models and meeting content stay local; update checks contact GitHub"}
-            </span>
-            <button className="quiet" onClick={onClose}>
-              close ✕
-            </button>
-          </header>
-          <div className="sheet-body">
-            {body()}
-            {err && <div className="sheet-error">{err}</div>}
           </div>
-        </div>
-      </div>
-    </div>
+        )}
+      </PrefGroup>
+    </>
   );
 }

@@ -1,0 +1,193 @@
+/* ── onboarding: four steps in a centered frame ────────────────── */
+
+.ob-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--rail);
+  overflow: auto;
+}
+
+.ob-frame {
+  display: flex;
+  flex-direction: column;
+  width: min(600px, 100%);
+  max-height: 100%;
+  border-radius: var(--r-xl);
+  background: var(--paper);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: pop-in 0.18s ease-out;
+}
+
+.ob-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 40px 40px 28px;
+}
+
+.ob-step {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ob-welcome {
+  align-items: center;
+  text-align: center;
+  padding: 24px 0 8px;
+}
+
+.ob-welcome .logo {
+  margin-bottom: 12px;
+  border-radius: 14px;
+}
+
+.ob-title {
+  font-size: 24px;
+  line-height: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.ob-lede {
+  max-width: 420px;
+  font-size: 16px;
+  line-height: 24px;
+  color: var(--ink);
+}
+
+.ob-text {
+  font-size: 14px;
+  line-height: 21px;
+  color: var(--muted);
+}
+
+.ob-note {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--muted);
+}
+
+.ob-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ob-welcome .ob-actions {
+  justify-content: center;
+  margin-top: 20px;
+}
+
+.ob-primary {
+  height: 36px;
+  padding: 0 18px;
+  font-size: 14px;
+}
+
+/* Cards sit one step above the frame. */
+.ob-step .pref-card {
+  background: var(--raised);
+}
+
+.ob-models {
+  margin-top: 4px;
+}
+
+.ob-total {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.ob-total .tabular {
+  color: var(--ink);
+}
+
+.ob-library {
+  margin-top: 8px;
+}
+
+.ob-library .pref-group + .pref-group {
+  margin-top: 20px;
+}
+
+.ob-step > .alert {
+  margin-top: 4px;
+}
+
+/* ── footer: step dots + skip ── */
+.ob-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  padding: 10px 24px;
+  border-top: 1px solid var(--line);
+}
+
+.ob-dots {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* A 20px hit area around a small visible dot; the current step is wider. */
+.ob-dot {
+  display: grid;
+  place-items: center;
+  height: 20px;
+  min-width: 16px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 99px;
+  background: transparent;
+}
+
+.ob-dot::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  background: var(--line-strong);
+  transition: width 0.18s, background 0.18s;
+}
+
+.ob-dot:hover::before {
+  background: var(--faint);
+}
+
+.ob-dot[aria-current="step"]::before {
+  width: 20px;
+  background: var(--accent);
+}
+
+@media (max-width: 560px) {
+  .ob-overlay {
+    padding: 0;
+  }
+
+  .ob-frame {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    border-radius: 0;
+  }
+
+  .ob-body {
+    padding: 28px 20px 20px;
+  }
+}

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { formatBytes, ModelInfo } from "./api";
 import { ModelLibrary, ModelRow, PermissionsSection, ShortcutsSection, useDownloads } from "./sections";
+import { Icon, Logo } from "./ui";
 
 interface Props {
   models: ModelInfo[];
@@ -15,7 +16,9 @@ export function Onboarding({ models, onChanged, onDone }: Props) {
   const { progress, start } = useDownloads(setErr);
 
   const recommended = useMemo(() => models.filter((m) => m.recommended), [models]);
-  const recommendedSize = recommended.reduce((n, m) => n + m.sizeBytes, 0);
+  const missing = recommended.filter((m) => !m.downloaded);
+  const missingSize = missing.reduce((n, m) => n + m.sizeBytes, 0);
+  const totalSize = recommended.reduce((n, m) => n + m.sizeBytes, 0);
   const sttReady = models.some((m) => m.kind === "stt" && m.downloaded);
   const llmReady = models.some((m) => m.kind === "llm" && m.downloaded);
   const ready = sttReady && llmReady;
@@ -23,110 +26,127 @@ export function Onboarding({ models, onChanged, onDone }: Props) {
 
   const downloadRecommended = () => {
     setErr(null);
-    recommended.filter((m) => !m.downloaded).forEach((m) => start(m.id));
+    missing.forEach((m) => start(m.id));
   };
 
+  const error = err && (
+    <div className="alert danger" role="alert">
+      <Icon name="alert" />
+      <div className="alert-body">{err}</div>
+    </div>
+  );
+
   const steps = [
-    /* ── 0 · private by design ── */
-    <div className="ob-step" key="welcome">
-      <div className="ob-mark">
-        <img src="/unsound.svg" alt="" className="ob-logo" />
-        unsound
-      </div>
-      <h1 className="ob-title">your voice, into clean text.<br />entirely on this Mac.</h1>
-      <p className="ob-text">
-        Speak — unsound writes it down, then quietly tidies it up: punctuation, paragraphs, the
-        "um"s and false starts gone.
-      </p>
-      <p className="ob-text">
-        Transcription and notes run on your machine, without an account. Your content stays
-        here unless you share it through a connected tool. Model downloads and optional
-        update checks use the network.
-      </p>
+    /* 1 · welcome */
+    <div className="ob-step ob-welcome" key="welcome">
+      <Logo size={56} />
+      <h1 className="ob-title">Welcome to unsound</h1>
+      <p className="ob-lede">Dictate into any app and take notes on your calls. Everything runs on this Mac.</p>
+      <p className="ob-text">Setup takes about two minutes.</p>
       <div className="ob-actions">
-        <button className="ob-primary" onClick={() => setStep(1)}>
-          set up →
+        <button className="btn btn-primary ob-primary" onClick={() => setStep(1)} autoFocus>
+          Get started
         </button>
       </div>
     </div>,
 
-    /* ── 1 · models ── */
+    /* 2 · models */
     <div className="ob-step" key="models">
-      <h1 className="ob-title">two small models do the work</h1>
-      <p className="ob-text">
-        A <b>voice model</b> (Whisper) turns speech into words — most understand ~99 languages,
-        and there are English-only versions that are a touch sharper if that's all you speak. A{" "}
-        <b>text model</b> cleans the transcript — language coverage varies by model, so if you
-        dictate in other languages, pick one that speaks them (Qwen covers ~29, Gemma 3 covers 140+).
-      </p>
-      {!ready && (
-        <div className="ob-recommended">
-          {recommended.map((m) => (
-            <ModelRow key={m.id} model={m} progress={progress[m.id]} onDownload={start} />
-          ))}
+      <h1 className="ob-title">Download models</h1>
+      <p className="ob-text">One-time downloads. Nothing you say leaves this Mac.</p>
+      <div className="card pref-card ob-models">
+        {recommended.map((m) => (
+          <ModelRow key={m.id} model={m} progress={progress[m.id]} onDownload={start} />
+        ))}
+        <div className="ob-total">
+          <span>Total</span>
+          <span className="tabular">{formatBytes(totalSize)}</span>
         </div>
-      )}
+      </div>
+      <p className="ob-note">
+        Meeting notes also need speaker detection and voice activity detection. You can download those later from
+        the Meetings screen.
+      </p>
       <div className="ob-actions">
-        {ready ? (
-          <button className="ob-primary" onClick={() => setStep(2)}>
-            models ready →
+        {ready && !downloading ? (
+          <button className="btn btn-primary ob-primary" onClick={() => setStep(2)}>
+            Continue
           </button>
         ) : (
-          <button className="ob-primary" onClick={downloadRecommended} disabled={downloading}>
-            {downloading ? "downloading…" : `download recommended (${formatBytes(recommendedSize)})`}
+          <button
+            className="btn btn-primary ob-primary"
+            onClick={downloadRecommended}
+            disabled={downloading || missing.length === 0}
+          >
+            {downloading ? "Downloading…" : `Download ${formatBytes(missingSize)}`}
           </button>
         )}
-        {!ready && (
-          <button className="quiet" onClick={() => setBrowse((b) => !b)}>
-            {browse ? "hide the full list" : "or choose your own"}
-          </button>
-        )}
+        <button className="btn btn-quiet" onClick={() => setBrowse((b) => !b)} aria-expanded={browse}>
+          {browse ? "Hide model list" : "Choose models myself"}
+        </button>
       </div>
-      {browse && !ready && (
+      {browse && (
         <div className="ob-library">
           <ModelLibrary models={models} onChanged={onChanged} onError={setErr} compact />
         </div>
       )}
-      {err && <div className="sheet-error">{err}</div>}
+      {error}
     </div>,
 
-    /* ── 2 · shortcut & permissions ── */
-    <div className="ob-step" key="shortcut">
-      <h1 className="ob-title">dictate into any app</h1>
-      <p className="ob-text">
-        Two ways to talk, in any app: <b>hands-free</b> — press the shortcut to start, again to
-        stop — or <b>push to talk</b> — hold it, speak, let go. Either way the cleaned-up text is
-        typed right where your cursor is. macOS needs your okay for two things below.
-      </p>
-      <ShortcutsSection onError={setErr} />
+    /* 3 · permissions */
+    <div className="ob-step" key="permissions">
+      <h1 className="ob-title">Allow access</h1>
+      <p className="ob-text">macOS asks once for each.</p>
       <PermissionsSection onError={setErr} />
       <div className="ob-actions">
-        <button className="ob-primary" onClick={onDone}>
-          start using unsound →
+        <button className="btn btn-primary ob-primary" onClick={() => setStep(3)}>
+          Continue
         </button>
       </div>
-      {err && <div className="sheet-error">{err}</div>}
+      {error}
+    </div>,
+
+    /* 4 · shortcut */
+    <div className="ob-step" key="shortcut">
+      <h1 className="ob-title">Dictate anywhere</h1>
+      <p className="ob-text">
+        Press your shortcut in any app, speak, then press it again. The cleaned-up text is typed at your cursor.
+      </p>
+      <ShortcutsSection onError={setErr} />
+      <p className="ob-note">For calls, unsound offers to record when Zoom, Meet or Teams starts.</p>
+      <div className="ob-actions">
+        <button className="btn btn-primary ob-primary" onClick={onDone}>
+          Start using unsound
+        </button>
+      </div>
+      {error}
     </div>,
   ];
 
   return (
     <div className="ob-overlay">
-      <div className="ob-frame">
-        {steps[step]}
+      <div className="ob-frame" role="dialog" aria-modal="true" aria-label="Welcome to unsound">
+        <div className="ob-body">{steps[step]}</div>
         <div className="ob-foot">
-          <div className="ob-dots">
+          <div className="ob-dots" role="group" aria-label="Setup steps">
             {steps.map((_, i) => (
               <button
                 key={i}
-                className={"ob-dot" + (i === step ? " on" : "")}
-                onClick={() => setStep(i)}
-                aria-label={`step ${i + 1}`}
+                className="ob-dot"
+                aria-current={i === step ? "step" : undefined}
+                onClick={() => {
+                  setErr(null);
+                  setStep(i);
+                }}
+                aria-label={`Step ${i + 1} of ${steps.length}`}
               />
             ))}
           </div>
-          <button className="quiet" onClick={onDone}>
-            skip — set up later in settings
-          </button>
+          {step < steps.length - 1 && (
+            <button className="btn btn-quiet" onClick={onDone}>
+              Skip for now
+            </button>
+          )}
         </div>
       </div>
     </div>
