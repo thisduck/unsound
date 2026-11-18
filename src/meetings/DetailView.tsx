@@ -1,12 +1,13 @@
 import { useNotesSave } from "./useNotesSave";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ActionItem, api, clock, Meeting, Segment, Task } from "../api";
+import { ActionItem, api, clock, Meeting, MeetingWork, Segment, Task } from "../api";
 import { ActionRow } from "./ActionRow";
 import { ResearchPanel } from "./ResearchPanel";
 import { Markdown } from "../Markdown";
-import { elapsed, meetingMarkdown, speakerClass, speakerLabel } from "./format";
+import { elapsed, meetingMarkdown, speakerLabel } from "./format";
 import { mergeTask, TaskCard } from "./TaskCard";
 import { usePlayer } from "./usePlayer";
+import { Icon, MoreMenu, Spinner, useConfirm } from "../ui";
 
 interface Props {
   meeting: Meeting;
@@ -24,6 +25,9 @@ interface Props {
   diarizeReady: boolean;
   /// Jump here once opened (from a search hit).
   focusMs?: number | null;
+  /// Transcription still in progress for this meeting, if any.
+  work?: MeetingWork;
+  onRetryWork?: () => void;
 }
 
 /// A single word/phrase edit, for offering "fix everywhere": the changed run
@@ -61,8 +65,9 @@ export function DetailView(p: Props) {
   const [wholeSpeaker, setWholeSpeaker] = useState(false);
   const [speakerSaving, setSpeakerSaving] = useState(false);
   const [rememberVoice, setRememberVoice] = useState(true);
+  const [tab, setTab] = useState<"summary" | "transcript" | "notes">(p.focusMs != null ? "transcript" : "summary");
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
-  const summarySection = useRef<HTMLElement>(null);
+  const { confirm, dialog } = useConfirm();
 
   useEffect(() => {
     if (notesSave.saving || notesSave.error) return;
@@ -86,7 +91,8 @@ export function DetailView(p: Props) {
     if (seg) lineRefs.current.get(seg.id ?? -1)?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
   const jump = (ms: number) => {
-    scrollTo(ms);
+    setTab("transcript");
+    setTimeout(() => scrollTo(ms), 30);
     if (m.hasAudio) player.play(ms);
   };
 
@@ -144,7 +150,7 @@ export function DetailView(p: Props) {
       const remembered = await api.setSpeakerName(m.id, speaker, name, rememberVoice);
       const updated = await api.getMeeting(m.id);
       if (updated) p.onMeeting(updated);
-      if (rememberVoice && name.trim() && !remembered) setSpeakerError("Name saved. More clear speech is needed before this voice can be remembered.");
+      if (rememberVoice && name.trim() && !remembered) setSpeakerError("Name saved. unsound needs more clear speech before it can recognize this voice.");
     } catch (e) {
       setSpeakerError(String(e));
       // Naming may have succeeded even when voice enrollment could not finish.
@@ -179,155 +185,167 @@ export function DetailView(p: Props) {
   const marks = m.marks ?? [];
   const summaryText = p.liveSummary ?? m.summary;
   const visibleTasks = p.tasks.filter((t) => t.status !== "dismissed" || t.error);
+  const canWrite = !!p.llmId && m.segments.length > 0 && !p.work;
+  const canRedetect = p.diarizeReady && !!m.hasAudio && m.segments.some((s) => s.source === "system");
 
-  return (
-    <div className="meet-detail">
-      <div className="meet-detail-head">
-        <button className="quiet" onClick={p.onBack}>
-          ← all meetings
-        </button>
-        <input
-          className="meet-title-input"
-          value={m.title}
-          placeholder="Untitled meeting"
-          onChange={(e) => p.onMeeting({ ...m, title: e.target.value })}
-          onBlur={() => api.renameMeeting(m.id, m.title).catch((e) => console.error(e))}
-        />
-        <span className="spacer" />
-        <button
-          className="quiet"
-          onClick={() => {
-            navigator.clipboard.writeText(meetingMarkdown(m));
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
-          }}
-        >
-          {copied ? "copied ✓" : "copy as markdown"}
-        </button>
-        <button className="quiet danger" onClick={p.onDelete}>
-          delete
-        </button>
-      </div>
-      <div className="meet-detail-meta">
-        {new Date(m.startedAt).toLocaleString()} · {elapsed(m.startedAt, m.endedAt)}
-        {m.attendees && m.attendees.length > 0 && <> · with {m.attendees.join(", ")}</>}
-      </div>
+  const copyMarkdown = () => {
+    navigator.clipboard.writeText(meetingMarkdown(m));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  const askDelete = () =>
+    confirm({
+      title: `Delete “${m.title || "Untitled meeting"}”?`,
+      description: "The transcript, summary, notes and audio are removed from this Mac. This can't be undone.",
+      confirm: "Delete meeting",
+      danger: true,
+      onConfirm: p.onDelete,
+    });
 
-      <section className="meet-section" ref={summarySection}>
-        <div className="meet-section-head">
-          <h3>summary</h3>
-          <span className="spacer" />
-          {!p.summarizing && summaryText && (
-            <button className="quiet" onClick={() => setEditingSummary((e) => !e)}>
-              {editingSummary ? "done editing" : "edit"}
-            </button>
-          )}
-          {p.llmId && m.segments.length > 0 && (
-            <button className="quiet" disabled={p.summarizing} onClick={p.onSummarize}>
-              {p.summarizing ? "writing…" : summaryText ? "regenerate" : "write notes"}
-            </button>
+  const addItem = () => {
+    if (!newItem.trim() || adding) return;
+    setAdding(true);
+    setItemError("");
+    void saveItem({
+      id: 0,
+      meetingId: m.id,
+      text: newItem.trim(),
+      owner: "",
+      due: "",
+      atMs: null,
+      done: false,
+      manual: true,
+      createdAt: "",
+      meetingTitle: "",
+    })
+      .then(() => setNewItem(""))
+      .catch((e) => setItemError(String(e)))
+      .finally(() => setAdding(false));
+  };
+
+  const summaryTab = (
+    <>
+      {p.work && (
+        <div className={"alert " + (p.work.state === "finishing" ? "" : "danger")} role="status">
+          {p.work.state === "finishing" ? <Spinner /> : <Icon name="alert" />}
+          <span className="alert-body">
+            {p.work.state === "finishing"
+              ? `Finishing the transcript${p.work.pending ? ` · ${p.work.pending} part${p.work.pending === 1 ? "" : "s"} left` : ""}. The summary is written when it's done.`
+              : "Transcription stopped. Your audio is saved."}
+          </span>
+          {p.work.state !== "finishing" && p.onRetryWork && (
+            <div className="alert-actions"><button className="btn btn-secondary btn-sm" onClick={p.onRetryWork}>Try again</button></div>
           )}
         </div>
-        {m.summaryStale && m.summary && !p.summarizing && <p className="meet-hint meet-warning" role="status">Transcript, speakers, or notes changed. Regenerate to update this summary and its action items.</p>}
+      )}
+      {m.summaryStale && m.summary && !p.summarizing && (
+        <div className="alert warn" role="status">
+          <Icon name="info" />
+          <span className="alert-body">The transcript, speakers or your notes changed since this summary was written.</span>
+          {canWrite && <div className="alert-actions"><button className="btn btn-secondary btn-sm" onClick={p.onSummarize}>Update summary</button></div>}
+        </div>
+      )}
+      <section className="summary" aria-label="Summary">
         {p.summarizing && !p.liveSummary ? (
-          <p className="dim">writing notes and checking transcript sources…</p>
+          <p className="summary-busy" role="status"><Spinner /> Writing the summary and checking it against the transcript…</p>
         ) : !summaryText ? (
-          <p className="dim">
-            {m.segments.length ? "no summary yet." : "no transcript for this meeting."}
-            {!p.llmId && m.segments.length > 0 && " download a language model to write notes."}
-          </p>
+          <div className="empty-state compact">
+            {m.segments.length === 0 ? (
+              <p>This meeting has no transcript.</p>
+            ) : p.llmId ? (
+              <>
+                <p>No summary yet.</p>
+                {canWrite && <button className="btn btn-primary" onClick={p.onSummarize}>Write summary</button>}
+              </>
+            ) : (
+              <p>Writing a summary needs a summary model. Download one in Settings → Models.</p>
+            )}
+          </div>
         ) : editingSummary ? (
-          <textarea
-            className="meet-notes meet-summary"
-            key={"sum-" + m.id}
-            defaultValue={m.summary}
-            onBlur={(e) => {
-              const text = e.target.value;
-              if (text !== m.summary) {
-                api.setMeetingSummary(m.id, text).catch(console.error);
-                p.onMeeting({ ...m, summary: text, summaryStale: false });
-              }
-            }}
-          />
+          <>
+            <textarea
+              className="textarea summary-editor"
+              key={"sum-" + m.id}
+              aria-label="Edit summary"
+              defaultValue={m.summary}
+              autoFocus
+              onBlur={(e) => {
+                const text = e.target.value;
+                if (text !== m.summary) {
+                  api.setMeetingSummary(m.id, text).catch(console.error);
+                  p.onMeeting({ ...m, summary: text, summaryStale: false });
+                }
+              }}
+            />
+            <div className="row-actions"><button className="btn btn-secondary btn-sm" onClick={() => setEditingSummary(false)}>Done editing</button></div>
+          </>
         ) : (
-          <div className="meet-prose">
-            {/* The section already says "summary"; drop the model's own heading. */}
+          <div className="summary-prose">
+            {/* The tab already says "Summary"; drop the model's own heading. */}
             <Markdown text={summaryText.replace(/^\s*#{1,6}\s*summary\s*\n/i, "")} onTime={jump} />
             {p.summarizing && <span className="caret" />}
           </div>
         )}
       </section>
 
-      <section className="meet-section">
-        <h3>action items</h3>
-        {items.length === 0 && <p className="dim">none yet.</p>}
-        <div className="items">
-          {items.map((it) => <ActionRow key={it.id} item={it} onSave={saveItem} onSource={() => it.atMs != null && jump(it.atMs)} />)}
+      <section aria-label="Action items">
+        <div className="section-label">
+          Action items <span className="count">{items.filter((i) => !i.done && !i.ignored).length || ""}</span>
         </div>
-        {itemError && <p className="meet-error" role="alert">{itemError}</p>}
-        <input
-          disabled={adding}
-          className="item-add"
-          value={newItem}
-          placeholder="+ add an action item"
-          onChange={(e) => setNewItem(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && newItem.trim() && !adding) {
-              setAdding(true); setItemError("");
-              void saveItem({
-                id: 0,
-                meetingId: m.id,
-                text: newItem.trim(),
-                owner: "",
-                due: "",
-                atMs: null,
-                done: false,
-                manual: true,
-                createdAt: "",
-                meetingTitle: "",
-              }).then(() => setNewItem("")).catch(e => setItemError(String(e))).finally(() => setAdding(false));
-            }
-          }}
-        />
+        <div className="card item-list">
+          {items.length === 0 && <p className="item-list-empty">No action items. Add one, or they appear when the summary is written.</p>}
+          {items.map((it) => (
+            <ActionRow key={it.id} item={it} onSave={saveItem} onSource={it.atMs != null ? () => jump(it.atMs!) : undefined} sourceLabel={it.atMs != null ? clock(it.atMs) : undefined} />
+          ))}
+          <form className="item-add" onSubmit={(e) => { e.preventDefault(); addItem(); }}>
+            <Icon name="check" />
+            <input
+              disabled={adding}
+              aria-label="Add an action item"
+              value={newItem}
+              placeholder="Add an action item"
+              onChange={(e) => setNewItem(e.target.value)}
+            />
+          </form>
+        </div>
+        {itemError && <div className="alert danger" role="alert"><span className="alert-body">{itemError}</span></div>}
       </section>
 
       {visibleTasks.length > 0 && (
-        <section className="meet-section">
-          <h3>requests</h3>
-          {visibleTasks.map((t) => (
-            <TaskCard key={t.id} task={t} onTime={jump} onChange={(nt) => p.onTasks((l) => mergeTask(l, nt))} />
-          ))}
+        <section aria-label="Requests">
+          <div className="section-label">Requests <span className="count">{visibleTasks.length}</span></div>
+          <div className="stack">
+            {visibleTasks.map((t) => (
+              <TaskCard key={t.id} task={t} onTime={jump} onChange={(nt) => p.onTasks((l) => mergeTask(l, nt))} />
+            ))}
+          </div>
         </section>
       )}
 
-      <ResearchPanel key={m.id} modelId={p.llmId} meetingId={m.id} onSource={(_, at) => {
-        if (at != null) jump(at);
-        else summarySection.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }} />
-
-      <section className="meet-section">
-        <h3>my notes</h3>
-        {notesSave.error && <div className="meet-error" role="alert">{notesSave.error} <button onClick={notesSave.flush}>retry saving notes</button></div>}
-        {notesSave.saving && <span role="status">saving notes…</span>}
-        <textarea
-          className="meet-notes"
-          value={notes}
-          onChange={(e) => { setNotes(e.target.value); notesSave.save(e.target.value); }}
-          onBlur={notesSave.flush}
-          placeholder="jot anything down — saved with this meeting, and used by the summary"
-        />
+      <section aria-label="Ask about this meeting">
+        <div className="section-label">Ask about this meeting</div>
+        <div className="card card-pad">
+          <ResearchPanel key={m.id} modelId={p.llmId} meetingId={m.id} onSource={(_, at) => { if (at != null) jump(at); else setTab("summary"); }} />
+        </div>
       </section>
+    </>
+  );
 
+  const transcriptTab = (
+    <>
       {m.segments.length > 0 && (
-        <section className="meet-section">
-          <h3>speakers</h3>
-          <p className="dim">Click a transcript speaker to correct one line or their whole group. Your corrections survive re-detection.</p>
-          {speakerError && <p className="meet-error" role="alert">{speakerError}</p>}
-          <div className="speaker-edit">
+        <div className="card card-pad speakers-card">
+          <div className="speakers-head">
+            <Icon name="users" />
+            <strong>Speakers</strong>
+            <span className="faint">Name a speaker to relabel them. Click a name in the transcript to fix one line.</span>
+          </div>
+          <div className="speaker-chips">
             {speakers.map((sp) => (
               <input
                 key={sp + (m.speakerNames?.[sp] ?? "")}
-                className={"speaker-chip " + speakerClass(sp)}
+                className={"speaker-chip" + (sp === "me" ? " me" : "")}
+                aria-label={`Name for ${speakerLabel(sp)}`}
                 defaultValue={m.speakerNames?.[sp] ?? ""}
                 placeholder={speakerLabel(sp)}
                 onBlur={(e) => {
@@ -339,110 +357,175 @@ export function DetailView(p: Props) {
               />
             ))}
           </div>
-          <label className="check-row">
-            <input type="checkbox" checked={rememberVoice} onChange={(e) => setRememberVoice(e.target.checked)} />
-            remember voices I name, and label them automatically next time
-          </label>
-          {p.diarizeReady && m.hasAudio && m.segments.some((s) => s.source === "system") && (
-            <div className="redetect-row">
-              <span>wrong speakers?</span>
-              <select value={reCount} onChange={(e) => setReCount(e.target.value)}>
-                <option value="">auto</option>
-                {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
-                  <option key={n} value={String(n)}>
-                    {n} {n === 1 ? "person" : "people"}
-                  </option>
-                ))}
-              </select>
-              <button className="quiet" disabled={reDetecting} onClick={reDetect}>
-                {reDetecting ? "detecting…" : "re-detect speakers"}
-              </button>
-            </div>
-          )}
-        </section>
-      )}
-
-      <section className="meet-section">
-        <h3>transcript</h3>
-        {fix && (
-          <div className="fix-bar">
-            changed “{fix.from}” → “{fix.to}”.
-            {fix.count > 0 && (
-              <button className="quiet accent" onClick={() => applyFix(false)}>
-                fix {fix.count} more in this meeting
-              </button>
+          <div className="speakers-foot">
+            <label className="check">
+              <input type="checkbox" checked={rememberVoice} onChange={(e) => setRememberVoice(e.target.checked)} />
+              Recognize named voices in future meetings
+            </label>
+            <span className="spacer" />
+            {canRedetect && (
+              <>
+                <select className="select select-sm" aria-label="Number of people" value={reCount} onChange={(e) => setReCount(e.target.value)}>
+                  <option value="">Any number of people</option>
+                  {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                    <option key={n} value={String(n)}>
+                      {n} {n === 1 ? "person" : "people"}
+                    </option>
+                  ))}
+                </select>
+                <button className="btn btn-quiet btn-sm" disabled={reDetecting} onClick={reDetect}>
+                  {reDetecting ? <><Spinner /> Detecting…</> : "Re-detect speakers"}
+                </button>
+              </>
             )}
-            <button className="quiet accent" onClick={() => applyFix(true)}>
-              {fix.count > 0 ? "fix & remember" : "remember for next time"}
-            </button>
-            <button className="quiet" onClick={() => setFix(null)}>
-              no
-            </button>
           </div>
-        )}
-        {segments.length === 0 ? (
-          <p className="dim">no transcript for this meeting</p>
-        ) : (
-          segments.map((s, i) => {
+          {speakerError && <div className="alert danger" role="alert"><span className="alert-body">{speakerError}</span></div>}
+        </div>
+      )}
+      {fix && (
+        <div className="alert fix-bar" role="status">
+          <Icon name="pencil" />
+          <span className="alert-body">Changed “{fix.from}” to “{fix.to}”.</span>
+          <div className="alert-actions">
+            {fix.count > 0 && <button className="btn btn-quiet btn-sm" onClick={() => applyFix(false)}>Fix {fix.count} more</button>}
+            <button className="btn btn-secondary btn-sm" onClick={() => applyFix(true)}>{fix.count > 0 ? "Fix and remember" : "Remember"}</button>
+            <button className="btn btn-quiet btn-sm" onClick={() => setFix(null)}>Dismiss</button>
+          </div>
+        </div>
+      )}
+      {segments.length === 0 ? (
+        <p className="empty-state compact">This meeting has no transcript.</p>
+      ) : (
+        <div className="transcript detail-transcript">
+          {segments.map((s, i) => {
             const flagged = marks.some((mk) => mk.atMs >= s.startMs && mk.atMs < (segments[i + 1]?.startMs ?? Infinity));
+            const cont = i > 0 && segments[i - 1].speaker === s.speaker && correcting !== s.id;
             return (
               <div
-                className={"seg " + speakerClass(s.speaker) + (i === playingIdx ? " playing" : "")}
+                className={"line" + (s.speaker === "me" ? " me" : "") + (cont ? " cont" : "") + (i === playingIdx ? " playing" : "") + (flagged ? " flagged" : "")}
                 key={s.id ?? i}
                 ref={(el) => {
                   if (el && s.id != null) lineRefs.current.set(s.id, el);
                 }}
               >
-                <button className="seg-who quiet" title="Correct speaker" onClick={() => { setCorrecting(correcting === s.id ? null : s.id ?? null); setWholeSpeaker(false); }}>
-                  {speakerLabel(s.speaker, m.speakerNames)}
-                </button>
-                <button
-                  className="seg-time time-link"
-                  onClick={() => jump(s.startMs)}
-                  title={m.hasAudio ? "Play from here" : undefined}
-                  disabled={!m.hasAudio}
-                >
-                  {flagged ? "⚑ " : ""}
-                  {clock(s.startMs)}
-                </button>
-                <span
-                  className="seg-text seg-editable"
-                  contentEditable
-                  suppressContentEditableWarning
-                  onBlur={(e) => saveSegment(s, e.currentTarget.textContent || "")}
-                >
-                  {s.text}
-                </span>
-                {correcting === s.id && <div className="speaker-correction">
-                  <label><input type="checkbox" checked={wholeSpeaker} onChange={(e) => setWholeSpeaker(e.target.checked)} /> apply to this speaker’s whole group</label>
-                  <select aria-label="Assign speaker" value="" disabled={speakerSaving} onChange={(e) => { if (e.target.value) void correctSpeaker(s, e.target.value, null); }}>
-                    <option value="">choose a speaker…</option>
-                    {speakers.filter((sp) => sp !== s.speaker).map((sp) => <option key={sp} value={sp}>{speakerLabel(sp, m.speakerNames)}</option>)}
-                  </select>
-                  <input aria-label="New speaker name" placeholder="or enter a new name" value={correctionName} onChange={(e) => setCorrectionName(e.target.value)} />
-                  <button className="quiet" disabled={speakerSaving || !correctionName.trim()} onClick={() => void correctSpeaker(s, null, correctionName)}>save</button>
-                  <button className="quiet" onClick={() => setCorrecting(null)}>cancel</button>
-                </div>}
-
+                <div className="line-who">
+                  <button className="line-speaker" title="Correct speaker" onClick={() => { setCorrecting(correcting === s.id ? null : s.id ?? null); setWholeSpeaker(false); }}>
+                    {speakerLabel(s.speaker, m.speakerNames)}
+                  </button>
+                  <button className="line-time" onClick={() => jump(s.startMs)} title={m.hasAudio ? "Play from here" : undefined} disabled={!m.hasAudio}>
+                    {flagged && <Icon name="flag" />}
+                    {clock(s.startMs)}
+                  </button>
+                </div>
+                <div className="line-body">
+                  <span
+                    className="line-text"
+                    contentEditable
+                    suppressContentEditableWarning
+                    title="Click to edit"
+                    onBlur={(e) => saveSegment(s, e.currentTarget.textContent || "")}
+                  >
+                    {s.text}
+                  </span>
+                  {correcting === s.id && (
+                    <div className="speaker-correction">
+                      <select aria-label="Assign speaker" className="select select-sm" value="" disabled={speakerSaving} onChange={(e) => { if (e.target.value) void correctSpeaker(s, e.target.value, null); }}>
+                        <option value="">Choose a speaker…</option>
+                        {speakers.filter((sp) => sp !== s.speaker).map((sp) => <option key={sp} value={sp}>{speakerLabel(sp, m.speakerNames)}</option>)}
+                      </select>
+                      <input aria-label="New speaker name" className="input" placeholder="Or type a new name" value={correctionName} onChange={(e) => setCorrectionName(e.target.value)} />
+                      <button className="btn btn-secondary btn-sm" disabled={speakerSaving || !correctionName.trim()} onClick={() => void correctSpeaker(s, null, correctionName)}>Save</button>
+                      <button className="btn btn-quiet btn-sm" onClick={() => setCorrecting(null)}>Cancel</button>
+                      <label className="check"><input type="checkbox" checked={wholeSpeaker} onChange={(e) => setWholeSpeaker(e.target.checked)} /> Apply to all their lines</label>
+                    </div>
+                  )}
+                </div>
               </div>
             );
-          })
-        )}
-      </section>
+          })}
+        </div>
+      )}
+    </>
+  );
+
+  const notesTab = (
+    <section aria-label="Your notes">
+      {notesSave.error && (
+        <div className="alert danger" role="alert">
+          <span className="alert-body">{notesSave.error}</span>
+          <div className="alert-actions"><button className="btn btn-quiet btn-sm" onClick={notesSave.flush}>Try again</button></div>
+        </div>
+      )}
+      <textarea
+        className="textarea notes-editor"
+        aria-label="Your notes"
+        value={notes}
+        onChange={(e) => { setNotes(e.target.value); notesSave.save(e.target.value); }}
+        onBlur={notesSave.flush}
+        placeholder="Anything you jot here is saved with this meeting and shapes the summary."
+      />
+      <p className="faint notes-status" role="status">{notesSave.saving ? "Saving…" : "Saved on this Mac"}</p>
+    </section>
+  );
+
+  return (
+    <div className="meet-detail">
+      <div className="detail-head">
+        <div className="detail-title">
+          <input
+            className="title-input"
+            aria-label="Meeting title"
+            value={m.title}
+            placeholder="Untitled meeting"
+            onChange={(e) => p.onMeeting({ ...m, title: e.target.value })}
+            onBlur={() => api.renameMeeting(m.id, m.title).catch((e) => console.error(e))}
+          />
+          <div className="detail-meta">
+            {new Date(m.startedAt).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} · {new Date(m.startedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · {elapsed(m.startedAt, m.endedAt)}
+            {m.attendees && m.attendees.length > 0 && <> · {m.attendees.join(", ")}</>}
+          </div>
+        </div>
+        <button className="btn btn-secondary btn-sm" onClick={copyMarkdown}>
+          <Icon name={copied ? "check" : "copy"} />
+          {copied ? "Copied" : "Copy as Markdown"}
+        </button>
+        <MoreMenu
+          label="Meeting actions"
+          items={[
+            ...(canWrite ? [{ label: summaryText ? "Rewrite summary" : "Write summary", icon: "refresh" as const, onSelect: p.onSummarize, disabled: p.summarizing }] : []),
+            ...(summaryText && !p.summarizing ? [{ label: "Edit summary", icon: "pencil" as const, onSelect: () => { setTab("summary"); setEditingSummary(true); } }] : []),
+            ...(canRedetect ? [{ label: "Re-detect speakers…", icon: "users" as const, onSelect: () => setTab("transcript") }] : []),
+            { label: "Delete meeting…", icon: "trash", danger: true, separatorBefore: true, onSelect: askDelete },
+          ]}
+        />
+      </div>
+
+      <div className="tabs detail-tabs" role="tablist">
+        <button role="tab" aria-selected={tab === "summary"} onClick={() => setTab("summary")}>Summary</button>
+        <button role="tab" aria-selected={tab === "transcript"} onClick={() => setTab("transcript")}>
+          Transcript<span className="count">{m.segments.length || ""}</span>
+        </button>
+        <button role="tab" aria-selected={tab === "notes"} onClick={() => setTab("notes")}>Your notes</button>
+      </div>
+
+      <div className="detail-body">
+        {tab === "summary" ? summaryTab : tab === "transcript" ? transcriptTab : notesTab}
+      </div>
 
       {m.hasAudio && (player.atMs != null || player.loading) && (
-        <div className="player">
-          <button className="quiet accent" onClick={player.toggle} disabled={player.loading}>
-            {player.loading ? "…" : player.playing ? "❚❚" : "▶"}
+        <div className="player" role="region" aria-label="Audio player">
+          <button className="btn btn-primary btn-icon btn-sm" onClick={player.toggle} disabled={player.loading} aria-label={player.playing ? "Pause" : "Play"}>
+            {player.loading ? <Spinner /> : <Icon name={player.playing ? "pause" : "play"} />}
           </button>
-          <span className="player-time">{player.atMs != null ? clock(player.atMs) : ""}</span>
-          {player.error && <span className="task-error">{player.error}</span>}
+          <time>{player.atMs != null ? clock(player.atMs) : ""}</time>
+          {player.error && <span className="player-error">{player.error}</span>}
           <span className="spacer" />
-          <button className="quiet" onClick={player.stop}>
-            close
+          <button className="btn btn-quiet btn-icon btn-sm" onClick={player.stop} aria-label="Close player">
+            <Icon name="x" />
           </button>
         </div>
       )}
+      {dialog}
     </div>
   );
 }

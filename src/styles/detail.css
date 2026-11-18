@@ -1,0 +1,388 @@
+/* ── meeting detail: header, tabs, summary, transcript, player ───── */
+
+.meet-detail {
+  padding-bottom: 40px;
+}
+
+.detail-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.detail-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.title-input {
+  width: 100%;
+  margin-left: -6px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  font-size: 22px;
+  line-height: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  outline: none;
+}
+
+.title-input:hover {
+  background: var(--paper);
+}
+
+.title-input:focus {
+  background: var(--raised);
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+.detail-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.detail-tabs {
+  margin: 20px 0 18px;
+}
+
+.detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-body > .alert {
+  margin-bottom: 10px;
+}
+
+/* ── summary ── */
+.summary-prose {
+  font-family: var(--font-serif);
+  font-size: var(--read-serif);
+  line-height: 1.62;
+  color: var(--ink);
+}
+
+.summary-prose .md h1,
+.summary-prose .md h2,
+.summary-prose .md h3,
+.summary-prose .md h4 {
+  margin-top: 22px;
+}
+
+.summary-busy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.summary-editor {
+  min-height: 320px;
+  font-family: var(--font-serif);
+  font-size: var(--read);
+  line-height: 1.6;
+}
+
+.row-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.empty-state.compact {
+  padding: 24px 0;
+  text-align: left;
+}
+
+.empty-state.compact p {
+  margin: 0;
+}
+
+.empty-state.compact .btn {
+  margin-top: 12px;
+}
+
+/* ── action items list ── */
+.item-list {
+  padding: 4px 4px 2px;
+}
+
+.item-list-empty {
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+.item-add {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px 8px;
+  border-top: 1px solid var(--line);
+}
+
+.item-add svg {
+  width: 14px;
+  height: 14px;
+  color: var(--faint);
+}
+
+.item-add input {
+  flex: 1;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  outline: none;
+  font-size: 13px;
+}
+
+/* ── speakers ── */
+.speakers-card {
+  margin-bottom: 18px;
+}
+
+.speakers-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.speakers-head svg {
+  width: 14px;
+  height: 14px;
+  align-self: center;
+  color: var(--muted);
+}
+
+.speakers-head .faint {
+  font-size: 12px;
+}
+
+.speaker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.speaker-chip {
+  width: 150px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  background: var(--raised);
+  font-size: 13px;
+  font-weight: 500;
+  outline: none;
+}
+
+.speaker-chip::placeholder {
+  color: var(--ink);
+}
+
+.speaker-chip.me::placeholder {
+  color: var(--accent);
+}
+
+.speaker-chip:focus {
+  border-color: var(--accent);
+}
+
+.speakers-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.speakers-card .alert {
+  margin-top: 10px;
+}
+
+.fix-bar {
+  margin-bottom: 14px;
+}
+
+/* ── editable transcript ── */
+.detail-transcript {
+  max-width: none;
+}
+
+.line {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 16px;
+  padding: 6px 8px;
+  margin: 0 -8px;
+  border-radius: var(--r);
+}
+
+.line:not(.cont) {
+  margin-top: 10px;
+}
+
+.line.cont .line-speaker {
+  display: none;
+}
+
+.line.cont {
+  padding-top: 2px;
+}
+
+.line.playing {
+  background: var(--tint);
+}
+
+.line.flagged .line-text {
+  background: var(--hl);
+  border-radius: 3px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.line-who {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  padding-top: 2px;
+}
+
+.line-speaker {
+  max-width: 100%;
+  border: 0;
+  background: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line.me .line-speaker {
+  color: var(--accent);
+}
+
+.line-speaker:hover {
+  background: var(--paper);
+}
+
+.line-time {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.line-time svg {
+  width: 10px;
+  height: 10px;
+  color: var(--warn);
+}
+
+.line-time:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--tint);
+}
+
+.line-body {
+  min-width: 0;
+}
+
+.line-text {
+  outline: none;
+  border-radius: 3px;
+}
+
+.line.me .line-text {
+  color: var(--muted);
+}
+
+.line-text:hover {
+  box-shadow: 0 0 0 4px var(--paper);
+  background: var(--paper);
+}
+
+.line-text:focus {
+  background: var(--raised);
+  box-shadow: 0 0 0 4px var(--raised), 0 0 0 5px var(--line);
+}
+
+.speaker-correction {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: var(--r);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  font-family: var(--font-ui);
+}
+
+.speaker-correction .input {
+  height: 26px;
+  width: 170px;
+  font-size: 12px;
+}
+
+/* ── notes tab ── */
+.notes-editor {
+  min-height: 360px;
+  font-size: var(--read);
+  line-height: 1.6;
+}
+
+.notes-status {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+/* ── audio player ── */
+.player {
+  position: sticky;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+  min-width: 260px;
+  margin: 20px auto 0;
+  padding: 6px 6px 6px 8px;
+  border-radius: 99px;
+  background: var(--raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.player .btn-primary {
+  border-radius: 50%;
+}
+
+.player time {
+  font-size: 13px;
+}
+
+.player-error {
+  font-size: 12px;
+  color: var(--danger);
+}

@@ -13,7 +13,7 @@ const virtual = (source) => ({ url: `data:text/javascript,${encodeURIComponent(s
 const hooks = registerHooks({
   resolve(specifier, context, next) {
     if (context.parentURL === componentUrl) {
-      if (specifier === "./api") return virtual("export const { api, on } = globalThis.meetingsTest;");
+      if (specifier === "./api") return virtual("export const { api, on } = globalThis.meetingsTest; export const clock = (ms) => String(Math.floor(ms / 1000));");
       if (specifier === "@tauri-apps/api/event") return virtual("export const listen = globalThis.meetingsTest.listen;");
       const name = specifier.split("/").at(-1);
       if (["MeetingSetup", "DetailView", "ListView", "LiveView"].includes(name)) {
@@ -22,6 +22,11 @@ const hooks = registerHooks({
           export function ${name}(props) { return createElement(${JSON.stringify(name)}, props); }`);
       }
       if (name === "TaskCard") return virtual("export const mergeTask = (tasks, task) => [...tasks, task];");
+      if (specifier === "./ui") {
+        return virtual(`import { createElement } from ${JSON.stringify(import.meta.resolve("react"))};
+          export const Icon = (props) => createElement("Icon", props);
+          export const Kbd = (props) => createElement("Kbd", props);`);
+      }
     }
     return next(specifier, context);
   },
@@ -106,10 +111,11 @@ async function mount(t) {
   t.after(async () => { await act(async () => renderer.unmount()); });
   return {
     ...fixture,
-    pill: () => renderer.root.findAllByType("button").find(b => b.props.className.startsWith("pill")),
+    // The one record/stop control the controller renders in every state.
+    pill: () => renderer.root.findAllByType("button").find(b => "data-record-control" in b.props),
     view: (name) => renderer.root.findByType(name),
     click: async () => { await act(async () => {
-      const pill = renderer.root.findAllByType("button").find(b => b.props.className.startsWith("pill"));
+      const pill = renderer.root.findAllByType("button").find(b => "data-record-control" in b.props);
       assert.equal(pill.props.disabled, false, "recording control must remain enabled");
       await pill.props.onClick();
     }); },

@@ -2,15 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { api, clock, Task, TaskAction } from "../api";
 
 export const ACTION_LABELS: Record<TaskAction, string> = {
-  email: "email",
+  email: "Email",
   jira_issue: "Jira ticket",
-  reminder: "reminder",
-  calendar_event: "calendar event",
+  reminder: "Reminder",
+  calendar_event: "Calendar event",
   slack_message: "Slack message",
-  note: "note",
-  text: "text",
-  browser: "website",
-  delegate: "hand-off",
+  note: "Note",
+  text: "Text",
+  browser: "Website",
+  delegate: "Hand-off",
 };
 
 /// What the primary button says for each kind of draft.
@@ -27,15 +27,15 @@ const RUN_LABELS: Record<TaskAction, string> = {
 };
 
 const STATUS_LABELS: Record<string, string> = {
-  heard: "heard",
-  planning: "understanding…",
-  drafting: "drafting…",
-  waiting: "after the meeting",
-  ready: "ready for you",
-  running: "working…",
-  done: "done",
-  failed: "failed",
-  dismissed: "dismissed",
+  heard: "Heard",
+  planning: "Reading…",
+  drafting: "Drafting…",
+  waiting: "Drafts after the call",
+  ready: "Ready",
+  running: "Working…",
+  done: "Done",
+  failed: "Couldn't finish",
+  dismissed: "Dismissed",
 };
 
 type Field = { key: string; label: string; kind?: "text" | "area" | "list" | "select"; options?: string[] };
@@ -183,10 +183,10 @@ export function TaskCard({ task, compact, onTime, onChange }: Props) {
 
   return (
     <div className={`task task-${task.status}` + (compact ? " compact" : "")}>
-      <div className="task-head" onClick={() => setOpen((o) => !o)}>
-        <span className="task-kind">{tool ?? (task.action ? ACTION_LABELS[action] : "request")}</span>
+      <div className="task-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen((o) => !o)} onKeyDown={(e) => { if (e.key === "Enter") setOpen((o) => !o); }}>
+        <span className="task-kind">{tool ?? (task.action ? ACTION_LABELS[action] : "Request")}</span>
         <span className="task-title">{title}</span>
-        {browserRun && <span className="task-chip">in your browser</span>}
+        {browserRun && <span className="badge neutral">In your browser</span>}
         <span className={`task-status s-${task.status}`}>
           {working && <span className="task-spin" />}
           {STATUS_LABELS[task.status] ?? task.status}
@@ -213,7 +213,7 @@ export function TaskCard({ task, compact, onTime, onChange }: Props) {
           </div>
 
           {task.status === "waiting" && (
-            <p className="dim task-note">I'll draft this with the whole meeting as context when it ends.</p>
+            <p className="task-note">unsound drafts this with the whole meeting as context when it ends.</p>
           )}
           {task.error && <p className="task-error">{task.error}</p>}
 
@@ -226,7 +226,7 @@ export function TaskCard({ task, compact, onTime, onChange }: Props) {
                   const readOnly = task.status === "done";
                   return (
                     <label key={f.key} className={"task-field" + (f.kind === "area" ? " area" : "")}>
-                      <span>{f.label}</span>
+                      <span>{f.label[0].toUpperCase() + f.label.slice(1)}</span>
                       {f.kind === "area" ? (
                         <textarea
                           value={value}
@@ -280,10 +280,10 @@ export function TaskCard({ task, compact, onTime, onChange }: Props) {
 
           {task.status === "done" && task.result?.message && (
             <p className="task-result">
-              ✓ {task.result.message}
+              {task.result.message}
               {task.result.url && (
-                <button className="quiet accent" onClick={() => openUrl(task.result!.url!)}>
-                  open
+                <button className="btn btn-quiet btn-sm" onClick={() => openUrl(task.result!.url!)}>
+                  Open
                 </button>
               )}
             </p>
@@ -291,7 +291,7 @@ export function TaskCard({ task, compact, onTime, onChange }: Props) {
 
           {Array.isArray(task.log) && task.log.some((l) => l.tool) && (
             <details className="task-log">
-              <summary>steps</summary>
+              <summary>Steps</summary>
               {task.log
                 .filter((l) => l.tool)
                 .map((l, i) => (
@@ -305,7 +305,7 @@ export function TaskCard({ task, compact, onTime, onChange }: Props) {
           <div className="task-actions">
             {task.status === "ready" && (
               <button
-                className="quiet accent"
+                className="btn btn-primary btn-sm"
                 disabled={busy}
                 onClick={() => act(async () => {
                   dirty.current = false;
@@ -316,28 +316,28 @@ export function TaskCard({ task, compact, onTime, onChange }: Props) {
               </button>
             )}
             {task.draft && action !== "note" && (
-              <button className="quiet" onClick={copy}>
-                {copied ? "copied ✓" : "copy"}
+              <button className="btn btn-quiet btn-sm" onClick={copy}>
+                {copied ? "Copied" : "Copy"}
               </button>
             )}
             {(task.status === "ready" || task.status === "done") && (
-              <button className="quiet" disabled={busy} onClick={() => act(() => api.redraftTask(task.id))}>
-                redraft
+              <button className="btn btn-quiet btn-sm" disabled={busy} onClick={() => act(() => api.redraftTask(task.id))}>
+                Redraft
               </button>
             )}
             {(task.status === "failed" || task.status === "dismissed") && (
-              <button className="quiet" disabled={busy} onClick={() => act(() => api.retryTask(task.id))}>
-                retry
+              <button className="btn btn-quiet btn-sm" disabled={busy} onClick={() => act(() => api.retryTask(task.id))}>
+                Try again
               </button>
             )}
             {task.status !== "done" && task.status !== "dismissed" && !working && (
-              <button className="quiet" disabled={busy} onClick={() => act(() => api.dismissTask(task.id))}>
-                dismiss
+              <button className="btn btn-quiet btn-sm" disabled={busy} onClick={() => act(() => api.dismissTask(task.id))}>
+                Dismiss
               </button>
             )}
             {(task.status === "dismissed" || task.status === "done" || task.status === "failed") && (
               <button
-                className="quiet danger"
+                className="btn btn-quiet btn-sm danger"
                 disabled={busy}
                 onClick={() =>
                   act(async () => {
@@ -346,7 +346,7 @@ export function TaskCard({ task, compact, onTime, onChange }: Props) {
                   })
                 }
               >
-                delete
+                Delete
               </button>
             )}
           </div>

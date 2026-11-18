@@ -1,4 +1,4 @@
-import { clock, formatDuration, Meeting } from "../api";
+import { clock, Meeting } from "../api";
 
 /// How a segment's speaker is shown. A per-meeting name wins; otherwise "You"
 /// for the mic, "Speaker N" for a detected participant (`them:0` → Speaker 1),
@@ -13,18 +13,15 @@ export function speakerLabel(speaker: string, names?: Record<string, string>): s
   return "Them";
 }
 
-/// Stable-ish color class per speaker so the transcript is easy to scan.
-export function speakerClass(speaker: string): string {
-  if (speaker === "me") return "seg-me";
-  const m = speaker.match(/^them:(\d+)$/);
-  if (m) return `seg-spk${Number(m[1]) % 6}`;
-  return "seg-them";
-}
-
+/// A meeting's length as people say it: "42 min", "1 h 5 min", "40 s".
 export function elapsed(startedAt: string, endedAt?: string | null): string {
   const start = new Date(startedAt).getTime();
   const end = endedAt ? new Date(endedAt).getTime() : Date.now();
-  return formatDuration(Math.max(0, (end - start) / 1000));
+  const secs = Math.max(0, Math.round((end - start) / 1000));
+  if (secs < 60) return `${secs} s`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min`;
+  return `${Math.floor(mins / 60)} h${mins % 60 ? ` ${mins % 60} min` : ""}`;
 }
 
 /// The whole meeting as shareable Markdown.
@@ -42,7 +39,7 @@ export function meetingMarkdown(m: Meeting): string {
     }
     out.push("");
   }
-  if (m.notes.trim()) out.push("## My notes", "", m.notes.trim(), "");
+  if (m.notes.trim()) out.push("## Your notes", "", m.notes.trim(), "");
   if (m.segments.length) {
     out.push("## Transcript", "");
     for (const s of [...m.segments].sort((a, b) => a.startMs - b.startMs)) {

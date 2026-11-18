@@ -1,28 +1,38 @@
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useRef, useState } from "react";
-import { api, Meeting, MeetingWork, ModelInfo, on, Segment, Task } from "./api";
+import { ReactNode, useEffect, useRef, useState } from "react";
+import { api, clock, Meeting, MeetingSettings, MeetingWork, ModelInfo, on, Segment, Task } from "./api";
 import { MeetingSetup } from "./MeetingSetup";
 import { DetailView } from "./meetings/DetailView";
 import { ListView } from "./meetings/ListView";
 import { LiveView } from "./meetings/LiveView";
 import { mergeTask } from "./meetings/TaskCard";
+import { Icon, Kbd } from "./ui";
 
 type Phase = "idle" | "starting" | "recording" | "stopping";
 
-function RecTimer() {
-  const [secs, setSecs] = useState(0);
+export interface RecordingInfo {
+  id: string;
+  startedAt: string;
+  title: string;
+}
+
+/// Elapsed time since a start, ticking.
+function Elapsed({ since }: { since: string }) {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const started = Date.now();
-    const t = setInterval(() => setSecs((Date.now() - started) / 1000), 250);
+    const t = setInterval(() => setNow(Date.now()), 250);
     return () => clearInterval(t);
   }, []);
-  const m = Math.floor(secs / 60);
-  const s = Math.floor(secs % 60);
-  return (
-    <span className="pill-time">
-      {String(m).padStart(2, "0")}:{String(s).padStart(2, "0")}
-    </span>
-  );
+  return <time>{clock(now - new Date(since).getTime())}</time>;
+}
+
+/// Display-only description of where a meeting's transcription stands.
+function workLabel(w: MeetingWork): string {
+  if (w.state === "finishing") return w.pending > 0 ? `Finishing transcript · ${w.pending} part${w.pending === 1 ? "" : "s"} left` : "Finishing transcript";
+  if (w.state === "paused") return "Transcription paused. Your audio is saved.";
+  if (w.state === "error") return "Transcription stopped. Your audio is saved.";
+  if (w.state === "complete") return "Transcript recovered";
+  return "Recording";
 }
 
 interface Props {
@@ -33,11 +43,20 @@ interface Props {
   models: ModelInfo[];
   onModelsChanged: () => void;
   /// Called when a meeting starts so the app can bring the Meetings view forward
-  /// (e.g. when started from the tray while another tab is showing).
+  /// (e.g. when started from the tray while another section is showing).
   onActivate?: () => void;
+  /// The recording in progress (null when idle), for the app's title bar.
+  onRecordingChange?: (r: RecordingInfo | null) => void;
+  /// Whether the full-window live view is showing.
+  onLiveVisibleChange?: (visible: boolean) => void;
+  /// Bumped to bring the live view back (title bar, floating indicator).
+  liveRequest?: number;
+  /// Requests and reminders that need attention, shown above the list.
+  needsYou?: ReactNode;
+  onOpenSettings?: () => void;
 }
 
-export function Meetings({ stt, llm, language, models, onModelsChanged, onActivate, openRequest }: Props) {
+export function Meetings({ stt, llm, language, models, onModelsChanged, onActivate, openRequest, onRecordingChange, onLiveVisibleChange, liveRequest, needsYou, onOpenSettings }: Props) {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [selected, setSelected] = useState<Meeting | null>(null);
   const [focusMs, setFocusMs] = useState<number | null>(null);
@@ -57,7 +76,11 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const [summaries, setSummaries] = useState<Record<string, string>>({});
   const [tasks, setTasks] = useState<Task[]>([]);
   // Live meeting state.
-  const [live, setLive] = useState<{ id: string; title: string; attendees: string[] } | null>(null);
+  const [live, setLive] = useState<{ id: string; title: string; attendees: string[]; startedAt: string } | null>(null);
+  const [showLive, setShowLive] = useState(true);
+  const [flagToken, setFlagToken] = useState(0);
+  const [query, setQuery] = useState("");
+  const [askToken, setAskToken] = useState(0);
   const [liveSegments, setLiveSegments] = useState<Segment[]>([]);
   const [partials, setPartials] = useState<Record<string, string>>({});
   const [liveNames, setLiveNames] = useState<Record<string, string>>({});
@@ -65,18 +88,8 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const [status, setStatus] = useState<{ positionMs: number; pending: number; systemAudio: boolean } | null>(null);
   const [notesThrough, setNotesThrough] = useState(0);
   const [assist, setAssist] = useState<{ wake: string | null; key: string | null }>({ wake: null, key: null });
-
-  // Meeting-specific model choices (persisted, independent of the dictate tab).
-  const [prefs, setPrefs] = useState(() => ({
-    stt: localStorage.getItem("unsound.meeting.stt") ?? "",
-    llm: localStorage.getItem("unsound.meeting.llm") ?? "",
-    emb: localStorage.getItem("unsound.meeting.emb") ?? "diarize-embedding",
-    speakers: localStorage.getItem("unsound.meeting.speakers") ?? "",
-  }));
-  const setPref = (key: keyof typeof prefs, value: string) => {
-    localStorage.setItem(`unsound.meeting.${key}`, value);
-    setPrefs((p) => ({ ...p, [key]: value }));
-  };
+  // Meeting model and language choices live in Settings → Meetings.
+  const [meetPrefs, setMeetPrefs] = useState<Partial<MeetingSettings>>({});
 
   const phaseRef = useRef<Phase>("idle");
   phaseRef.current = phase;
@@ -93,10 +106,11 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const sttModels = models.filter((m) => m.kind === "stt" && m.downloaded);
   const llmModels = models.filter((m) => m.kind === "llm" && m.downloaded);
   const embModels = models.filter((m) => m.kind === "diarize" && m.id !== "diarize-segmentation" && m.downloaded);
-  const meetStt = sttModels.find((m) => m.id === prefs.stt) ?? stt ?? sttModels[0];
-  const meetLlm = llmModels.find((m) => m.id === prefs.llm) ?? llm ?? llmModels[0];
+  const meetStt = sttModels.find((m) => m.id === meetPrefs.speechModel) ?? stt ?? sttModels[0];
+  const meetLlm = llmModels.find((m) => m.id === meetPrefs.summaryModel) ?? llm ?? llmModels[0];
   summaryModelRef.current = meetLlm?.id;
-  const meetEmbId = (embModels.find((m) => m.id === prefs.emb) ?? embModels[0])?.id;
+  const meetEmbId = (embModels.find((m) => m.id === meetPrefs.embeddingModel) ?? embModels.find((m) => m.id === "diarize-embedding") ?? embModels[0])?.id;
+  const meetLanguage = meetPrefs.language ?? language;
 
   // Setup gate: a speech model, the VAD model and a voice model.
   const vadReady = !!models.find((m) => m.id === "vad-silero")?.downloaded;
@@ -117,10 +131,21 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         wake: a.enabled && a.listenForWakeWord && a.wakeWord.trim() ? a.wakeWord.trim() : null,
         key: s.commandKeys[0] ?? null,
       });
-      // Keep the backend's idea of the notes model in step with the picker
-      // (the assistant falls back to it).
-      if (meetLlm && s.meetings.summaryModel !== meetLlm.id) {
-        api.setMeetingSettings({ ...s.meetings, summaryModel: meetLlm.id }).catch(() => {});
+      setMeetPrefs(s.meetings ?? {});
+      // Model choices used to be kept in this view's local storage; move them
+      // into settings once so there is a single place to change them.
+      const legacy = { stt: localStorage.getItem("unsound.meeting.stt"), llm: localStorage.getItem("unsound.meeting.llm"), emb: localStorage.getItem("unsound.meeting.emb") };
+      if (legacy.stt || legacy.llm || legacy.emb) {
+        const next = {
+          ...s.meetings,
+          speechModel: s.meetings.speechModel || legacy.stt || "",
+          summaryModel: s.meetings.summaryModel || legacy.llm || "",
+          embeddingModel: s.meetings.embeddingModel || legacy.emb || "",
+        };
+        api.setMeetingSettings(next).then(() => {
+          for (const k of ["stt", "llm", "emb", "speakers"]) localStorage.removeItem(`unsound.meeting.${k}`);
+          setMeetPrefs(next);
+        }).catch(() => {});
       }
     });
 
@@ -251,7 +276,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const startMeeting = async () => {
     if (phaseRef.current !== "idle") return;
     if (!meetStt) {
-      setError("download a speech model first (settings → models)");
+      setError("Download a speech model to record meetings.");
       return;
     }
     setError(null);
@@ -270,24 +295,26 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
     setStatus(null);
     setNotesThrough(0);
     setTasks([]);
+    setShowLive(true);
     phaseRef.current = "starting";
     setPhase("starting");
+    const startedAt = new Date().toISOString();
     try {
       await api.createMeeting({
         id,
         title: "",
-        startedAt: new Date().toISOString(),
+        startedAt,
         endedAt: null,
         summary: "",
         notes: "",
         sttModel: meetStt.name,
         llmModel: meetLlm?.name ?? "",
-        lang: language,
+        lang: meetLanguage,
         segments: [],
         segmentCount: 0,
       });
-      const m = await api.meetingStart(id, meetStt.id, language || undefined, meetLlm?.id, meetEmbId);
-      setLive({ id, title: m?.title ?? "", attendees: m?.attendees ?? [] });
+      const m = await api.meetingStart(id, meetStt.id, meetLanguage || undefined, meetLlm?.id, meetEmbId);
+      setLive({ id, title: m?.title ?? "", attendees: m?.attendees ?? [], startedAt });
       setPhase("recording");
     } catch (e) {
       setError(String(e));
@@ -299,7 +326,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const summarize = async (id: string, modelId = meetLlm?.id) => {
     if (!modelId || summaryJobs.current.has(id)) return;
     const pending = work.find((w) => w.meetingId === id);
-    if (pending && pending.state !== "complete") { setError("Finish transcription before writing the summary."); return; }
+    if (pending && pending.state !== "complete") { setError("The transcript is still finishing. Write the summary when it's done."); return; }
     summaryJobs.current.add(id);
     summarizeAfter.current.delete(id);
     setSummaries((s) => ({ ...s, [id]: "" }));
@@ -378,92 +405,115 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   };
 
   const busy = phase === "starting" || phase === "stopping";
-  const pillLabel =
-    phase === "recording"
-      ? "end meeting"
-      : phase === "starting"
-        ? "starting…"
-        : phase === "stopping"
-          ? "wrapping up…"
-          : "start a meeting";
+  const recordingNow = (phase === "recording" || phase === "starting") && !!live;
+  const liveVisible = recordingNow && showLive;
+  const liveId = live?.id ?? null;
+  const liveTitle = live?.title ?? "";
+  const liveStartedAt = live?.startedAt ?? "";
 
-  return (
-    <div className="meetings">
-      <div className="stage">
-        <button
-          className={"pill" + (phase === "recording" ? " live" : "")}
-          onClick={phase === "recording" ? stopMeeting : startMeeting}
-          disabled={busy || setupNeeded}
-        >
-          <span className="pill-dot" />
-          {pillLabel}
-          {phase === "recording" && <RecTimer />}
-        </button>
-      </div>
+  useEffect(() => {
+    onRecordingChange?.(recordingNow && liveId ? { id: liveId, startedAt: liveStartedAt, title: liveTitle } : null);
+  }, [recordingNow, liveId, liveTitle, liveStartedAt]);
+  useEffect(() => { onLiveVisibleChange?.(liveVisible); }, [liveVisible]);
+  useEffect(() => { if (liveRequest) setShowLive(true); }, [liveRequest]);
 
-      {setupNeeded && !selected && !live && <MeetingSetup models={models} onModelsChanged={onModelsChanged} />}
-      {Object.keys(summaries).map((id) => (
-        <div key={id} data-meeting-id={id} className="meet-hint" role="status">
-          {meetings.find((m) => m.id === id)?.title || "Meeting"}: writing notes…
-        </div>
-      ))}
-      {work.filter((w) => w.state !== "complete" || w.warning).map((w) => (
-        <div key={w.meetingId} data-meeting-id={w.meetingId} className={"meet-hint " + (w.error ? "meet-error" : "meet-warning")} role={w.error ? "alert" : "status"}>
-          <div>
-            <strong>{meetings.find((m) => m.id === w.meetingId)?.title || "Meeting"}: </strong>
-            {w.state === "recording" ? "recording" : w.state === "finishing" ? "finishing transcript" : w.state === "complete" ? "transcript recovered" : w.state === "paused" ? "transcription paused" : "needs attention"}
-            {` · ${w.pending} audio ranges remaining · mic saved through ${(w.micSamples / 16000).toFixed(1)}s · system saved through ${(w.systemSamples / 16000).toFixed(1)}s`}
-            {w.error && <p>{w.error}</p>}
-            {w.warning && <p>{w.warning}</p>}
+  const titleOf = (id: string) => meetings.find((m) => m.id === id)?.title || "Untitled meeting";
+  const refreshWork = () => api.meetingWorkStatus().then(setWork).catch((e) => setError(String(e)));
+  const retryWork = (id: string) => api.meetingRetry(id).then(refreshWork).catch((e) => setError(String(e)));
+  const pauseWork = (id: string) => api.meetingPause(id).then(refreshWork).catch((e) => setError(String(e)));
+
+  /// The one record/stop control. Exactly one is on screen in every state.
+  const recordControl = (variant: "stage" | "card" | "bar" | "small") => {
+    const recordingPhase = phase === "recording";
+    const label = recordingPhase ? "Stop recording" : phase === "starting" ? "Starting…" : phase === "stopping" ? "Saving…" : variant === "small" ? "Record" : detected ? "Record this call" : "Record";
+    const cls =
+      variant === "stage" || variant === "card" ? "btn btn-stage" : variant === "bar" ? "btn btn-secondary" : "btn btn-secondary btn-sm";
+    return (
+      <button
+        className={cls + " record-control" + (recordingPhase ? " live" : "")}
+        data-record-control=""
+        onClick={recordingPhase ? stopMeeting : startMeeting}
+        disabled={busy || (setupNeeded && !recordingPhase)}
+      >
+        {recordingPhase ? <span className="stop-glyph" aria-hidden="true" /> : <span className="rec-glyph" aria-hidden="true" />}
+        {label}
+      </button>
+    );
+  };
+
+  const alerts = (
+    <>
+      {work.filter((w) => !w.recording && (w.state === "paused" || w.state === "error" || (w.state === "complete" && w.warning))).map((w) => (
+        <div key={w.meetingId} data-meeting-id={w.meetingId} className={"alert " + (w.state === "complete" ? "warn" : "danger")} role={w.state === "error" ? "alert" : "status"}>
+          <Icon name="alert" />
+          <div className="alert-body">
+            <strong>{titleOf(w.meetingId)}</strong> · {workLabel(w)}
+            {(w.error || w.warning) && <p className="alert-reason">{w.error || w.warning}</p>}
+            {w.state !== "complete" && (
+              <details className="alert-details">
+                <summary>Details</summary>
+                {w.error && w.warning && <p>{w.warning}</p>}
+                <p>Mic saved through {(w.micSamples / 16000).toFixed(1)}s · call audio saved through {(w.systemSamples / 16000).toFixed(1)}s · {w.pending} part{w.pending === 1 ? "" : "s"} left</p>
+              </details>
+            )}
           </div>
-          {!w.recording && <button className="quiet" onClick={() => openMeeting(w.meetingId)}>open</button>}
-          {!w.recording && w.state === "finishing" && <button className="quiet" onClick={() => api.meetingPause(w.meetingId).then(() => api.meetingWorkStatus()).then(setWork).catch((e) => setError(String(e)))}>pause</button>}
-          {!w.recording && (w.state === "paused" || w.state === "error") && <button className="quiet" onClick={() => api.meetingRetry(w.meetingId).then(() => api.meetingWorkStatus()).then(setWork).catch((e) => setError(String(e)))}>retry saved audio</button>}
+          <div className="alert-actions">
+            <button className="btn btn-quiet btn-sm" onClick={() => openMeeting(w.meetingId)}>Open</button>
+            {(w.state === "paused" || w.state === "error") && <button className="btn btn-secondary btn-sm" onClick={() => retryWork(w.meetingId)}>Try again</button>}
+          </div>
         </div>
       ))}
-      {!sysSupported && (
-        <div className="meet-hint">system audio needs macOS 13+ — meetings will capture your mic only</div>
-      )}
-      {detected && phase === "idle" && (
-        <div className="meet-hint meet-banner">
-          {detected.app} is using your mic.
-          <button className="quiet accent" onClick={startMeeting}>
-            record this meeting
-          </button>
-          <button className="quiet" onClick={() => setDetected(null)}>
-            not now
-          </button>
-        </div>
-      )}
-      {released && phase === "recording" && (
-        <div className="meet-hint meet-banner">
-          {released} let go of the mic — did the call end?
-          <button className="quiet accent" onClick={stopMeeting}>
-            end meeting
-          </button>
-          <button className="quiet" onClick={() => setReleased(null)}>
-            keep recording
-          </button>
-        </div>
-      )}
       {warning && (
-        <div className="meet-hint meet-warning">
-          {warning}
-          <button className="quiet" onClick={() => setWarning(null)}>
-            dismiss
-          </button>
+        <div className="alert warn" role="status">
+          <Icon name="alert" />
+          <span className="alert-body">{warning}</span>
+          <div className="alert-actions"><button className="btn btn-quiet btn-sm" onClick={() => setWarning(null)}>Dismiss</button></div>
         </div>
       )}
       {error && (
-        <div className="meet-hint meet-error">
-          {error}
-          <button className="quiet" onClick={() => setError(null)}>
-            dismiss
-          </button>
+        <div className="alert danger" role="alert">
+          <Icon name="alert" />
+          <span className="alert-body">{error}</span>
+          <div className="alert-actions"><button className="btn btn-quiet btn-sm" onClick={() => setError(null)}>Dismiss</button></div>
         </div>
       )}
+    </>
+  );
 
-      {(phase === "recording" || phase === "starting") && live ? (
+  const callEnded = released && phase === "recording" && (
+    <div className="call-ended" role="status">
+      <Icon name="info" />
+      <span><strong>{released} left the call.</strong> Stop recording?</span>
+      <span className="spacer" />
+      <button className="btn btn-quiet btn-sm" onClick={() => setReleased(null)}>Keep recording</button>
+      <button className="btn btn-primary btn-sm" onClick={stopMeeting}>Stop recording</button>
+    </div>
+  );
+
+  // ── live: the whole window, with the recording stage on top ──
+  if (liveVisible && live) {
+    return (
+      <div className="live-page">
+        <header className="stage" data-tauri-drag-region>
+          <div className="stage-clock" data-tauri-drag-region>
+            <span className="rec-dot" />
+            <span className="stage-timer"><Elapsed since={live.startedAt} /></span>
+          </div>
+          <div className="stage-title" data-tauri-drag-region>
+            <strong>{live.title || "Recording"}</strong>
+            <span>{live.attendees.length ? live.attendees.join(", ") : status && !status.systemAudio ? "Your mic only" : "You and the call"}</span>
+          </div>
+          <span className="spacer" data-tauri-drag-region />
+          <button className="btn btn-stage-quiet" onClick={() => setShowLive(false)} title="Browse meetings while recording">
+            <Icon name="back" /> Meetings
+          </button>
+          <button className="btn btn-stage-outline" onClick={() => setFlagToken((n) => n + 1)} title="Flag this moment. It gets extra weight in the summary.">
+            <Icon name="flag" /> Flag <Kbd>⌘M</Kbd>
+          </button>
+          {recordControl("stage")}
+        </header>
+        {callEnded}
+        {(warning || error) && <div className="live-alerts">{alerts}</div>}
         <LiveView
           meetingId={live.id}
           title={live.title}
@@ -479,8 +529,40 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
           wakeWord={assist.wake}
           commandKey={assist.key}
           notesThroughMs={notesThrough}
+          flagToken={flagToken}
+          onFlag={() => setFlagToken((n) => n + 1)}
         />
-      ) : selected ? (
+      </div>
+    );
+  }
+
+  const banner = recordingNow && live && (
+    <div className="recording-banner" role="status">
+      <span className="rec-dot" />
+      <span className="recording-banner-text">
+        <strong>Recording</strong> <Elapsed since={live.startedAt} />
+        {live.title && <span className="faint"> · {live.title}</span>}
+      </span>
+      <span className="spacer" />
+      <button className="btn btn-quiet btn-sm" onClick={() => setShowLive(true)}>Open live view</button>
+      {recordControl("bar")}
+    </div>
+  );
+
+  // ── a meeting ──
+  if (selected) {
+    return (
+      <div className="page meetings">
+        {banner}
+        {callEnded}
+        <div className="page-bar">
+          <button className="btn btn-quiet btn-sm back-link" onClick={() => { setSelected(null); refresh(); }}>
+            <Icon name="back" /> Meetings
+          </button>
+          <span className="spacer" />
+          {!banner && recordControl("small")}
+        </div>
+        <div className="alerts">{alerts}</div>
         <DetailView
           key={selected.id}
           meeting={selected}
@@ -499,27 +581,71 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
           embId={meetEmbId}
           diarizeReady={embModels.length > 0}
           focusMs={focusMs}
-        />
-      ) : null}
-      {/* Preserve the archive conversation while opening a cited meeting. */}
-      <div hidden={Boolean(selected) || ((phase === "recording" || phase === "starting") && Boolean(live))}>
-        <ListView
-          meetings={meetings}
-          onOpen={openMeeting}
-          llmId={meetLlm?.id}
-          idle={phase === "idle"}
-          options={{
-            sttModels,
-            llmModels,
-            embModels,
-            stt: meetStt?.id,
-            llm: meetLlm?.id,
-            emb: meetEmbId,
-            speakers: prefs.speakers,
-            set: setPref,
-          }}
+          work={work.find((w) => w.meetingId === selected.id && w.state !== "complete")}
+          onRetryWork={() => retryWork(selected.id)}
         />
       </div>
+    );
+  }
+
+  // ── the list ──
+  return (
+    <div className="page meetings">
+      <div className="page-head">
+        <h1 className="page-title">Meetings</h1>
+        <span className="spacer" />
+        {meetings.length > 0 && (
+          <form className="search meet-search" role="search" onSubmit={(e) => { e.preventDefault(); if (query.trim()) setAskToken((n) => n + 1); }}>
+            <Icon name="search" />
+            <input
+              className="input"
+              aria-label="Search or ask your meetings"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Escape") setQuery(""); }}
+              placeholder="Search or ask your meetings…"
+            />
+            <Kbd>↩ Ask</Kbd>
+          </form>
+        )}
+      </div>
+      <div className="alerts">{alerts}</div>
+      {banner || (
+        <div className={"record-card" + (detected && phase === "idle" ? " detected" : "")}>
+          <span className="record-card-icon"><Icon name={detected ? "video" : "mic"} /></span>
+          <div className="record-card-text">
+            <h2>{detected && phase === "idle" ? `${detected.app} call started` : "Record a meeting"}</h2>
+            <p>
+              {setupNeeded
+                ? "Finish the downloads below to record your first meeting."
+                : detected && phase === "idle"
+                  ? "Record it and get a summary when it ends."
+                  : sysSupported
+                    ? "unsound transcribes you and the call, tells speakers apart, and writes a summary when you stop."
+                    : "This Mac can only record your mic. Recording call audio needs macOS 13 or later."}
+            </p>
+          </div>
+          <div className="record-card-actions">
+            {detected && phase === "idle" && <button className="btn btn-stage-quiet" onClick={() => setDetected(null)}>Not now</button>}
+            {recordControl("card")}
+          </div>
+        </div>
+      )}
+      {setupNeeded && <MeetingSetup models={models} onModelsChanged={onModelsChanged} />}
+      {needsYou}
+      <ListView
+        meetings={meetings}
+        onOpen={openMeeting}
+        llmId={meetLlm?.id}
+        idle={phase === "idle"}
+        query={query}
+        askToken={askToken}
+        onClearQuery={() => setQuery("")}
+        work={work}
+        writing={Object.keys(summaries)}
+        onPause={pauseWork}
+        onOpenSettings={onOpenSettings}
+      />
     </div>
   );
 }
