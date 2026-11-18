@@ -1,0 +1,359 @@
+/* ── shell: title bar, page frame, shared page bits ─────────────── */
+
+.shell {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The window uses an overlay title bar: traffic lights sit on this bar. */
+.topbar {
+  position: relative;
+  flex: none;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px 0 84px;
+  border-bottom: 1px solid var(--line);
+  background: var(--rail);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.topbar-brand .logo {
+  border-radius: 5px;
+}
+
+.topbar-nav {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.topbar-nav button {
+  height: 26px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+
+.topbar-nav .badge {
+  height: 16px;
+  padding: 0 5px;
+  font-size: 10px;
+}
+
+.topbar-end {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.topbar-rec {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 12px 0 10px;
+  border: 0;
+  border-radius: 99px;
+  background: var(--deep);
+  color: var(--shine);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.topbar-rec time {
+  color: color-mix(in srgb, var(--shine) 70%, transparent);
+  font-size: 12px;
+}
+
+.topbar-rec:hover {
+  filter: brightness(1.15);
+}
+
+.update-available .update-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* Each section scrolls on its own; hidden ones stay mounted. */
+.view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.view.hidden {
+  display: none;
+}
+
+.shell.focus .view {
+  overflow: hidden;
+}
+
+/* ── page frame ── */
+.page {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 28px 32px 56px;
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+  min-height: 32px;
+}
+
+.page-hint {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -10px 0 18px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.page-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -12px 0 14px -8px;
+}
+
+.page-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.alerts:not(:empty),
+.live-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.live-alerts {
+  padding: 12px 24px 0;
+  margin: 0;
+}
+
+.alert-reason {
+  margin-top: 2px;
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+.alert-details {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.alert-details summary {
+  cursor: default;
+  opacity: 0.8;
+}
+
+.alert-details p {
+  margin-top: 4px;
+  opacity: 0.9;
+}
+
+.list-day {
+  padding: 12px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--faint);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: none;
+  padding: 4px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.disclosure svg {
+  width: 13px;
+  height: 13px;
+}
+
+.disclosure:hover {
+  color: var(--ink);
+}
+
+.section-disclosure {
+  margin: 24px 0 8px;
+}
+
+.section-disclosure .count {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--faint);
+}
+
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--faint);
+  min-height: 26px;
+}
+
+.status-line svg {
+  width: 14px;
+  height: 14px;
+}
+
+.status-line.error {
+  color: var(--danger);
+}
+
+/* ── drag and drop ── */
+.drop-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--rail) 80%, transparent);
+  backdrop-filter: blur(4px);
+}
+
+.drop-veil-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 36px 48px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--r-xl);
+  background: var(--paper);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.drop-veil-inner svg {
+  width: 22px;
+  height: 22px;
+  color: var(--accent);
+}
+
+/* ── software update dialog ── */
+.update-dialog {
+  margin: auto;
+  width: min(520px, calc(100vw - 48px));
+  max-height: calc(100vh - 64px);
+  border: 0;
+  border-radius: var(--r-xl);
+  background: var(--raised);
+  color: var(--ink);
+  box-shadow: var(--shadow-lg);
+  padding: 0;
+}
+
+.update-dialog::backdrop {
+  background: rgba(20, 16, 12, 0.32);
+}
+
+.update-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 16px 0 22px;
+}
+
+.update-head h2 {
+  flex: 1;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.update-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 22px 22px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.update-body > p[role="status"] {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.update-body progress {
+  width: 100%;
+  height: 6px;
+  accent-color: var(--accent);
+}
+
+.update-hint {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.update-notes {
+  width: 100%;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: var(--r);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+
+.update-notes h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.update-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.update-body .alert {
+  width: 100%;
+}

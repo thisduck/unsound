@@ -7,6 +7,7 @@ import { Markdown } from "./Markdown";
 import { createUpdateController, type AppUpdate } from "./updateController";
 import { updateWorkBlocker } from "./updateActivity";
 import { formatBytes } from "./api";
+import { Icon } from "./ui";
 
 const AUTO_KEY = "unsound.auto-check-updates";
 export const openUpdates = () => window.dispatchEvent(new Event("unsound:check-updates"));
@@ -86,16 +87,16 @@ export function UpdateCenter({ busy }: { busy: boolean }) {
   const progress = state.total ? Math.min(100, Math.round(state.downloaded / state.total * 100)) : undefined;
   const close = () => { if (!locked) setVisible(false); };
   return <>
-    <button className={`quiet${hasUpdate ? " update-available" : ""}`} onClick={() => { setVisible(true); if (!hasUpdate) void controller.check(); }}>
-      {hasUpdate ? `update ${state.update!.version}` : "updates"}
-    </button>
+    {hasUpdate && <button className="btn btn-secondary btn-sm update-available" onClick={() => setVisible(true)}>
+      <span className="update-dot" aria-hidden="true" />Update to {state.update!.version}
+    </button>}
     {visible && createPortal(<dialog ref={dialog} className="update-dialog" aria-labelledby="update-title" onCancel={e => { e.preventDefault(); close(); }}>
-      <header className="sheet-head">
+      <header className="update-head">
         <h2 id="update-title">{hasUpdate ? `unsound ${state.update!.version}` : "Software updates"}</h2>
-        <button className="quiet" disabled={locked} onClick={close} aria-label="Close updates">close ✕</button>
+        <button className="btn btn-quiet btn-icon" disabled={locked} onClick={close} aria-label="Close updates"><Icon name="x" /></button>
       </header>
       <div className="update-body">
-        <p className="sheet-hint">Installed version {version || state.update?.currentVersion || "…"}</p>
+        <p className="update-hint">Installed version {version || state.update?.currentVersion || "…"}</p>
         <p role="status" aria-live="polite">{
           state.phase === "checking" ? "Checking for updates…" :
           state.phase === "current" ? "You’re up to date." :
@@ -109,22 +110,22 @@ export function UpdateCenter({ busy }: { busy: boolean }) {
           <h3>What’s new</h3>
           <Markdown text={state.update!.notes || "See the full release notes for details."} />
         </section>}
-        <button className="quiet" disabled={locked} onClick={() => { void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl("https://github.com/thisduck/unsound/releases")).catch(e => setPreferenceError(String(e))); }}>View releases ↗</button>
-        {state.error && <p className="sheet-error" role="alert">Could not complete the update: {state.error}</p>}
+        <button className="btn btn-quiet btn-sm" disabled={locked} onClick={() => { void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl("https://github.com/thisduck/unsound/releases")).catch(e => setPreferenceError(String(e))); }}>View releases ↗</button>
+        {state.error && <p className="alert danger" role="alert">Could not complete the update: {state.error}</p>}
         {blocker && state.phase === "ready" && <p role="status">{blocker}</p>}
         <div className="update-actions">
-          {state.phase === "ready" || locked ? <button className="primary" disabled={locked || !!blocker} onClick={() => { void controller.install(); }}>Update &amp; restart</button> :
-            hasUpdate ? <button className="primary" disabled={inProgress} onClick={() => { void controller.download(); }}>{state.phase === "downloading" ? "Downloading…" : "Download update"}</button> :
-            <button className="primary" disabled={inProgress} onClick={() => { void controller.check(); }}>Check for updates</button>}
-          <button className="quiet" disabled={locked} onClick={close}>{hasUpdate ? "Later" : "Close"}</button>
+          {state.phase === "ready" || locked ? <button className="btn btn-primary" disabled={locked || !!blocker} onClick={() => { void controller.install(); }}>Update &amp; restart</button> :
+            hasUpdate ? <button className="btn btn-primary" disabled={inProgress} onClick={() => { void controller.download(); }}>{state.phase === "downloading" ? "Downloading…" : "Download update"}</button> :
+            <button className="btn btn-primary" disabled={inProgress} onClick={() => { void controller.check(); }}>Check for updates</button>}
+          <button className="btn btn-secondary" disabled={locked} onClick={close}>{hasUpdate ? "Later" : "Close"}</button>
         </div>
-        <label className="update-preference"><input type="checkbox" checked={automatic} disabled={locked} onChange={e => {
+        <label className="update-preference check"><input type="checkbox" checked={automatic} disabled={locked} onChange={e => {
           const enabled = e.target.checked;
           setAutomatic(enabled); setPreferenceError(null);
           try { localStorage.setItem(AUTO_KEY, String(enabled)); } catch { setPreferenceError("Could not save this preference. It applies until you quit unsound."); }
-        }} /> Automatically check for updates</label>
-        <p className="sheet-hint">Checks GitHub on launch and every 12 hours. Your recordings and notes are never sent. Downloads and restarts happen only when you choose.</p>
-        {preferenceError && <p className="sheet-error" role="alert">{preferenceError}</p>}
+        }} /> Check for updates automatically</label>
+        <p className="update-hint">Checks GitHub on launch and every 12 hours. Your recordings and notes are never sent. Downloads and restarts happen only when you choose.</p>
+        {preferenceError && <p className="alert danger" role="alert">{preferenceError}</p>}
       </div>
     </dialog>, document.body)}
   </>;

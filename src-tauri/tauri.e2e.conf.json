@@ -11,7 +11,15 @@
         "label": "main",
         "title": "unsound E2E",
         "width": 1060,
-        "height": 720
+        "height": 720,
+        "minWidth": 860,
+        "minHeight": 600,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 20
+        }
       }
     ]
   }

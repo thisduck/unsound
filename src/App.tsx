@@ -1,17 +1,14 @@
-import { ReminderInbox } from "./meetings/ReminderInbox";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, on, formatBytes, formatDuration, LANGUAGES, ModelInfo, Style } from "./api";
-import { CorrectableText } from "./Correctable";
-import { useLevelHistory, Wave } from "./Wave";
-import { MicPicker } from "./sections";
-import { SettingsSheet } from "./SettingsSheet";
+import { useLevelHistory } from "./Wave";
+import { SettingsSheet, type SettingsSection } from "./SettingsSheet";
 import { Onboarding } from "./Onboarding";
-import { HistoryDrawer, Take } from "./HistoryDrawer";
-import { Meetings } from "./Meetings";
-import { TasksView } from "./TasksView";
+import { Dictations, type Take } from "./Dictations";
+import { Inbox, NeedsYou, useInbox } from "./Inbox";
+import { Meetings, type RecordingInfo } from "./Meetings";
 import { createDictationQueue, type DictationState } from "./dictationQueue";
-import "./App.css";
 import { UpdateCenter } from "./UpdateCenter";
+import { Icon, Logo } from "./ui";
 
 type Phase = "idle" | "recording" | "transcribing" | "cleaning";
 
@@ -50,26 +47,6 @@ function loadHistory(): Take[] {
   }
 }
 
-function Timer({ running }: { running: boolean }) {
-  const [secs, setSecs] = useState(0);
-  useEffect(() => {
-    if (!running) {
-      setSecs(0);
-      return;
-    }
-    const started = Date.now();
-    const t = setInterval(() => setSecs((Date.now() - started) / 1000), 250);
-    return () => clearInterval(t);
-  }, [running]);
-  const m = Math.floor(secs / 60);
-  const s = Math.floor(secs % 60);
-  return (
-    <span className="pill-time">
-      {String(m).padStart(2, "0")}:{String(s).padStart(2, "0")}
-    </span>
-  );
-}
-
 /// What an output-language code asks of cleanup: romanize, or translate into
 /// a named language ("" keeps the transcript's own language).
 function outputLang(code: string): { transliterate: boolean; targetName?: string } {
@@ -89,13 +66,17 @@ export default function App() {
   const [cleaned, setCleaned] = useState("");
   // Live caption shown while dictating (raw, tentative); cleaned text lands at stop.
   const [liveText, setLiveText] = useState("");
-  const [status, setStatus] = useState("ready — local processing");
+  const [status, setStatus] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [view, setView] = useState<"dictate" | "meetings" | "tasks">("dictate");
+  const [settingsOpen, setSettingsOpen] = useState<SettingsSection | null>(null);
+  const [view, setView] = useState<"meetings" | "dictations" | "inbox">("meetings");
   const [reminderTarget, setReminderTarget] = useState<{ id: string; at: number | null } | null>(null);
-  const [readyTasks, setReadyTasks] = useState(0);
+  const [recording, setRecording] = useState<RecordingInfo | null>(null);
+  const [liveVisible, setLiveVisible] = useState(false);
+  const [liveRequest, setLiveRequest] = useState(0);
+  const [currentId, setCurrentId] = useState<string | null>(null);
+  const [shortcut, setShortcut] = useState<string | null>(null);
+  const inbox = useInbox();
   const [rawOpen, setRawOpen] = useState(false);
   const [onboarding, setOnboarding] = useState(() => !localStorage.getItem("unsound.onboarded"));
   const [prompt, setPrompt] = useLocalStorage("unsound.prompt", "");
@@ -169,6 +150,7 @@ export default function App() {
   const refreshStyles = useCallback(async (adoptDefault = false) => {
     const s = await api.getSettings();
     setStylesList(s.styles);
+    setShortcut(s.handsFree[0] || s.pushToTalk[0] || null);
     if (adoptDefault || !s.styles.some((st) => st.id === styleIdRef.current)) {
       styleIdRef.current = s.defaultStyle;
       setStyleId(s.defaultStyle);
@@ -200,6 +182,13 @@ export default function App() {
       on.pttCancel(() => pttRef.current("cancel")),
       on.dictationLive(({ takeId, text }) => {
         if (phaseRef.current === "recording" && takeRef.current === takeId) setLiveText(text);
+      }),
+      // The floating recording indicator asks for the live meeting.
+      on.navigate((target) => {
+        if (target === "live") {
+          setView("meetings");
+          setLiveRequest((n) => n + 1);
+        }
       }),
     ];
     // Window drag-and-drop for audio files.
@@ -271,14 +260,14 @@ export default function App() {
   const transcribeNow = async (model: ModelInfo): Promise<string | null> => {
     if (dictationStateRef.current.capturing || dictationStateRef.current.pending) return null;
     changePhase("transcribing");
-    setStatus(`transcribing with ${model.name}…`);
+    setStatus(`Transcribing with ${model.name}…`);
     setError(null);
     try {
       const text = await api.transcribe(model.id, language || undefined);
       setTranscript(text);
       upsertTake({ raw: text, sttModel: model.name, lang: language });
       changePhase("idle");
-      setStatus("transcript ready");
+      setStatus("Transcript ready");
       return text;
     } catch (e) {
       setError(String(e));
@@ -293,7 +282,7 @@ export default function App() {
   const transcribeFromFile = async (path: string) => {
     if (dictationStateRef.current.capturing || dictationStateRef.current.pending || phaseRef.current !== "idle") return;
     if (!stt) {
-      setError("download a speech model first (settings → models)");
+      setError("Download a speech model first (Settings → Models).");
       return;
     }
     const name = path.split("/").pop() || "file";
@@ -301,14 +290,15 @@ export default function App() {
     setTranscript("");
     setCleaned("");
     setRawOpen(false);
-    setStatus(`decoding ${name}…`);
+    setStatus(`Reading ${name}…`);
     setError(null);
     takeRef.current = crypto.randomUUID();
+    setCurrentId(takeRef.current);
     // A one-shot listener shows the file's size and length once decoding
     // finishes, so long files don't look stuck.
     const infoSub = on.fileInfo(({ sizeBytes, durationSecs }) => {
       setStatus(
-        `transcribing ${name} · ${formatDuration(durationSecs)} · ${formatBytes(sizeBytes)}…`,
+        `Transcribing ${name} · ${formatDuration(durationSecs)} · ${formatBytes(sizeBytes)}…`,
       );
     });
     try {
@@ -316,7 +306,7 @@ export default function App() {
       setTranscript(text);
       upsertTake({ raw: text, sttModel: stt.name, app: name, lang: language });
       changePhase("idle");
-      setStatus(`transcribed ${name}`);
+      setStatus(`Transcribed ${name}`);
       if (llm) await runCleanup(text);
     } catch (e) {
       setError(String(e));
@@ -351,10 +341,10 @@ export default function App() {
     cleaningRef.current = takeRef.current;
     setStatus(
       transliterate
-        ? "refining → romanized…"
+        ? "Cleaning up in Latin script…"
         : targetName
-          ? `refining → ${targetName}…`
-          : `refining with ${llm.name}…`,
+          ? `Translating to ${targetName}…`
+          : `Cleaning up with ${llm.name}…`,
     );
     setError(null);
     try {
@@ -371,7 +361,7 @@ export default function App() {
       setCleaned(result);
       upsertTake({ refined: result, llmModel: llm.name });
       changePhase("idle");
-      setStatus("refined — copy it out, or swap models and re-run");
+      setStatus("Cleaned up");
       return result;
     } catch (e) {
       cleaningRef.current = null;
@@ -412,9 +402,9 @@ export default function App() {
         hotkeyTakesRef.current.delete(take.id);
         if (takeRef.current === take.id) {
           changePhase("idle");
-          setStatus(cancelled ? "cancelled" : res.durationSecs < 0.35
-            ? "take too short — hold a moment longer"
-            : "recorded — download a speech model to transcribe");
+          setStatus(cancelled ? "Cancelled" : res.durationSecs < 0.35
+            ? "Too short to transcribe. Hold the shortcut a little longer."
+            : "Recorded. Download a speech model to transcribe it.");
         }
         return null;
       }
@@ -426,7 +416,7 @@ export default function App() {
       try {
         if (current()) {
           changePhase("transcribing");
-          setStatus(`transcribing with ${model.name}…`);
+          setStatus(`Transcribing with ${model.name}…`);
         }
         const text = await api.transcribe(model.id, take.language || undefined, false, take.id);
         upsertTake({ raw: text, sttModel: model.name, lang: take.language }, take.id, take.at);
@@ -437,7 +427,7 @@ export default function App() {
           if (current()) {
             changePhase("cleaning");
             setCleaned("");
-            setStatus(`refining with ${take.llm.name}…`);
+            setStatus(`Cleaning up with ${take.llm.name}…`);
           }
           cleaningRef.current = take.id;
           try {
@@ -455,9 +445,9 @@ export default function App() {
         if (take.fromHotkey && text) {
           const target = await api.deliverText(refined ?? text);
           if (target) upsertTake({ app: target }, take.id, take.at);
-          if (current()) setStatus(`typed into ${target || "the frontmost app"}`);
+          if (current()) setStatus(`Typed into ${target || "the front app"}`);
         } else if (current()) {
-          setStatus(text ? "transcript ready" : "no speech detected");
+          setStatus(text ? "Transcript ready" : "No speech detected");
         }
       } finally {
         hotkeyTakesRef.current.delete(take.id);
@@ -481,6 +471,7 @@ export default function App() {
       stt, llm, language, prompt, style: styleIdRef.current, outLang: outLangRef.current,
     };
     takeRef.current = take.id;
+    setCurrentId(take.id);
     if (fromHotkey) hotkeyTakesRef.current.add(take.id);
     setError(null);
     setTranscript("");
@@ -488,14 +479,14 @@ export default function App() {
     setLiveText("");
     setRawOpen(false);
     changePhase("idle");
-    setStatus(fromHotkey ? "recording — release or press the shortcut again to stop" : "recording — everything stays on this machine");
+    setStatus(fromHotkey ? "Recording. Press the shortcut again to stop." : "Recording on this Mac");
     queue.start(take);
   };
 
   const stopTake = (cancelled = false) => {
     if (!queueRef.current!.state().active) return;
     changePhase(cancelled ? "idle" : "transcribing");
-    setStatus(cancelled ? "cancelled" : "processing — you can speak again");
+    setStatus(cancelled ? "Cancelled" : "Processing. You can dictate again.");
     queueRef.current!.stop(cancelled);
   };
 
@@ -533,35 +524,35 @@ export default function App() {
       setCleaned(next);
       upsertTake({ refined: next });
     }
-    setStatus(`learned: "${from}" → "${to}" — future takes will hear it right`);
+    setStatus(`Added to dictionary: “${from}” → “${to}”`);
   };
 
   const copy = (text: string, what: string) => {
     navigator.clipboard.writeText(text);
-    setStatus(`${what} copied to clipboard`);
+    setStatus(`${what} copied`);
   };
 
   const loadTake = (take: Take) => {
     if (dictationStateRef.current.capturing || dictationStateRef.current.pending || phaseRef.current !== "idle") return;
     takeRef.current = take.id;
+    setCurrentId(take.id);
     setTranscript(take.raw);
     setCleaned(take.refined);
-    setHistoryOpen(false);
     setRawOpen(!take.refined);
     // Restore the spoken language this take was recorded in.
     if (take.lang !== undefined) setLanguage(take.lang);
-    setStatus("loaded from history");
+    setStatus("");
   };
 
   const busy = dictationState.capturing || dictationState.pending > 0 || phase === "transcribing" || phase === "cleaning";
   const manualBusy = busy && !dictationState.capturing && dictationState.pending === 0;
   const waveBars = useLevelHistory(phase === "recording");
-  const heroText = cleaned || "";
 
   // Switching style re-renders the current take immediately.
   const styleSwitcher = stylesList.length > 0 && (
     <select
-      className="chip-select style-chip"
+      className="select select-sm"
+      aria-label="Writing style"
       value={styleId}
       disabled={busy}
       onChange={(e) => {
@@ -570,10 +561,10 @@ export default function App() {
       }}
       title="Writing style"
     >
-      <option value="">no style</option>
+      <option value="">No style</option>
       {stylesList.map((s) => (
         <option key={s.id} value={s.id}>
-          ✍ {s.name}
+          {s.name}
         </option>
       ))}
     </select>
@@ -582,77 +573,86 @@ export default function App() {
   // Output-language switcher — re-renders the current take when changed.
   const outLangSwitcher = (
     <select
-      className="chip-select outlang-chip"
+      className="select select-sm"
+      aria-label="Output language"
       value={outLang}
       disabled={busy}
       onChange={(e) => {
         setOutLang(e.target.value);
         if (transcript && phaseRef.current === "idle") runCleanup(transcript, undefined, e.target.value);
       }}
-      title="Output language — keep the original, or translate"
+      title="Keep the original language, or translate"
     >
-      <option value="">keep language</option>
-      <option value="translit">transliterate (Latin script)</option>
+      <option value="">Keep language</option>
+      <option value="translit">Latin script</option>
       {LANGUAGES.filter((l) => l.code !== "").map((l) => (
         <option key={l.code} value={l.code}>
-          → {l.name}
+          Translate to {l.name}
         </option>
       ))}
     </select>
   );
-  const pillLabel =
-    phase === "recording"
-      ? "listening — tap to stop"
-      : dictationState.pending > 0
-        ? "tap to speak again"
-        : phase === "transcribing"
-          ? "transcribing…"
-          : phase === "cleaning"
-            ? "refining…"
-            : "tap to speak";
+  // Opening Dictations shows the newest one rather than an empty reader.
+  useEffect(() => {
+    if (view === "dictations" && !currentId && history.length && phaseRef.current === "idle" && !dictationStateRef.current.pending) loadTake(history[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, history.length]);
+
+  const modelsReady = sttModels.length > 0 && llmModels.length > 0;
+  const tabs = [
+    { id: "meetings" as const, label: "Meetings" },
+    { id: "dictations" as const, label: "Dictations" },
+    { id: "inbox" as const, label: "Inbox", count: inbox.attention },
+  ];
+  const openSource = (id: string, at?: number | null) => {
+    setView("meetings");
+    setReminderTarget({ id, at: at ?? null });
+  };
+  // The live meeting takes the whole window, with its own stage bar.
+  const focusMode = view === "meetings" && liveVisible;
 
   return (
-    <div className="shell">
-      <header className="head">
-        <img src="/unsound.svg" alt="" className="mark-logo" />
-        <span className="mark">unsound</span>
-        <nav className="nav">
-          <button
-            className={"nav-tab" + (view === "dictate" ? " on" : "")}
-            onClick={() => setView("dictate")}
-          >
-            dictate
-          </button>
-          <button
-            className={"nav-tab" + (view === "meetings" ? " on" : "")}
-            onClick={() => setView("meetings")}
-          >
-            meetings<span className="beta-badge">beta</span>
-          </button>
-          <button
-            className={"nav-tab" + (view === "tasks" ? " on" : "")}
-            onClick={() => setView("tasks")}
-          >
-            tasks{readyTasks > 0 && <span className="count-badge">{readyTasks}</span>}
-          </button>
-        </nav>
-        <span className="spacer" />
-        <UpdateCenter busy={phase !== "idle" || dictationState.pending > 0} />
-        {view === "dictate" && (
-          <button className="quiet" onClick={() => setHistoryOpen(true)}>
-            history
-          </button>
-        )}
-        <button className="quiet" onClick={() => setSettingsOpen(true)}>
-          settings
-        </button>
-      </header>
+    <div className={"shell" + (focusMode ? " focus" : "")}>
+      {!focusMode && (
+        <header className="topbar" data-tauri-drag-region>
+          <div className="topbar-brand" data-tauri-drag-region>
+            <Logo size={20} />
+            <span data-tauri-drag-region>unsound</span>
+          </div>
+          <nav className="topbar-nav segmented" aria-label="Sections">
+            {tabs.map((t) => (
+              <button key={t.id} aria-pressed={view === t.id} onClick={() => setView(t.id)}>
+                {t.label}
+                {!!t.count && <span className="badge">{t.count}</span>}
+              </button>
+            ))}
+          </nav>
+          <div className="topbar-end">
+            {recording && (
+              <button
+                className="topbar-rec"
+                onClick={() => {
+                  setView("meetings");
+                  setLiveRequest((n) => n + 1);
+                }}
+                title="Open the live meeting"
+              >
+                <span className="rec-dot" />
+                Recording
+                <RecClock since={recording.startedAt} />
+              </button>
+            )}
+            <UpdateCenter busy={phase !== "idle" || dictationState.pending > 0} />
+            <button className="btn btn-quiet btn-icon" onClick={() => setSettingsOpen("general")} aria-label="Settings" title="Settings">
+              <Icon name="settings" />
+            </button>
+          </div>
+        </header>
+      )}
 
-      <ReminderInbox onSource={(id, at) => { setView("meetings"); setReminderTarget({ id, at: at ?? null }); }} />
-
-      {/* Meetings stays mounted (hidden when inactive) so the tray "Start /
-          stop meeting" toggle works from any tab or with the window hidden. */}
-      <div className={"view-wrap" + (view === "meetings" ? "" : " hidden")}>
+      {/* Meetings stays mounted (hidden when inactive) so the tray "Record a
+          meeting" toggle works from any section or with the window hidden. */}
+      <main className={"view" + (view === "meetings" ? "" : " hidden")}>
         <Meetings
           stt={stt}
           llm={llm}
@@ -661,166 +661,65 @@ export default function App() {
           onModelsChanged={refreshModels}
           openRequest={reminderTarget}
           onActivate={() => setView("meetings")}
+          onRecordingChange={setRecording}
+          onLiveVisibleChange={setLiveVisible}
+          liveRequest={liveRequest}
+          needsYou={<NeedsYou data={inbox} onOpenInbox={() => setView("inbox")} />}
+          onOpenSettings={() => setSettingsOpen("meetings")}
         />
-      </div>
-
-      {/* Tasks stays mounted too, so its "needs your ok" count stays live. */}
-      <div className={"view-wrap" + (view === "tasks" ? "" : " hidden")}>
-        <TasksView onCount={setReadyTasks} />
-      </div>
-
-      {view === "dictate" && (
-        <>
-          {/* dictation view below */}
-
-      <div className="stage">
-        <button
-          className={"pill" + (phase === "recording" ? " live" : "")}
-          onClick={() => toggleRecord()}
-          disabled={manualBusy}
-        >
-          {phase === "recording" ? (
-            <Wave bars={waveBars} className="pill-wave" />
-          ) : (
-            <span className="pill-dot" />
-          )}
-          {pillLabel}
-          <Timer running={phase === "recording"} />
-        </button>
-      </div>
-
-      <div className="stage-utils">
-        <button
-          className="util-link"
-          onClick={pickFile}
-          disabled={busy || phase === "recording"}
-          title="Transcribe an audio file (or drop one on the window)"
-        >
-          ↑ upload a file
-        </button>
-        <span className="util-sep">·</span>
-        <span className="util-lang" title="Spoken language — what Whisper listens for">
-          <select
-            className="util-select"
-            value={language}
-            onChange={(e) => setLanguage(e.target.value)}
-            disabled={busy}
-          >
-            {LANGUAGES.map((l) => (
-              <option key={l.code} value={l.code}>
-                {l.code === "" ? "auto-detect" : `speaking ${l.name}`}
-              </option>
-            ))}
-          </select>
-        </span>
-      </div>
-
-      <main className="body">
-        {(sttModels.length === 0 || llmModels.length === 0) && phase === "idle" && !transcript ? (
-          <div className="empty">
-            <p>
-              unsound listens, transcribes with a local Whisper model, and tidies the words with a
-              local LLM. Nothing leaves this machine.
-            </p>
-            <button className="quiet accent" onClick={() => setSettingsOpen(true)}>
-              download models to get started →
-            </button>
-          </div>
-        ) : phase === "recording" ? (
-          <div className="prose dim">
-            {liveText || <span className="placeholder">listening… your words will appear here</span>}
-            <span className="caret" />
-          </div>
-        ) : (
-          <>
-            {heroText || phase === "cleaning" ? (
-              <>
-                <div className="hero-tools">
-                  {styleSwitcher}
-                  {outLangSwitcher}
-                  {cleaned && (
-                    <>
-                      <button className="quiet" onClick={() => copy(cleaned, "refined text")}>
-                        copy
-                      </button>
-                      <button
-                        className="quiet"
-                        disabled={busy || !transcript}
-                        onClick={() => runCleanup(transcript)}
-                      >
-                        re-refine
-                      </button>
-                    </>
-                  )}
-                </div>
-                <div className="prose">
-                  {phase === "cleaning" ? (
-                    heroText
-                  ) : (
-                    <CorrectableText text={heroText} onCorrect={correctIn("refined")} />
-                  )}
-                  {phase === "cleaning" && <span className="caret" />}
-                </div>
-              </>
-            ) : (
-              transcript && (
-                <div className="prose dim">
-                  <CorrectableText text={transcript} onCorrect={correctIn("raw")} />
-                  {llm && phase === "idle" && (
-                    <div className="hero-tools" style={{ marginTop: 16 }}>
-                      {styleSwitcher}
-                      {outLangSwitcher}
-                      <button className="quiet accent" onClick={() => runCleanup(transcript)}>
-                        refine ↦
-                      </button>
-                      <button className="quiet" onClick={() => copy(transcript, "transcript")}>
-                        copy
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )
-            )}
-
-            {transcript && cleaned && (
-              <div className="raw-block">
-                <button className="raw-toggle" onClick={() => setRawOpen((o) => !o)}>
-                  {rawOpen ? "▾" : "▸"} raw transcript
-                </button>
-                {rawOpen && (
-                  <div className="raw-body">
-                    <div className="raw-text">
-                      <CorrectableText text={transcript} onCorrect={correctIn("raw")} />
-                    </div>
-                    <div className="hero-tools">
-                      <button className="quiet" onClick={() => copy(transcript, "transcript")}>
-                        copy
-                      </button>
-                      {stt && (
-                        <button className="quiet" disabled={busy} onClick={() => transcribeNow(stt)}>
-                          re-transcribe
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </>
-        )}
       </main>
 
-      <footer className="foot">
-        <span className={"foot-dot" + (phase === "recording" ? " live" : "")} />
-        <span className="foot-text">{error ?? status}</span>
-        {error && (
-          <button className="quiet" onClick={() => setError(null)}>
-            dismiss
-          </button>
-        )}
-        <MicPicker className="chip-select mic-chip" />
-      </footer>
-        </>
+      {view === "inbox" && (
+        <main className="view">
+          <Inbox data={inbox} onSource={openSource} />
+        </main>
+      )}
+
+      {view === "dictations" && (
+        <main className="view">
+          <Dictations
+            history={history}
+            currentId={currentId}
+            onSelect={loadTake}
+            onDelete={(id) => {
+              setHistory((h) => h.filter((t) => t.id !== id));
+              if (id === currentId) {
+                setCurrentId(null);
+                setTranscript("");
+                setCleaned("");
+              }
+              api.deleteTake(id).catch((e) => console.error("failed to delete dictation", e));
+            }}
+            phase={phase}
+            pending={dictationState.pending}
+            liveText={liveText}
+            waveBars={waveBars}
+            transcript={transcript}
+            cleaned={cleaned}
+            rawOpen={rawOpen}
+            onRawOpen={setRawOpen}
+            status={status}
+            error={error}
+            onDismissError={() => setError(null)}
+            busy={busy}
+            manualBusy={manualBusy}
+            modelsReady={modelsReady}
+            hasLlm={!!llm}
+            hasStt={!!stt}
+            shortcut={shortcut}
+            language={language}
+            onLanguage={setLanguage}
+            styleSwitcher={styleSwitcher}
+            outLangSwitcher={outLangSwitcher}
+            onToggleRecord={() => toggleRecord()}
+            onPickFile={pickFile}
+            onCleanUp={() => runCleanup(transcript)}
+            onRetranscribe={() => stt && transcribeNow(stt)}
+            onCopy={copy}
+            onCorrect={correctIn}
+            onOpenModels={() => setSettingsOpen("models")}
+          />
+        </main>
       )}
 
       {settingsOpen && (
@@ -835,11 +734,20 @@ export default function App() {
           onPromptChange={setPrompt}
           textScale={textScale}
           onTextScaleChange={setTextScale}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => setSettingsOpen(null)}
           onChanged={refreshModels}
           onReplayOnboarding={() => {
-            setSettingsOpen(false);
+            setSettingsOpen(null);
             setOnboarding(true);
+          }}
+          initialSection={settingsOpen}
+          dictationCount={history.length}
+          onClearDictations={() => {
+            setHistory([]);
+            setCurrentId(null);
+            setTranscript("");
+            setCleaned("");
+            api.clearTakes().catch((e) => console.error("failed to clear dictations", e));
           }}
         />
       )}
@@ -854,27 +762,28 @@ export default function App() {
           }}
         />
       )}
-      {historyOpen && (
-        <HistoryDrawer
-          takes={history}
-          onClose={() => setHistoryOpen(false)}
-          onLoad={loadTake}
-          onDelete={(id) => {
-            setHistory((h) => h.filter((t) => t.id !== id));
-            api.deleteTake(id).catch((e) => console.error("failed to delete take", e));
-          }}
-          onClear={() => {
-            setHistory([]);
-            api.clearTakes().catch((e) => console.error("failed to clear history", e));
-          }}
-          onCopy={copy}
-        />
-      )}
       {dragOver && (
         <div className="drop-veil">
-          <div className="drop-veil-inner">drop an audio file to transcribe</div>
+          <div className="drop-veil-inner">
+            <Icon name="upload" />
+            Drop an audio file to transcribe it
+          </div>
         </div>
       )}
     </div>
   );
+}
+
+/// Elapsed time since an ISO start, ticking.
+function RecClock({ since }: { since: string }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(t);
+  }, []);
+  const secs = Math.max(0, Math.floor((now - new Date(since).getTime()) / 1000));
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const ss = String(secs % 60).padStart(2, "0");
+  return <time>{h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`}</time>;
 }
