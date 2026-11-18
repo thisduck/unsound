@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, on, OverlayState } from "./api";
 import { useLevelHistory, Wave } from "./Wave";
-import "./App.css";
+import { Icon } from "./ui";
 
 /// Rendered in the tiny always-on-top window while dictating into other apps:
 /// the wave, with the words so far streaming in a bubble above it.
@@ -17,7 +17,7 @@ export default function Overlay() {
   const bars = useLevelHistory(state === "recording" || state === "command");
 
   useEffect(() => {
-    document.documentElement.classList.add("overlay-root");
+    document.documentElement.classList.add("overlay-root", "floating-root");
     const subs = [
       on.overlayState((s, takeId) => {
         // A new take starts blank; the last caption stays up while it's processed.
@@ -65,7 +65,8 @@ export default function Overlay() {
   return (
     <div className="overlay-stack">
       {toast && (
-        <div className="overlay-caption overlay-toast">
+        <div className="overlay-toast" role="status">
+          <Icon name="check" size={14} stroke={2.5} />
           <p>{toast}</p>
         </div>
       )}
@@ -75,7 +76,7 @@ export default function Overlay() {
         </div>
       )}
       {showPill && <div className={"overlay-pill" + (state === "command" ? " command" : "")}>
-        {state === "command" && <span className="overlay-label">ask</span>}
+        {state === "command" && <span className="overlay-label">Ask unsound</span>}
         {state === "processing" ? (
           <div className="overlay-processing">
             <span className="overlay-dot" />

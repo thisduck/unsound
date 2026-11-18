@@ -1,0 +1,447 @@
+/* ── floating windows ─────────────────────────────────────────────
+   The dictation overlay, the call-detected prompt and the recording
+   indicator each live in their own small transparent window over other
+   apps. They always use the dark palette (.floating-root in tokens.css).
+   Only the surface shows; the window margin around it is where the drop
+   shadow draws, so shadows are sized to fit inside it. */
+
+:root.overlay-root,
+:root.overlay-root body,
+:root.overlay-root #root,
+:root.prompt-root,
+:root.prompt-root body,
+:root.prompt-root #root,
+:root.meeting-indicator-root,
+:root.meeting-indicator-root body,
+:root.meeting-indicator-root #root {
+  background: transparent !important;
+  overflow: hidden;
+  height: 100%;
+}
+
+.floating-root body {
+  font-size: 13px;
+  line-height: 18px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.floating-root {
+  /* Fits inside an 8px top / 10px side / 16px bottom margin. */
+  --fl-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.35);
+  --fl-hairline: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+}
+
+.fl-surface {
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: var(--fl-shadow), var(--fl-hairline);
+}
+
+.fl-pill {
+  border-radius: 999px;
+}
+
+.fl-time {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* Floating controls are 28px. */
+.fl-btn {
+  height: 28px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.fl-btn.btn-quiet {
+  padding: 0 10px;
+}
+
+.fl-icon-btn {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  transition: background 0.12s, color 0.12s;
+}
+
+.fl-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink);
+}
+
+.fl-icon-btn:focus-visible,
+.fl-indicator-open:focus-visible {
+  border-radius: 999px;
+}
+
+/* ── recording indicator (352 × 64 window; 352 × 108 with the card) ── */
+.fl-stack-indicator {
+  height: 100%;
+  padding: 8px 10px 16px;
+}
+
+.fl-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 40px;
+  padding: 0 6px 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* The logo and dot are a native drag handle. Tauri only drags when the
+   element carrying the attribute is the pointer target. */
+.fl-indicator-grip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  padding-right: 4px;
+  cursor: grab;
+}
+
+.fl-indicator-grip > * {
+  pointer-events: none;
+}
+
+.fl-indicator-grip .logo {
+  display: block;
+}
+
+/* The label opens the live view on click and drags the window on a move. */
+.fl-indicator-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 4px 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.fl-indicator-open:hover .fl-indicator-label {
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 255, 255, 0.25);
+  text-underline-offset: 3px;
+}
+
+.fl-indicator-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fl-indicator-label.flagged {
+  color: var(--accent);
+}
+
+.fl-indicator-sync {
+  font-size: 12px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.fl-stop {
+  flex: none;
+  gap: 7px;
+  padding: 0 12px 0 11px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink);
+}
+
+.fl-stop:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.fl-stop:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.fl-stop-glyph {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--rec);
+}
+
+/* Call ended: "Zoom left the call · 41:02" / "Stop recording? Keep Stop". */
+.fl-ended {
+  border-radius: 16px;
+  padding: 12px 12px 12px 14px;
+}
+
+.fl-ended-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 20px;
+  padding-right: 2px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: grab;
+}
+
+.fl-ended-head > * {
+  pointer-events: none;
+}
+
+.fl-ended-head .logo {
+  display: block;
+  flex: none;
+}
+
+.fl-ended-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fl-ended-title.danger {
+  color: var(--danger);
+}
+
+.fl-ended-head .fl-time {
+  margin-left: auto;
+  color: var(--faint);
+}
+
+.fl-ended-body {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.fl-ended-ask {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── call-detected prompt (360 × 120 window) ── */
+.fl-stack-prompt {
+  height: 100%;
+  display: flex;
+  padding: 6px 10px 12px;
+}
+
+.fl-prompt {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  border-radius: 16px;
+  padding: 14px 12px 12px 14px;
+}
+
+.fl-prompt-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fl-prompt-head .logo {
+  display: block;
+  flex: none;
+}
+
+.fl-prompt-text {
+  min-width: 0;
+}
+
+.fl-prompt-title {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fl-prompt-sub {
+  margin-top: 1px;
+  font-size: 12.5px;
+  line-height: 17px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fl-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* ── dictation overlay (460 × 156 window, click-through) ──
+   The pill sits at the bottom edge; the caption grows upward from it. */
+.overlay-stack {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 14px;
+}
+
+.overlay-pill,
+.overlay-caption,
+.overlay-toast {
+  box-shadow: var(--fl-shadow), var(--fl-hairline);
+}
+
+.overlay-pill {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 180px;
+  height: 44px;
+  padding: 0 18px;
+  border-radius: 999px;
+  background: var(--rail);
+}
+
+.overlay-pill.command {
+  width: auto;
+  padding: 0 18px 0 16px;
+}
+
+.overlay-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.overlay-wave {
+  width: 130px;
+  height: 22px;
+  color: var(--accent);
+}
+
+.overlay-pill.command .overlay-wave {
+  width: 96px;
+}
+
+.overlay-wave .wave-bar {
+  flex: 1;
+  width: auto;
+}
+
+.overlay-processing {
+  display: flex;
+  gap: 6px;
+}
+
+.overlay-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: overlay-bounce 1s ease-in-out infinite;
+}
+
+.overlay-dot:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.overlay-dot:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes overlay-bounce {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* Three lines at most. Bottom-aligned: overflow spills off the top, so the
+   newest words stay visible. Overlay.tsx reads the padding to detect it. */
+.overlay-caption {
+  max-width: 100%;
+  max-height: calc(3 * 1.5em + 20px);
+  padding: 10px 14px;
+  border-radius: 16px;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
+.overlay-caption.clipped p {
+  mask-image: linear-gradient(to bottom, transparent, #000 1.5em);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 1.5em);
+}
+
+.overlay-toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 34px;
+  padding: 7px 14px 7px 12px;
+  border-radius: 17px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.overlay-toast svg {
+  flex: none;
+  color: var(--ok);
+}
+
+.overlay-toast p {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

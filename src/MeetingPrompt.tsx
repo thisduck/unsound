@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
-import "./App.css";
+import { Logo } from "./ui";
 
 interface Detected {
   app: string;
@@ -23,7 +23,7 @@ export default function MeetingPrompt() {
   };
 
   useEffect(() => {
-    document.documentElement.classList.add("prompt-root");
+    document.documentElement.classList.add("prompt-root", "floating-root");
     const sub = listen<Detected>("meeting-detected", (e) => {
       setDetected(e.payload);
       window.clearTimeout(timer.current);
@@ -41,21 +41,23 @@ export default function MeetingPrompt() {
   };
 
   return (
-    <div className="prompt-stack">
-      <div className="prompt-card">
-        <div className="prompt-header">
-          <img src="/unsound.svg" alt="" className="prompt-logo" />
-          <div className="prompt-text">
-            <div className="prompt-title">{detected ? `${detected.app} is using your mic` : "A call may have started"}</div>
-            <div className="prompt-sub">Record this meeting with unsound.</div>
+    <div className="fl-stack fl-stack-prompt">
+      <div className="fl-surface fl-prompt" role="dialog" aria-labelledby="fl-prompt-title">
+        <div className="fl-prompt-head">
+          <Logo size={30} />
+          <div className="fl-prompt-text">
+            <div id="fl-prompt-title" className="fl-prompt-title">
+              {detected ? `${detected.app} call started` : "A call may have started"}
+            </div>
+            <div className="fl-prompt-sub">Record it and get notes when it ends?</div>
           </div>
         </div>
-        <div className="prompt-actions">
-          <button className="quiet" onClick={hide}>
+        <div className="fl-prompt-actions">
+          <button className="btn btn-quiet fl-btn" onClick={hide}>
             Not now
           </button>
-          <button className="quiet accent" onClick={record}>
-            Start unsound meeting
+          <button className="btn btn-primary fl-btn" onClick={record}>
+            Record
           </button>
         </div>
       </div>

@@ -2,8 +2,10 @@
 use tauri::{AppHandle, Emitter, Manager};
 
 const LABEL: &str = "meeting-indicator";
-const WIDTH: f64 = 336.0;
-const HEIGHT: f64 = 76.0;
+// Pill plus a transparent margin for its shadow. MeetingIndicator.tsx grows
+// the window while it shows the taller call-ended card.
+const WIDTH: f64 = 352.0;
+const HEIGHT: f64 = 64.0;
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let window = tauri::WebviewWindowBuilder::new(
@@ -90,7 +92,7 @@ fn position(app: &AppHandle, window: &tauri::WebviewWindow) {
     let Some(monitor) = monitor else { return };
     let scale = monitor.scale_factor();
     let origin = monitor.position();
-    let x = origin.x as f64 + monitor.size().width as f64 - (WIDTH + 16.0) * scale;
+    let x = origin.x as f64 + monitor.size().width as f64 - (WIDTH + 12.0) * scale;
     let y = origin.y as f64 + 36.0 * scale;
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
