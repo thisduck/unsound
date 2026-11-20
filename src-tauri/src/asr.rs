@@ -441,6 +441,8 @@ pub fn transcribe_text(
         #[cfg(feature = "automation")]
         Engine::Fixture(f) => f.transcribe(samples, &AtomicBool::new(false)),
         Engine::Whisper(path) => stt::transcribe(caches.stt, path, samples, language, initial_prompt),
+        // As `stt::transcribe` reports it.
+        Engine::Parakeet(_) if samples.len() < 1600 => Err("recording is too short to transcribe".into()),
         Engine::Parakeet(path) => parakeet_text(caches, path, samples, None),
         Engine::Moonshine(m) => Ok(m.transcribe(samples)),
     }

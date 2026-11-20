@@ -1213,6 +1213,18 @@ fn run_transcribe(
                 detect_with = Some(path.to_path_buf());
             }
         }
+        // The fallback hears the start of an auto meeting (until detection is
+        // sure), or all of one in a language the model lacks.
+        if let (Some(sel), Some(asr::Engine::Whisper(path))) = (selection.as_ref(), fallback.as_ref()) {
+            let needed = language
+                .as_deref()
+                .is_none_or(|l| sel.route(asr::Heard::Known(l)) == asr::Route::Fallback);
+            if needed {
+                if let Err(e) = st.stt.warmup(path) {
+                    eprintln!("[meeting] fallback warmup failed: {e}");
+                }
+            }
+        }
     }
     let s = settings::load(&app);
     let db = app.state::<Db>();

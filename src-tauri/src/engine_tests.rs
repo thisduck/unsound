@@ -163,6 +163,19 @@ fn real_engines_through_app_paths() {
     let full = parakeet.transcribe(&v3, &long, None).unwrap();
     println!("same audio uncancelled: {} chars in {} ms", full.text.len(), t.elapsed().as_millis());
 
+    println!("\n== long file (dictation path, every AMI headset clip back to back) ==");
+    let long: Vec<f32> = (0..80).flat_map(|i| clip(&format!("ami_ihm/{i:03}.wav"))).collect();
+    let t = Instant::now();
+    match run.dictate(&sel3, &v3, Some("en"), &long) {
+        Ok((how, text)) => println!(
+            "{:.0} s of audio: {how}, {} words, total {} ms",
+            long.len() as f32 / 16_000.0,
+            text.split_whitespace().count(),
+            t.elapsed().as_millis()
+        ),
+        Err(e) => println!("long file failed: {e}"),
+    }
+
     parakeet.clear();
     stt.clear();
 }
