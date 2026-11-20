@@ -103,6 +103,9 @@ pub struct Meeting {
     /// Calendar attendees (display names) captured at start, when available.
     #[serde(default)]
     pub attendees: Vec<String>,
+    /// People seen on the call app's participant list during the meeting.
+    #[serde(default)]
+    pub participants: crate::participants::Participants,
     /// Moments the user flagged while recording. Populated by `get_meeting`.
     #[serde(default)]
     pub marks: Vec<Mark>,
@@ -482,6 +485,15 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             PRAGMA user_version=7; COMMIT;")?;
     }
 
+    // Observed participants stay apart from calendar invitees; a name's source
+    // (user, voice, roster) decides what automatic naming may replace.
+    if version < 8 {
+        conn.execute_batch("BEGIN;
+            ALTER TABLE meetings ADD COLUMN participants TEXT NOT NULL DEFAULT '{}';
+            ALTER TABLE speaker_names ADD COLUMN source TEXT NOT NULL DEFAULT 'user';
+            PRAGMA user_version=8; COMMIT;")?;
+    }
+
     Ok(())
 }
 
@@ -690,7 +702,7 @@ pub fn list_meetings(db: &Db) -> Result<Vec<Meeting>, String> {
             "SELECT m.id, m.title, m.started_at, m.ended_at, m.summary, m.notes,
                     m.stt_model, m.llm_model, m.lang,
                     (SELECT COUNT(*) FROM segments s WHERE s.meeting_id = m.id),
-                    m.attendees, m.content_revision, m.summary_revision
+                    m.attendees, m.content_revision, m.summary_revision, m.participants
              FROM meetings m ORDER BY m.started_at DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -712,6 +724,7 @@ pub fn list_meetings(db: &Db) -> Result<Vec<Meeting>, String> {
                 segment_count: r.get(9)?,
                 speaker_names: std::collections::HashMap::new(),
                 attendees: parse_names(&r.get::<_, String>(10)?),
+                participants: parse_participants(&r.get::<_, String>(13)?),
                 marks: Vec::new(),
                 action_items: Vec::new(),
                 has_audio: false,
@@ -728,7 +741,8 @@ pub fn get_meeting(db: &Db, id: &str) -> Result<Option<Meeting>, String> {
     let mut meeting = conn
         .query_row(
             "SELECT id, title, started_at, ended_at, summary, notes,
-                    stt_model, llm_model, lang, attendees, content_revision, summary_revision
+                    stt_model, llm_model, lang, attendees, content_revision, summary_revision,
+                    participants
              FROM meetings WHERE id = ?1",
             [id],
             |r| {
@@ -748,6 +762,7 @@ pub fn get_meeting(db: &Db, id: &str) -> Result<Option<Meeting>, String> {
                     segment_count: 0,
                     speaker_names: std::collections::HashMap::new(),
                     attendees: parse_names(&r.get::<_, String>(9)?),
+                    participants: parse_participants(&r.get::<_, String>(12)?),
                     marks: Vec::new(),
                     action_items: Vec::new(),
                     has_audio: false,
@@ -803,6 +818,10 @@ fn parse_names(json: &str) -> Vec<String> {
     serde_json::from_str(json).unwrap_or_default()
 }
 
+fn parse_participants(json: &str) -> crate::participants::Participants {
+    serde_json::from_str(json).unwrap_or_default()
+}
+
 /// Set (or clear, when `name` is blank) a per-meeting speaker display name.
 pub fn set_speaker_name(db: &Db, meeting_id: &str, speaker: &str, name: &str) -> Result<(), String> {
     let conn = db.0.lock().unwrap();
@@ -815,13 +834,92 @@ pub fn set_speaker_name(db: &Db, meeting_id: &str, speaker: &str, name: &str) ->
         .map_err(|e| e.to_string())?;
     } else {
         conn.execute(
-            "INSERT INTO speaker_names (meeting_id, speaker, name) VALUES (?1, ?2, ?3)
-             ON CONFLICT(meeting_id, speaker) DO UPDATE SET name = excluded.name",
+            "INSERT INTO speaker_names (meeting_id, speaker, name, source) VALUES (?1, ?2, ?3, 'user')
+             ON CONFLICT(meeting_id, speaker) DO UPDATE SET name = excluded.name, source = 'user'",
             params![meeting_id, speaker, name],
         )
         .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Name a speaker automatically (`source` "voice" or "roster"). An existing
+/// name is replaced only when its source is in `replace`. Returns whether the
+/// name was written.
+pub fn set_speaker_name_auto(
+    db: &Db,
+    meeting_id: &str,
+    speaker: &str,
+    name: &str,
+    source: &str,
+    replace: &[&str],
+) -> Result<bool, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(false);
+    }
+    let mut conn = db.0.lock().unwrap();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let current: Option<(String, String)> = tx
+        .query_row(
+            "SELECT name, source FROM speaker_names WHERE meeting_id = ?1 AND speaker = ?2",
+            params![meeting_id, speaker],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let write = match &current {
+        None => true,
+        Some((n, src)) => replace.contains(&src.as_str()) && (n != name || src != source),
+    };
+    if write {
+        tx.execute(
+            "INSERT INTO speaker_names (meeting_id, speaker, name, source) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(meeting_id, speaker) DO UPDATE SET name = excluded.name, source = excluded.source",
+            params![meeting_id, speaker, name, source],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(write)
+}
+
+/// Remove a speaker's name only if it came from `source`.
+pub fn clear_speaker_name_from(db: &Db, meeting_id: &str, speaker: &str, source: &str) -> Result<bool, String> {
+    let conn = db.0.lock().unwrap();
+    conn.execute(
+        "DELETE FROM speaker_names WHERE meeting_id = ?1 AND speaker = ?2 AND source = ?3",
+        params![meeting_id, speaker, source],
+    )
+    .map(|n| n > 0)
+    .map_err(|e| e.to_string())
+}
+
+/// speaker → (name, source) for one meeting.
+pub fn speaker_names_with_source(
+    db: &Db,
+    meeting_id: &str,
+) -> Result<std::collections::HashMap<String, (String, String)>, String> {
+    let conn = db.0.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT speaker, name, source FROM speaker_names WHERE meeting_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([meeting_id], |r| Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?))))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())
+}
+
+/// The remote channel's lines as (speaker, start_ms, end_ms).
+pub fn speaker_spans(db: &Db, meeting_id: &str) -> Result<Vec<(String, i64, i64)>, String> {
+    let conn = db.0.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT speaker, start_ms, end_ms FROM segments WHERE meeting_id = ?1 AND source = 'system'")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([meeting_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())
 }
 
 /// Edit one segment's transcript text.
@@ -881,7 +979,7 @@ pub fn correct_speaker(db: &Db, meeting_id: &str, segment_id: i64, target: Optio
     } else {
         tx.execute("UPDATE segments SET speaker=?3 WHERE meeting_id=?1 AND id=?2",params![meeting_id,segment_id,key]).map_err(|e|e.to_string())?;
     }
-    tx.execute("INSERT INTO speaker_names(meeting_id,speaker,name) VALUES (?1,?2,?3) ON CONFLICT(meeting_id,speaker) DO UPDATE SET name=excluded.name",params![meeting_id,key,label]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO speaker_names(meeting_id,speaker,name,source) VALUES (?1,?2,?3,'user') ON CONFLICT(meeting_id,speaker) DO UPDATE SET name=excluded.name,source='user'",params![meeting_id,key,label]).map_err(|e|e.to_string())?;
     // These centroids described the old grouping. Never train a remembered voice from them.
     tx.execute("DELETE FROM meeting_speakers WHERE meeting_id=?1 AND speaker IN (?2,?3)",params![meeting_id,old,key]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
@@ -1508,8 +1606,8 @@ pub fn remap_speakers(db: &Db, meeting_id: &str, remap: &[(String, String)]) -> 
         .map_err(|e| e.to_string())?;
         // Keep a name given to the merged-away speaker unless the target has one.
         tx.execute(
-            "INSERT OR IGNORE INTO speaker_names (meeting_id, speaker, name)
-             SELECT meeting_id, ?3, name FROM speaker_names WHERE meeting_id = ?1 AND speaker = ?2",
+            "INSERT OR IGNORE INTO speaker_names (meeting_id, speaker, name, source)
+             SELECT meeting_id, ?3, name, source FROM speaker_names WHERE meeting_id = ?1 AND speaker = ?2",
             params![meeting_id, from, to],
         )
         .map_err(|e| e.to_string())?;
@@ -1533,6 +1631,49 @@ pub fn append_meeting_note(db: &Db, meeting_id: &str, line: &str) -> Result<Stri
     .map_err(|e| e.to_string())?;
     conn.query_row("SELECT notes FROM meetings WHERE id = ?1", [meeting_id], |r| r.get(0))
         .map_err(|e| e.to_string())
+}
+
+pub fn set_participants(db: &Db, meeting_id: &str, p: &crate::participants::Participants) -> Result<(), String> {
+    let conn = db.0.lock().unwrap();
+    conn.execute(
+        "UPDATE meetings SET participants = ?2 WHERE id = ?1",
+        params![meeting_id, serde_json::to_string(p).unwrap_or_else(|_| "{}".into())],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// A meeting's calendar invitees and observed participants, without loading
+/// its transcript.
+pub fn meeting_people(db: &Db, meeting_id: &str) -> Result<(Vec<String>, crate::participants::Participants), String> {
+    let conn = db.0.lock().unwrap();
+    conn.query_row(
+        "SELECT attendees, participants FROM meetings WHERE id = ?1",
+        [meeting_id],
+        |r| Ok((parse_names(&r.get::<_, String>(0)?), parse_participants(&r.get::<_, String>(1)?))),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Names the call apps marked as you in recent meetings, for apps that don't
+/// mark you themselves.
+pub fn known_self_names(db: &Db) -> Result<Vec<String>, String> {
+    let conn = db.0.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT participants FROM meetings WHERE participants != '{}' ORDER BY started_at DESC LIMIT 50")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut names: Vec<String> = Vec::new();
+    for row in rows {
+        for p in parse_participants(&row.map_err(|e| e.to_string())?).people.into_iter().filter(|p| p.me) {
+            if !names.iter().any(|n| n.eq_ignore_ascii_case(&p.name)) {
+                names.push(p.name);
+            }
+        }
+    }
+    Ok(names)
 }
 
 pub fn set_attendees(db: &Db, meeting_id: &str, names: &[String]) -> Result<(), String> {
@@ -1627,6 +1768,47 @@ mod tests {
     }
 
     #[test]
+    fn v8_keeps_existing_names_as_user_names_and_separates_participants() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v7.db");
+        {
+            // Roll a fresh database back to the v7 shape with v7 data in it.
+            let conn = Connection::open(&path).unwrap();
+            migrate(&conn).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE meetings DROP COLUMN participants;
+                 ALTER TABLE speaker_names DROP COLUMN source;
+                 PRAGMA user_version=7;
+                 INSERT INTO meetings (id, started_at, attendees) VALUES ('m', '2026-11-01T10:00:00Z', '[\"Priya\"]');
+                 INSERT INTO speaker_names (meeting_id, speaker, name) VALUES ('m', 'them:0', 'Priya');",
+            )
+            .unwrap();
+        }
+        let db = open_path(&path).unwrap();
+        let version: i64 = db.0.lock().unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 8);
+        assert_eq!(
+            speaker_names_with_source(&db, "m").unwrap()["them:0"],
+            ("Priya".to_string(), "user".to_string())
+        );
+        let (attendees, participants) = meeting_people(&db, "m").unwrap();
+        assert_eq!(attendees, vec!["Priya".to_string()]);
+        assert!(participants.people.is_empty());
+        // Observed participants never leak into calendar attendees.
+        let observed = crate::participants::Participants {
+            people: vec![crate::participants::Person { name: "Marcus".into(), me: false, app: "Zoom".into(), first_ms: 0, last_ms: 5_000 },
+                         crate::participants::Person { name: "Adnan".into(), me: true, app: "Zoom".into(), first_ms: 0, last_ms: 5_000 }],
+            solo: vec![],
+        };
+        set_participants(&db, "m", &observed).unwrap();
+        let m = get_meeting(&db, "m").unwrap().unwrap();
+        assert_eq!(m.attendees, vec!["Priya".to_string()]);
+        assert_eq!(m.participants, observed);
+        assert_eq!(list_meetings(&db).unwrap()[0].participants, observed);
+        assert_eq!(known_self_names(&db).unwrap(), vec!["Adnan".to_string()]);
+    }
+
+    #[test]
     fn migrates_and_searches_in_memory() {
         let conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
@@ -1647,6 +1829,7 @@ mod tests {
             segment_count: 0,
             speaker_names: Default::default(),
             attendees: vec!["Priya".into()],
+            participants: Default::default(),
             marks: vec![],
             action_items: vec![],
             has_audio: false,

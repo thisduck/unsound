@@ -215,6 +215,20 @@ export interface ResearchAnswer {
 }
 export interface ResearchTurn { question: string; answer: string }
 
+export interface Participant {
+  name: string;
+  /// The local user, as the call app marked them.
+  me: boolean;
+  app: string;
+  firstMs: number;
+  lastMs: number;
+}
+
+export interface Participants {
+  people: Participant[];
+  solo: { name: string; startMs: number; endMs: number }[];
+}
+
 export interface Meeting {
   id: string;
   title: string;
@@ -231,6 +245,8 @@ export interface Meeting {
   /// Per-meeting speaker display-name overrides (speaker key → name).
   speakerNames?: Record<string, string>;
   attendees?: string[];
+  /// People seen on the call app's participant list (calendar invitees are `attendees`).
+  participants?: Participants;
   marks?: Mark[];
   actionItems?: ActionItem[];
   hasAudio?: boolean;
@@ -530,6 +546,8 @@ export const on = {
     listen<string>("meeting-warning", (e) => cb(e.payload)),
   meetingSpeakerNamed: (cb: (p: { meetingId: string; speaker: string; name: string }) => void): Promise<UnlistenFn> =>
     listen<{ meetingId: string; speaker: string; name: string }>("meeting-speaker-named", (e) => cb(e.payload)),
+  meetingParticipants: (cb: (p: { meetingId: string; participants: Participant[] }) => void): Promise<UnlistenFn> =>
+    listen<{ meetingId: string; participants: Participant[] }>("meeting-participants", (e) => cb(e.payload)),
   meetingNotesChanged: (cb: (p: { meetingId: string; notes: string }) => void): Promise<UnlistenFn> =>
     listen<{ meetingId: string; notes: string }>("meeting-notes-changed", (e) => cb(e.payload)),
   meetingNotesProgress: (

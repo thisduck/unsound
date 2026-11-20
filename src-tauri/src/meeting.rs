@@ -233,6 +233,10 @@ fn start(app: &AppHandle, opts: StartOptions, vad_path: PathBuf) -> Result<(), S
             std::thread::spawn(move || run_notes(app, meeting_id, path, stop, depth));
         }
     }
+    // Who is on the call, from the call app's participant list (read only).
+    if !synthetic {
+        crate::roster::spawn(app.clone(), opts.meeting_id.clone(), stop.clone());
+    }
 
     *active = Some(Handle {
         meeting_id: opts.meeting_id,
@@ -1146,15 +1150,8 @@ fn run_transcribe(
     let language = meeting.lang;
     let settings = settings::load(&app);
     let emb_model = meeting_work::embedding_model(&app.state::<Db>(), &meeting_id)?;
-    let initial_prompt = Some(format!(
-        "Glossary: {}",
-        settings
-            .dictionary
-            .iter()
-            .map(|e| e.to.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
+    // Dictionary plus the people on the call, refreshed as they appear.
+    let mut people = crate::participants::Live::new(&settings);
     let recovering = active_meeting(&app).as_deref() != Some(&meeting_id);
     // Build the engine on this thread (sherpa recognizers are !Send).
     let mut engine = asr::resolve(&app, &model_id)?;
@@ -1213,7 +1210,7 @@ fn run_transcribe(
         armed_until: None,
     };
     app.state::<AppState>().meeting.metrics.model_ready(&meeting_id,model_started.elapsed().as_millis() as u64);
-    let prompt = initial_prompt.as_deref();
+    let mut prompt: Option<String> = people.prompt(&db, &meeting_id).map(Into::into);
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -1238,7 +1235,7 @@ fn run_transcribe(
                             &mut engine,
                             &samples,
                             live.language.as_deref(),
-                            prompt,
+                            prompt.as_deref(),
                             cancel.clone(),
                         )
                     })?;
@@ -1263,7 +1260,7 @@ fn run_transcribe(
                             &mut engine,
                             &samples,
                             live.language.as_deref(),
-                            prompt,
+                            prompt.as_deref(),
                             cancel.clone(),
                         )
                     })?;
@@ -1309,6 +1306,7 @@ fn run_transcribe(
                 });
                 ids.push(job.id);
             }
+            prompt = people.prompt(&db, &meeting_id).map(Into::into);
             depth.fetch_add(1, Ordering::Relaxed);
             let committed=complete_partial(&depth, || {
                 process_finals(
@@ -1316,12 +1314,15 @@ fn run_transcribe(
                     &mut engine,
                     &mut live,
                     pieces,
-                    prompt,
+                    prompt.as_deref(),
                     &ids,
                     cancel.clone(),
                 )
             })?;
-            if committed { app.state::<AppState>().meeting.metrics.batch(&meeting_id,batch_started.elapsed().as_millis() as u64,audio_ms,queued_at); }
+            if committed {
+                app.state::<AppState>().meeting.metrics.batch(&meeting_id,batch_started.elapsed().as_millis() as u64,audio_ms,queued_at);
+                people.after_batch(&app, &meeting_id);
+            }
         } else if row.state == "finishing" {
             finish_speakers(&app, &mut live);
             return Ok(()); // scheduler publishes completion on its next pass
@@ -1509,12 +1510,11 @@ fn note_voice_name(app: &AppHandle, live: &mut Live, key: usize) {
         live.named.insert(key);
         let speaker = format!("them:{key}");
         let db = app.state::<Db>();
-        let has_name = store::get_meeting(&db, &live.meeting_id)
-            .ok()
-            .flatten()
-            .is_some_and(|m| m.speaker_names.contains_key(&speaker));
-        if !has_name {
-            let _ = store::set_speaker_name(&db, &live.meeting_id, &speaker, &name);
+        // A voice match replaces only a roster guess, never your own name.
+        use crate::participants::{SOURCE_ROSTER, SOURCE_VOICE};
+        if store::set_speaker_name_auto(&db, &live.meeting_id, &speaker, &name, SOURCE_VOICE, &[SOURCE_ROSTER])
+            .unwrap_or(false)
+        {
             let _ = app.emit(
                 "meeting-speaker-named",
                 serde_json::json!({ "meetingId": live.meeting_id, "speaker": speaker, "name": name }),
@@ -1554,6 +1554,8 @@ fn finish_speakers(app: &AppHandle, live: &mut Live) {
         })
         .collect();
     let _ = store::set_meeting_speakers(&db, &live.meeting_id, &rows);
+    // Clusters are final now: re-derive names from the call's roster.
+    crate::participants::name_speakers(app, &live.meeting_id, true);
 }
 
 /// Apply the user's learned corrections ("pria" → "Priya") to meeting text:
@@ -1674,9 +1676,10 @@ pub fn redetect_speakers(
     store::set_meeting_speakers(&db, meeting_id, &rows)?;
     for (k, c, _, _) in &centroids {
         if let Some(name) = speakers::match_voiceprint(c, &voiceprints) {
-            let _ = store::set_speaker_name(&db, meeting_id, &format!("them:{k}"), &name);
+            let _ = store::set_speaker_name_auto(&db, meeting_id, &format!("them:{k}"), &name, crate::participants::SOURCE_VOICE, &[]);
         }
     }
+    let _ = crate::participants::apply(&db, meeting_id, true);
     Ok(())
 }
 

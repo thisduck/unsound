@@ -5,6 +5,7 @@ import { ActionRow } from "./ActionRow";
 import { ResearchPanel } from "./ResearchPanel";
 import { Markdown } from "../Markdown";
 import { elapsed, meetingMarkdown, speakerLabel } from "./format";
+import { meetingPeople, remoteCountHint, speakerSuggestions } from "./people";
 import { mergeTask, TaskCard } from "./TaskCard";
 import { usePlayer } from "./usePlayer";
 import { Icon, MoreMenu, Spinner, useConfirm } from "../ui";
@@ -65,6 +66,7 @@ export function DetailView(p: Props) {
   const [wholeSpeaker, setWholeSpeaker] = useState(false);
   const [speakerSaving, setSpeakerSaving] = useState(false);
   const [rememberVoice, setRememberVoice] = useState(true);
+  const [focusedSpeaker, setFocusedSpeaker] = useState<string | null>(null);
   const [tab, setTab] = useState<"summary" | "transcript" | "notes">(p.focusMs != null ? "transcript" : "summary");
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const { confirm, dialog } = useConfirm();
@@ -181,6 +183,12 @@ export function DetailView(p: Props) {
   };
 
   const speakers = Array.from(new Set(m.segments.map((s) => s.speaker))).sort();
+  // One-click naming from the call's roster and the calendar.
+  const suggestions = speakerSuggestions(m);
+  const unnamed = speakers.filter((sp) => sp !== "me" && !m.speakerNames?.[sp]);
+  const suggestFor = focusedSpeaker && focusedSpeaker !== "me" ? focusedSpeaker : unnamed.length === 1 ? unnamed[0] : null;
+  const countHint = remoteCountHint(m);
+  const people = meetingPeople(m);
   const items = m.actionItems ?? [];
   const marks = m.marks ?? [];
   const summaryText = p.liveSummary ?? m.summary;
@@ -348,7 +356,10 @@ export function DetailView(p: Props) {
                 aria-label={`Name for ${speakerLabel(sp)}`}
                 defaultValue={m.speakerNames?.[sp] ?? ""}
                 placeholder={speakerLabel(sp)}
+                list={sp !== "me" && suggestions.length ? `people-${m.id}` : undefined}
+                onFocus={() => setFocusedSpeaker(sp)}
                 onBlur={(e) => {
+                  setFocusedSpeaker((cur) => (cur === sp ? null : cur));
                   if (e.target.value.trim() !== (m.speakerNames?.[sp] ?? "")) renameSpeaker(sp, e.target.value);
                 }}
                 onKeyDown={(e) => {
@@ -357,6 +368,39 @@ export function DetailView(p: Props) {
               />
             ))}
           </div>
+          {suggestions.length > 0 && (
+            <>
+              <datalist id={`people-${m.id}`}>
+                {suggestions.map((n) => <option key={n} value={n} />)}
+              </datalist>
+              <div className="speaker-suggest" role="group" aria-label="Suggested names">
+                <span className="faint">{suggestFor ? `${speakerLabel(suggestFor, m.speakerNames)} is` : "In this meeting:"}</span>
+                {suggestions.map((n) => (
+                  <button
+                    key={n}
+                    className="chip"
+                    disabled={!suggestFor}
+                    title={suggestFor ? `Name ${speakerLabel(suggestFor, m.speakerNames)} ${n}` : "Click a speaker first"}
+                    // Keep the speaker field focused so the click names that speaker.
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      if (!suggestFor) return;
+                      // Drop any half-typed text so the field's blur doesn't save it too.
+                      const field = document.activeElement;
+                      if (field instanceof HTMLInputElement && field.classList.contains("speaker-chip")) {
+                        field.value = field.defaultValue;
+                        field.blur();
+                      }
+                      setFocusedSpeaker(null);
+                      void renameSpeaker(suggestFor, n);
+                    }}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
           <div className="speakers-foot">
             <label className="check">
               <input type="checkbox" checked={rememberVoice} onChange={(e) => setRememberVoice(e.target.checked)} />
@@ -370,6 +414,7 @@ export function DetailView(p: Props) {
                   {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
                     <option key={n} value={String(n)}>
                       {n} {n === 1 ? "person" : "people"}
+                      {countHint?.count === n ? (countHint.from === "call" ? " (on the call)" : " (invited)") : ""}
                     </option>
                   ))}
                 </select>
@@ -482,7 +527,7 @@ export function DetailView(p: Props) {
           />
           <div className="detail-meta">
             {new Date(m.startedAt).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} · {new Date(m.startedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · {elapsed(m.startedAt, m.endedAt)}
-            {m.attendees && m.attendees.length > 0 && <> · {m.attendees.join(", ")}</>}
+            {people.length > 0 && <> · {people.join(", ")}</>}
           </div>
         </div>
         <button className="btn btn-secondary btn-sm" onClick={copyMarkdown}>

@@ -39,61 +39,13 @@ pub fn provider(url: &str) -> Option<&'static str> {
 /// or browsing history. Permission is checked without opening an OS prompt.
 #[cfg(target_os = "macos")]
 pub fn foreground_url(browser_id: &str) -> Option<String> {
-    use core_foundation::array::CFArray;
-    use core_foundation::base::{CFType, CFTypeID, CFTypeRef, TCFType};
-    use core_foundation::string::{CFString, CFStringRef};
-    use core_foundation::url::CFURL;
+    use crate::ax;
     use objc2_app_kit::NSWorkspace;
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
 
-    #[link(name = "ApplicationServices", kind = "framework")]
-    extern "C" {
-        fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
-        fn AXUIElementGetTypeID() -> CFTypeID;
-        fn AXUIElementCopyAttributeValue(
-            element: CFTypeRef,
-            name: CFStringRef,
-            value: *mut CFTypeRef,
-        ) -> i32;
-        fn AXUIElementSetMessagingTimeout(element: CFTypeRef, timeout: f32) -> i32;
-    }
-
-    fn attribute(element: &CFType, name: &str) -> Option<CFType> {
-        let name = CFString::new(name);
-        let mut value = std::ptr::null();
-        // SAFETY: type-check AX elements; a successful Copy returns a retained
-        // CF object, released by CFType. Bound each cross-process request.
-        unsafe {
-            if element.type_of() != AXUIElementGetTypeID() {
-                return None;
-            }
-            if AXUIElementSetMessagingTimeout(element.as_CFTypeRef(), 0.025) != 0 {
-                return None;
-            }
-            if AXUIElementCopyAttributeValue(
-                element.as_CFTypeRef(),
-                name.as_concrete_TypeRef(),
-                &mut value,
-            ) != 0
-                || value.is_null()
-            {
-                return None;
-            }
-            Some(CFType::wrap_under_create_rule(value))
-        }
-    }
-
-    fn string(value: CFType) -> Option<String> {
-        value
-            .downcast::<CFString>()
-            .map(|s| s.to_string())
-            .or_else(|| {
-                value
-                    .downcast::<CFURL>()
-                    .map(|url| url.get_string().to_string())
-            })
-    }
+    const TIMEOUT: f32 = 0.025;
+    let text = |element: &core_foundation::base::CFType, name: &str| ax::attribute(element, name, TIMEOUT).and_then(ax::string);
 
     if !crate::permissions::status().accessibility {
         return None;
@@ -107,16 +59,9 @@ pub fn foreground_url(browser_id: &str) -> Option<String> {
     {
         return None;
     }
-    // SAFETY: Create returns an owned AX element for this running process.
-    let app = unsafe {
-        let ptr = AXUIElementCreateApplication(front.processIdentifier());
-        if ptr.is_null() {
-            return None;
-        }
-        CFType::wrap_under_create_rule(ptr)
-    };
-    let window = attribute(&app, "AXFocusedWindow")?;
-    if let Some(url) = attribute(&window, "AXDocument").and_then(string) {
+    let app = ax::application(front.processIdentifier())?;
+    let window = ax::attribute(&app, "AXFocusedWindow", TIMEOUT)?;
+    if let Some(url) = text(&window, "AXDocument") {
         return Some(url);
     }
     // Some browsers expose the selected page URL on AXWebArea instead of the
@@ -129,25 +74,15 @@ pub fn foreground_url(browser_id: &str) -> Option<String> {
             break;
         }
         visited += 1;
-        if attribute(&element, "AXRole").and_then(string).as_deref() == Some("AXWebArea") {
-            return attribute(&element, "AXURL").and_then(string);
+        if text(&element, "AXRole").as_deref() == Some("AXWebArea") {
+            return text(&element, "AXURL");
         }
         if depth >= 10 {
             continue;
         }
-        if let Some(children) =
-            attribute(&element, "AXChildren").and_then(|v| v.downcast::<CFArray>())
-        {
-            for child in children
-                .iter()
-                .take(64_usize.saturating_sub(visited + pending.len()))
-            {
-                if (*child).is_null() {
-                    continue;
-                }
-                // SAFETY: AXChildren contains CF objects. Retain them before
-                // the array is released; attribute() checks each object's type.
-                let child = unsafe { CFType::wrap_under_get_rule(*child) };
+        if let Some(children) = ax::attribute(&element, "AXChildren", TIMEOUT) {
+            let room = 64_usize.saturating_sub(visited + pending.len());
+            for child in ax::elements(children).into_iter().take(room) {
                 pending.push_back((child, depth + 1));
             }
         }

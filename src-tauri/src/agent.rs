@@ -412,6 +412,10 @@ fn meeting_header(m: &store::Meeting) -> String {
     if !m.attendees.is_empty() {
         h.push_str(&format!("Invited: {}\n", m.attendees.join(", ")));
     }
+    let on_call: Vec<&str> = m.participants.others().map(|p| p.name.as_str()).collect();
+    if !on_call.is_empty() {
+        h.push_str(&format!("On the call: {}\n", on_call.join(", ")));
+    }
     let named: Vec<String> = m
         .speaker_names
         .iter()

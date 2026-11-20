@@ -76,7 +76,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
   const [summaries, setSummaries] = useState<Record<string, string>>({});
   const [tasks, setTasks] = useState<Task[]>([]);
   // Live meeting state.
-  const [live, setLive] = useState<{ id: string; title: string; attendees: string[]; startedAt: string } | null>(null);
+  const [live, setLive] = useState<{ id: string; title: string; attendees: string[]; people: string[]; startedAt: string } | null>(null);
   const [showLive, setShowLive] = useState(true);
   const [flagToken, setFlagToken] = useState(0);
   const [query, setQuery] = useState("");
@@ -184,6 +184,10 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
       on.meetingStatus(setStatus),
       on.meetingWarning(setWarning),
       on.meetingSpeakerNamed(({ meetingId, speaker, name }) => { if (meetingId === liveIdRef.current) setLiveNames((n) => ({ ...n, [speaker]: name })); }),
+      on.meetingParticipants(({ meetingId, participants }) => {
+        const people = participants.filter((p) => !p.me).map((p) => p.name);
+        setLive((cur) => (cur && cur.id === meetingId ? { ...cur, people } : cur));
+      }),
       on.meetingNotesProgress(({ meetingId, throughMs }) => {
         if (meetingId === liveIdRef.current) setNotesThrough(throughMs);
       }),
@@ -314,7 +318,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         segmentCount: 0,
       });
       const m = await api.meetingStart(id, meetStt.id, meetLanguage || undefined, meetLlm?.id, meetEmbId);
-      setLive({ id, title: m?.title ?? "", attendees: m?.attendees ?? [], startedAt });
+      setLive({ id, title: m?.title ?? "", attendees: m?.attendees ?? [], people: [], startedAt });
       setPhase("recording");
     } catch (e) {
       setError(String(e));
@@ -501,7 +505,7 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
           </div>
           <div className="stage-title" data-tauri-drag-region>
             <strong>{live.title || "Recording"}</strong>
-            <span>{live.attendees.length ? live.attendees.join(", ") : status && !status.systemAudio ? "Your mic only" : "You and the call"}</span>
+            <span>{live.people.length ? `With ${live.people.join(", ")}` : live.attendees.length ? live.attendees.join(", ") : status && !status.systemAudio ? "Your mic only" : "You and the call"}</span>
           </div>
           <span className="spacer" data-tauri-drag-region />
           <button className="btn btn-stage-quiet" onClick={() => setShowLive(false)} title="Browse meetings while recording">

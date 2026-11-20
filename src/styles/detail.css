@@ -197,6 +197,33 @@
   border-color: var(--accent);
 }
 
+.speaker-suggest {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -4px 0 12px;
+}
+
+.speaker-suggest .faint {
+  font-size: 12px;
+  margin-right: 2px;
+}
+
+.speaker-suggest .chip {
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.speaker-suggest .chip:hover:not(:disabled) {
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--accent);
+}
+
+.speaker-suggest .chip:disabled {
+  cursor: default;
+  color: var(--muted);
+}
+
 .speakers-foot {
   display: flex;
   align-items: center;

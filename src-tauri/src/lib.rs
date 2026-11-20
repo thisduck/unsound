@@ -4,12 +4,15 @@ pub mod audio;
 pub mod audiofile;
 pub mod calendar;
 mod audio_store;
+#[cfg(target_os = "macos")]
+mod ax;
 mod brain;
 mod browser_meeting;
 mod deliver;
 pub mod detect;
 mod dictation;
 mod frontapp;
+mod glossary;
 mod hotkeys;
 mod llm;
 mod meeting;
@@ -32,6 +35,8 @@ mod store;
 pub mod stt;
 mod summary;
 mod notes_quality;
+mod participants;
+mod roster;
 mod meeting_research;
 mod reminders;
 #[cfg(target_os = "macos")]
@@ -245,14 +250,7 @@ async fn warm_stt(app: AppHandle, model_id: String) -> Result<(), String> {
 /// The user's corrected vocabulary, as a Whisper `initial_prompt` that biases
 /// recognition toward names/jargon.
 fn vocab_prompt(app: &AppHandle) -> Option<String> {
-    let mut seen = std::collections::HashSet::new();
-    let vocab: Vec<String> = settings::load(app)
-        .dictionary
-        .iter()
-        .map(|e| e.to.trim().to_string())
-        .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
-        .collect();
-    (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")))
+    glossary::for_settings(&settings::load(app))
 }
 
 /// Start a take's background work: live captions, so the words appear (in the
@@ -1224,16 +1222,7 @@ async fn transcribe_system_capture(
     let _work = updates::work_permit()?;
     let model_path = models::downloaded_model_path(&app, &model_id)?;
     let samples = state.sys.last.lock().unwrap().clone();
-    let vocab: Vec<String> = {
-        let mut seen = std::collections::HashSet::new();
-        settings::load(&app)
-            .dictionary
-            .iter()
-            .map(|e| e.to.trim().to_string())
-            .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
-            .collect()
-    };
-    let initial_prompt = (!vocab.is_empty()).then(|| format!("Glossary: {}.", vocab.join(", ")));
+    let initial_prompt = vocab_prompt(&app);
     let worker_app = app.clone();
     let text = tauri::async_runtime::spawn_blocking(move || {
         let state = worker_app.state::<AppState>();

@@ -78,6 +78,25 @@ pub fn apply_names(text: &str, names: &HashMap<String, String>) -> String {
     out
 }
 
+/// How the people and terms of this meeting are spelled, appended to the
+/// compose material. Reference only: every statement still cites facts, and
+/// extraction (which must quote the transcript exactly) doesn't see it.
+fn spelling_reference(names: &[String], terms: &[String]) -> String {
+    const MAX: usize = 40;
+    let mut seen = std::collections::HashSet::new();
+    let list: Vec<&str> = names
+        .iter()
+        .chain(terms)
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
+        .take(MAX)
+        .collect();
+    if list.is_empty() {
+        return String::new();
+    }
+    format!("\nSpellings of names and terms (reference only, not evidence): {}\n", list.join(", "))
+}
+
 /// Planned stretches: index → its segments (by start time).
 fn plan(segments: &[Segment]) -> BTreeMap<i64, Vec<&Segment>> {
     let mut chunks: BTreeMap<i64, Vec<&Segment>> = BTreeMap::new();
@@ -236,7 +255,10 @@ pub fn summarize(app: &AppHandle, meeting_id: &str, model_path: &Path) -> Result
     let (summary,items)=if facts.facts.is_empty() {
         (format!("## Your notes\n\n{}",meeting.notes.trim()),Vec::new())
     } else {
-        let messages=[("system",notes_quality::COMPOSE_PROMPT.to_string()),("user",notes_quality::compose_material(&facts,&meeting))];
+        let names = crate::participants::prompt_names(&meeting.attendees, &meeting.participants);
+        let terms = crate::glossary::dictionary_terms(&crate::settings::load(app));
+        let material = notes_quality::compose_material(&facts,&meeting) + &spelling_reference(&names, &terms);
+        let messages=[("system",notes_quality::COMPOSE_PROMPT.to_string()),("user",material)];
         let value=llm::chat_json(&st.llm,model_path,&messages,&notes_quality::compose_schema(&facts),3500)?;
         notes_quality::compose(value,&facts,&meeting)?
     };
@@ -286,6 +308,15 @@ mod tests {
         assert!(truncated(&cut), "{cut}");
         let wrong = crate::llm::parse_json_reply(r#"{ "facts": 3 } trailing }"#).unwrap_err();
         assert!(!truncated(&wrong), "{wrong}");
+    }
+
+    #[test]
+    fn spelling_reference_is_deduped_and_omitted_when_empty() {
+        assert_eq!(spelling_reference(&[], &[]), "");
+        assert_eq!(
+            spelling_reference(&["Priya Raman".into(), "Priya".into()], &["priya".into(), "Kubernetes".into()]),
+            "\nSpellings of names and terms (reference only, not evidence): Priya Raman, Priya, Kubernetes\n"
+        );
     }
 
     #[test]
@@ -375,6 +406,7 @@ mod tests {
             segment_count: 0,
             speaker_names: names,
             attendees: vec![],
+            participants: Default::default(),
             marks: vec![],
             action_items: vec![],
             has_audio: false,
