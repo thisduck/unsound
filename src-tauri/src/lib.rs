@@ -10,6 +10,7 @@ mod brain;
 mod browser_meeting;
 mod deliver;
 pub mod detect;
+pub mod echo;
 mod dictation;
 mod frontapp;
 mod glossary;
@@ -176,7 +177,9 @@ fn stop_dictation_recording(app: &AppHandle, state: &AppState) -> Result<Recordi
     let tap = state.audio.dictation_tap.lock().unwrap().take();
     if let Some(tap) = tap {
         let (samples, end) = audio::tap_end(&state.audio, tap)?;
-        meeting::exclude_until(app, *state.dictation_tap_start.lock().unwrap(), end);
+        let start = *state.dictation_tap_start.lock().unwrap();
+        let samples = echo::clean_meeting_tap(app, start, samples);
+        meeting::exclude_until(app, start, end);
         let result = RecordingResult {
             duration_secs: samples.len() as f32 / audio::WHISPER_SAMPLE_RATE as f32,
             sample_count: samples.len(),

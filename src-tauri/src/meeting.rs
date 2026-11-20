@@ -52,6 +52,8 @@ pub struct MeetingState {
     worker: Mutex<Option<Worker>>,
     faults: Mutex<HashMap<String, String>>,
     pub metrics: crate::meeting_metrics::Metrics,
+    /// The live echo canceller as dictation/command taps see it.
+    pub echo: Arc<crate::echo::Shared>,
 }
 
 struct Worker {
@@ -659,6 +661,7 @@ pub fn command_end(app: &AppHandle) -> Result<(), String> {
         (tap, start, h.tx.clone(), h.depth.clone())
     };
     let (samples, end) = audio::tap_end(&st.audio, tap)?;
+    let samples = crate::echo::clean_meeting_tap(app, start, samples);
     exclude_until(app, start, end);
     if samples.len() < audio::WHISPER_SAMPLE_RATE as usize / 3 {
         return Err("that was too short to hear a request".into());
@@ -773,6 +776,12 @@ fn run_capture(
     #[allow(unused_mut, unused_variables)]
     let mut sys_fed: u64 = 0;
     let mut last_status = Instant::now();
+    // Speaker leak: the mic is cleaned against system audio before it is
+    // saved or segmented, so live, recovered and re-run transcripts agree.
+    let mut echo = crate::echo::MicCleaner::new(st.meeting.echo.clone());
+    if sys_ok {
+        echo.system_started(sys.offset);
+    }
 
     loop {
         let mut waited = 0;
@@ -802,13 +811,35 @@ fn run_capture(
         let mut synthetic_system:Option<Vec<f32>>=None;
         #[cfg(not(feature = "automation"))]
         let synthetic_audio: Option<Vec<f32>> = None;
-        let new_mic = if let Some(samples) = synthetic_audio {
+        // System audio first: it is the echo reference for this mic chunk.
+        #[cfg(target_os = "macos")]
+        let new_sys = if !sys_ok {
+            Vec::new()
+        } else if let Some(samples)=synthetic_system.take() {samples} else if stopping {
+            match crate::syscapture::stop(&st.sys) {
+                Ok(_) => std::mem::take(&mut *st.sys.last.lock().unwrap()),
+                Err(e) => {
+                    fail(
+                        &app,
+                        &meeting_id,
+                        &format!("System capture did not stop cleanly: {e}"),
+                    );
+                    Vec::new()
+                }
+            }
+        } else {
+            crate::syscapture::drain(&st.sys)
+        };
+        #[cfg(target_os = "macos")]
+        echo.reference(sys.offset + sys_fed, &new_sys);
+        let raw_mic = if let Some(samples) = synthetic_audio {
             samples
         } else if stopping {
             audio::stop_meeting_recording(&st.audio)
         } else {
             audio::drain_16k(&st.audio)
         };
+        let new_mic = echo.process(&raw_mic, stopping);
         if !storage_failed {
             #[cfg(feature = "automation")]
             let writable = fixture.as_ref()
@@ -872,21 +903,6 @@ fn run_capture(
 
         #[cfg(target_os = "macos")]
         if sys_ok {
-            let new_sys = if let Some(samples)=synthetic_system.take() {samples} else if stopping {
-                match crate::syscapture::stop(&st.sys) {
-                    Ok(_) => std::mem::take(&mut *st.sys.last.lock().unwrap()),
-                    Err(e) => {
-                        fail(
-                            &app,
-                            &meeting_id,
-                            &format!("System capture did not stop cleanly: {e}"),
-                        );
-                        Vec::new()
-                    }
-                }
-            } else {
-                crate::syscapture::drain(&st.sys)
-            };
             if !storage_failed {
                 let checkpoint_started=Instant::now();
                 let save = sys_writer
@@ -946,18 +962,22 @@ fn run_capture(
                                 "meeting-warning",
                                 format!("System audio was interrupted ({err}) and has resumed."),
                             );
+                            // "Now" includes mic audio the canceller still holds.
+                            echo.system_lost();
                             sys = Channel {
                                 vad: make_vad(&vad_path),
                                 pending: Vec::new(),
                                 fed: 0,
-                                offset: mic_pos,
+                                offset: mic_pos + echo.held(),
                                 speaker: "them",
                                 source: "system",
                             };
                             sys_fed = 0;
+                            echo.system_started(sys.offset);
                         }
                         Err(e) => {
                             sys_ok = false;
+                            echo.system_lost();
                             let _ = app.emit(
                                 "meeting-warning",
                                 format!("System audio stopped ({err}) and couldn't restart ({e}) — recording your mic only."),
@@ -1416,6 +1436,7 @@ fn process_finals(
     if cancel.load(Ordering::Relaxed) {
         return Ok(false);
     }
+    crate::echo::guard::drop_leaked_lines(app, &live.meeting_id, &mut segs);
     let db = app.state::<Db>();
     let committed=meeting_work::complete_batch(&db, &live.meeting_id, job_ids, &segs)?;
     if committed {

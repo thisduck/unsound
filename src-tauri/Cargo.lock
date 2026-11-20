@@ -5953,6 +5953,7 @@ dependencies = [
  "objc2-screen-capture-kit",
  "ogg",
  "opus",
+ "realfft",
  "reqwest",
  "rmcp",
  "rubato",

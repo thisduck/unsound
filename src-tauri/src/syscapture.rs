@@ -443,6 +443,14 @@ pub fn drain(state: &SysCaptureState) -> Vec<f32> {
     out
 }
 
+/// The audio not yet drained, without draining it, and its index on this
+/// stream's timeline (equal to everything drained so far).
+pub fn peek(state: &SysCaptureState) -> Option<(usize, Vec<f32>)> {
+    let active = state.active.lock().unwrap();
+    let sink = active.as_ref()?.buffer.lock().unwrap();
+    Some((sink.base, sink.samples.clone()))
+}
+
 /// Why macOS stopped the stream on its own, if it did (taken: reported once).
 pub fn take_stop_error(state: &SysCaptureState) -> Option<String> {
     let active = state.active.lock().unwrap();
