@@ -1,5 +1,5 @@
 //! Same-process check: Whisper (whisper.cpp), Parakeet (whisper.cpp's
-//! parakeet.h) and an LLM (llama.cpp) loaded together on the one shared ggml,
+//! parakeet.h, or transcribe.cpp) and an LLM (llama.cpp) loaded together on the one shared ggml,
 //! interleaved, twice. Prints JSON with every transcript and generation so the
 //! outputs can be diffed against standalone runs (spikes/parakeet-eval/README.md).
 //!
@@ -93,10 +93,12 @@ fn main() {
         .unwrap();
     let llm_ms = harness::ms(t);
     // PARAKEET=tc runs Parakeet through transcribe.cpp (a GGUF) instead of
-    // whisper.cpp's parakeet.h (a ggml .bin); both on the same ggml.
+    // whisper.cpp's parakeet.h (a ggml .bin); PARAKEET=app through the app's
+    // own transcribe.cpp engine (`unsound_lib::parakeet`). All on one ggml.
     let t = Instant::now();
     let mut parakeet: Box<dyn Asr> = match std::env::var("PARAKEET").as_deref() {
         Ok("tc") => Box::new(engines::Tc::load(&a[1])),
+        Ok("app") => Box::new(engines::AppParakeet::load(&a[1])),
         _ => Box::new(engines::WcppParakeet::load(&a[1])),
     };
     let parakeet_ms = harness::ms(t);

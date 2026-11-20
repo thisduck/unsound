@@ -40,7 +40,60 @@ pub struct ModelInfo {
     /// ordinary single-file models.
     #[serde(default)]
     pub files: Vec<String>,
+    /// Which speech engine runs this model (speech models only).
+    #[serde(default)]
+    pub engine: SttEngine,
+    /// Spoken languages the model can transcribe (ISO 639-1); empty = any
+    /// language the app offers. Speech is routed elsewhere for the rest.
+    #[serde(default)]
+    pub supported_languages: Vec<String>,
 }
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SttEngine {
+    /// whisper.cpp (custom models are assumed to be Whisper GGML files).
+    #[default]
+    Whisper,
+    /// Parakeet TDT through transcribe.cpp.
+    Parakeet,
+    /// Moonshine through sherpa-onnx.
+    Moonshine,
+}
+
+/// Speech model ids that were removed, and the model that replaces each.
+/// `parakeet-tdt-v3` was the sherpa-onnx (CPU, int8) build of Parakeet v3.
+const RENAMED: &[(&str, &str)] = &[("parakeet-tdt-v3", "parakeet-tdt-0.6b-v3")];
+
+/// The current id for a possibly removed one.
+pub fn migrate_id(id: &str) -> &str {
+    RENAMED
+        .iter()
+        .find(|(old, _)| *old == id)
+        .map_or(id, |(_, new)| new)
+}
+
+/// Remove the files of models that no longer exist (they are not listed, so
+/// the user could never delete them). Called once at launch.
+pub fn remove_retired(app: &AppHandle) {
+    let Ok(dir) = models_dir(app) else { return };
+    for (old, _) in RENAMED {
+        let path = dir.join(old);
+        if path.is_dir() {
+            match fs::remove_dir_all(&path) {
+                Ok(()) => eprintln!("[models] removed retired model files {}", path.display()),
+                Err(e) => eprintln!("[models] could not remove {}: {e}", path.display()),
+            }
+        }
+    }
+}
+
+/// Parakeet TDT v3's languages, from the model card and the GGUF's
+/// `general.languages`.
+pub const PARAKEET_V3_LANGUAGES: &[&str] = &[
+    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt",
+    "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv", "uk",
+];
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,7 +114,7 @@ pub struct DownloadDone {
 const GB: u64 = 1_000_000_000;
 const MB: u64 = 1_000_000;
 
-fn builtin_registry() -> Vec<ModelInfo> {
+pub(crate) fn builtin_registry() -> Vec<ModelInfo> {
     let m = |id: &str,
              name: &str,
              kind: ModelKind,
@@ -82,6 +135,14 @@ fn builtin_registry() -> Vec<ModelInfo> {
         custom: false,
         downloaded: false,
         files: vec![],
+        engine: SttEngine::Whisper,
+        supported_languages: vec![],
+    };
+    // Parakeet TDT (NVIDIA, CC-BY-4.0) as a Q8_0 GGUF for transcribe.cpp.
+    let parakeet = |id: &str, name: &str, url: &str, size: u64, desc: &str, languages: &str, codes: &[&str]| ModelInfo {
+        engine: SttEngine::Parakeet,
+        supported_languages: codes.iter().map(|c| c.to_string()).collect(),
+        ..m(id, name, ModelKind::Stt, url, size, desc, languages, false)
     };
     // A multi-file (bundle) model — downloads its files into a per-id directory.
     let mb = |id: &str,
@@ -103,6 +164,8 @@ fn builtin_registry() -> Vec<ModelInfo> {
         custom: false,
         downloaded: false,
         files: files.iter().map(|s| s.to_string()).collect(),
+        engine: SttEngine::Moonshine,
+        supported_languages: vec!["en".into()],
     };
     const WHISPER_LANGS: &str = "Multilingual · ~99 languages";
     const EN_ONLY: &str = "English only";
@@ -209,6 +272,25 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "Hindi dictation that outputs romanized Hinglish; great for Hindi/Urdu in Latin script.",
             "Hindi / Hinglish (romanized)",
             false,
+        ),
+        // --- Parakeet TDT 0.6B (transcribe.cpp, GPU) ---
+        parakeet(
+            "parakeet-tdt-0.6b-v2",
+            "Parakeet TDT v2 (English)",
+            "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/main/parakeet-tdt-0.6b-v2-Q8_0.gguf",
+            730 * MB,
+            "Fast and accurate English: beat Large v3 Turbo on meeting audio in our tests at several times the speed. No vocabulary hints. NVIDIA, CC-BY-4.0.",
+            EN_ONLY,
+            &["en"],
+        ),
+        parakeet(
+            "parakeet-tdt-0.6b-v3",
+            "Parakeet TDT v3 (European languages)",
+            "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/main/parakeet-tdt-0.6b-v3-Q8_0.gguf",
+            740 * MB,
+            "Fast and accurate in 25 European languages; keeps fillers like \"uh\" and spells out numbers. Other languages need a Whisper model. NVIDIA, CC-BY-4.0.",
+            "25 European languages",
+            PARAKEET_V3_LANGUAGES,
         ),
         // --- Text cleanup (llama.cpp GGUF) ---
         m(
@@ -455,21 +537,27 @@ fn builtin_registry() -> Vec<ModelInfo> {
             "Low-latency English transcription for live meetings. English only.",
             "English",
         ),
-        mb(
-            "parakeet-tdt-v3",
-            "Parakeet TDT v3 (multilingual, fast)",
-            ModelKind::Stt,
-            &[
-                "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/encoder.int8.onnx",
-                "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/decoder.int8.onnx",
-                "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/joiner.int8.onnx",
-                "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/tokens.txt",
-            ],
-            680 * MB,
-            "Fast, accurate transcription for live meetings; ~25 European languages.",
-            "Multilingual · ~25 languages",
-        ),
     ]
+}
+
+/// Multilingual Whisper models that can stand in for a model without the
+/// spoken language (and detect it), most accurate first. Fine-tunes such as
+/// IndicWhisper are left out: their language detection is not trustworthy.
+const FALLBACK_WHISPER: &[&str] = &[
+    "whisper-large-v3-turbo",
+    "whisper-large-v3",
+    "whisper-medium",
+    "whisper-small",
+    "whisper-base",
+    "whisper-tiny",
+];
+
+/// The downloaded Whisper model to use where the selected model cannot
+/// transcribe the spoken language, or cannot tell which language it is.
+pub fn fallback_whisper(models: &[ModelInfo]) -> Option<&ModelInfo> {
+    FALLBACK_WHISPER
+        .iter()
+        .find_map(|id| models.iter().find(|m| m.id == *id && m.downloaded))
 }
 
 pub fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -548,6 +636,7 @@ pub fn all_models(app: &AppHandle) -> Result<Vec<ModelInfo>, String> {
 }
 
 pub fn find_model(app: &AppHandle, id: &str) -> Result<ModelInfo, String> {
+    let id = migrate_id(id);
     all_models(app)?
         .into_iter()
         .find(|m| m.id == id)
@@ -591,6 +680,8 @@ pub fn add_custom(app: &AppHandle, name: String, kind: ModelKind, url: String) -
         custom: true,
         downloaded: false,
         files: vec![],
+        engine: SttEngine::Whisper,
+        supported_languages: vec![],
     };
     customs.push(info.clone());
     save_custom_models(app, &customs)?;
@@ -716,4 +807,69 @@ async fn download_inner(app: &AppHandle, id: &str) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn installed(ids: &[&str]) -> Vec<ModelInfo> {
+        builtin_registry()
+            .into_iter()
+            .map(|mut m| {
+                m.downloaded = ids.contains(&m.id.as_str());
+                m
+            })
+            .collect()
+    }
+
+    #[test]
+    fn removed_sherpa_parakeet_maps_to_the_new_v3() {
+        assert_eq!(migrate_id("parakeet-tdt-v3"), "parakeet-tdt-0.6b-v3");
+        assert_eq!(migrate_id("whisper-large-v3-turbo"), "whisper-large-v3-turbo");
+        let reg = builtin_registry();
+        assert!(reg.iter().all(|m| m.id != "parakeet-tdt-v3"));
+        // Every replacement exists, so a migrated id never dangles.
+        for (_, new) in RENAMED {
+            assert!(reg.iter().any(|m| m.id == *new), "{new}");
+        }
+    }
+
+    #[test]
+    fn parakeet_entries_are_single_gguf_files_with_their_languages() {
+        let reg = builtin_registry();
+        let v2 = reg.iter().find(|m| m.id == "parakeet-tdt-0.6b-v2").unwrap();
+        let v3 = reg.iter().find(|m| m.id == "parakeet-tdt-0.6b-v3").unwrap();
+        for m in [v2, v3] {
+            assert_eq!(m.engine, SttEngine::Parakeet);
+            assert!(m.files.is_empty() && m.filename.ends_with("-Q8_0.gguf"));
+            assert!(!m.recommended);
+        }
+        assert_eq!(v2.supported_languages, ["en"]);
+        assert_eq!(v3.supported_languages.len(), 25);
+        assert!(v3.supported_languages.iter().any(|l| l == "de"));
+        assert!(!v3.supported_languages.iter().any(|l| l == "hi"));
+    }
+
+    #[test]
+    fn whisper_turbo_stays_the_recommended_speech_model() {
+        let rec: Vec<_> = builtin_registry()
+            .into_iter()
+            .filter(|m| m.kind == ModelKind::Stt && m.recommended)
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(rec, ["whisper-large-v3-turbo"]);
+    }
+
+    #[test]
+    fn fallback_prefers_the_most_accurate_multilingual_whisper() {
+        let pick = |ids: &[&str]| {
+            let models = installed(ids);
+            fallback_whisper(&models).map(|m| m.id.clone())
+        };
+        assert_eq!(pick(&["parakeet-tdt-0.6b-v3"]), None);
+        assert_eq!(pick(&["whisper-small-en", "indic-whisper-medium"]), None);
+        assert_eq!(pick(&["whisper-tiny", "whisper-large-v3-turbo"]).as_deref(), Some("whisper-large-v3-turbo"));
+        assert_eq!(pick(&["whisper-base", "whisper-small"]).as_deref(), Some("whisper-small"));
+    }
 }

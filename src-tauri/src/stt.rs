@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 mod filter;
+pub(crate) use filter::sanitize_unscored;
 use filter::{collapse_repetitions, sanitize_segment};
 
 const SILENCE_PEAK_THRESHOLD: f32 = 0.005;
@@ -16,7 +17,7 @@ const LANGUAGE_MIN_PROBABILITY: f32 = 0.5;
 /// delaying capture or changing the duration reported to the UI.
 const LEADING_SILENCE_SAMPLES: usize = 8_000; // 500 ms at 16 kHz
 
-fn is_effectively_silent(samples: &[f32]) -> bool {
+pub(crate) fn is_effectively_silent(samples: &[f32]) -> bool {
     samples
         .iter()
         .all(|sample| sample.abs() < SILENCE_PEAK_THRESHOLD)

@@ -2,10 +2,11 @@
 //!  • **live captions**: periodically re-transcribe the whole take-so-far and
 //!    emit it on `dictation-live`, so the words appear as you speak — in the
 //!    window, or the overlay bubble for hotkey takes;
-//!  • **language detection** (spoken language on auto, Whisper models): name
-//!    the language from the first few seconds, so the final transcription can
-//!    skip Whisper's own detection — a second full encoder pass that roughly
-//!    doubles the time on a short take.
+//!  • **language detection** (spoken language on auto): name the language
+//!    from the first few seconds, so the final transcription can skip
+//!    Whisper's own detection — a second full encoder pass that roughly
+//!    doubles the time on a short take — and, for a model with only some
+//!    languages (Parakeet), so speech in others goes to Whisper.
 //! The final, authoritative transcription + cleanup still happens once at stop.
 
 use crate::{asr, audio, stt, AppState};
@@ -84,9 +85,16 @@ pub fn start(
     // A fresh take: retire the previous preview without waiting on inference.
     stop(app);
     let st = app.state::<AppState>();
+    let selection = asr::Selection::load(app, &model_id)?;
+    // A Whisper model detects with itself; a model with only some languages
+    // with the fallback Whisper model, when there is one.
     let detect_with = match language {
-        None => asr::whisper_path(app, &model_id)?,
         Some(_) => None,
+        None if selection.is_limited() => selection.detector().map(PathBuf::from),
+        None if selection.info.engine == crate::models::SttEngine::Whisper => {
+            Some(crate::models::downloaded_model_path(app, &model_id)?)
+        }
+        None => None,
     };
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_thread = stop_flag.clone();
@@ -97,7 +105,7 @@ pub fn start(
         run_live(
             app_thread,
             take_id,
-            model_id,
+            selection,
             language,
             initial_prompt,
             detect_with,
@@ -122,11 +130,18 @@ pub fn finish(app: &AppHandle) -> Option<String> {
     app.state::<AppState>().live.finish()
 }
 
+/// The caption engine, picked once the spoken language is settled.
+enum Captions {
+    Pending,
+    Ready(asr::Engine),
+    Off,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_live(
     app: AppHandle,
     take_id: String,
-    model_id: String,
+    selection: asr::Selection,
     language: Option<String>,
     initial_prompt: Option<String>,
     mut detect_with: Option<PathBuf>,
@@ -134,19 +149,13 @@ fn run_live(
     detected: Arc<Mutex<Option<String>>>,
 ) {
     if stop.load(Ordering::Relaxed) { return; }
-    // Build the engine once on this thread (sherpa recognizers are !Send).
-    let mut engine = match asr::resolve(&app, &model_id) {
-        Ok(e) => Some(e),
-        Err(e) => {
-            eprintln!("[dictation] live captions unavailable: {e}");
-            None
-        }
-    };
+    let could_detect = detect_with.is_some();
+    let mut captions = Captions::Pending;
     let mut language = language;
     let prompt = initial_prompt.as_deref();
     let mut next_detect = Instant::now();
     let mut next_caption = Instant::now() + Duration::from_millis(CAPTION_GAP_MS);
-    while !stop.load(Ordering::Relaxed) && (engine.is_some() || detect_with.is_some()) {
+    while !stop.load(Ordering::Relaxed) && (!matches!(captions, Captions::Off) || detect_with.is_some()) {
         std::thread::sleep(Duration::from_millis(TICK_MS));
         if stop.load(Ordering::Relaxed) { break; }
         let now = Instant::now();
@@ -174,22 +183,57 @@ fn run_live(
         // With the language on auto, wait for it: Whisper's own guess on the
         // first second or two is unreliable and would caption another language.
         let caption_due = now >= next_caption && detect_with.is_none();
-        if let Some(engine) = engine.as_mut().filter(|_| caption_due) {
-            next_caption = now + Duration::from_millis(CAPTION_GAP_MS);
-            let samples = audio::snapshot_16k(&app.state::<AppState>().audio);
-            if samples.len() < 1600 {
-                continue;
-            }
-            // Abandoned when the take ends, so the final pass never waits on it.
-            let lang = language.as_deref();
-            let result = asr::transcribe_preview(&app, engine, &samples, lang, prompt, stop.clone());
-            next_caption = next_caption.max(Instant::now() + now.elapsed() * 2);
-            if let Ok(text) = result {
-                if !text.is_empty() && !stop.load(Ordering::Relaxed) {
-                    let _ = app.emit("dictation-live", serde_json::json!({ "takeId": take_id, "text": text }));
+        if caption_due && matches!(captions, Captions::Pending) {
+            // Built on this thread (Moonshine is !Send).
+            captions = match caption_engine(&app, &selection, language.as_deref(), could_detect) {
+                Ok(engine) => Captions::Ready(engine),
+                Err(e) => {
+                    eprintln!("[dictation] live captions unavailable: {e}");
+                    Captions::Off
                 }
+            };
+        }
+        let engine = match &mut captions {
+            Captions::Ready(engine) if caption_due => engine,
+            _ => continue,
+        };
+        next_caption = now + Duration::from_millis(CAPTION_GAP_MS);
+        let samples = audio::snapshot_16k(&app.state::<AppState>().audio);
+        if samples.len() < 1600 {
+            continue;
+        }
+        // Abandoned when the take ends, so the final pass never waits on it.
+        let lang = language.as_deref();
+        let st = app.state::<AppState>();
+        let result = asr::transcribe_preview(asr::Caches::of(&st), engine, &samples, lang, prompt, stop.clone());
+        next_caption = next_caption.max(Instant::now() + now.elapsed() * 2);
+        if let Ok(text) = result {
+            if !text.is_empty() && !stop.load(Ordering::Relaxed) {
+                let _ = app.emit("dictation-live", serde_json::json!({ "takeId": take_id, "text": text }));
             }
         }
+    }
+}
+
+/// The engine captions use, given what is known about the language. Speech the
+/// selected model can't transcribe gets the fallback Whisper model, or none.
+fn caption_engine(
+    app: &AppHandle,
+    selection: &asr::Selection,
+    language: Option<&str>,
+    could_detect: bool,
+) -> Result<asr::Engine, String> {
+    let heard = match language {
+        Some(lang) => asr::Heard::Known(lang),
+        None if could_detect => asr::Heard::Unsure,
+        None => asr::Heard::Unknown,
+    };
+    match selection.route(heard) {
+        asr::Route::Selected => asr::resolve(app, &selection.info.id),
+        asr::Route::Fallback => {
+            Ok(asr::Engine::Whisper(selection.fallback.clone().map(|(_, p)| p).unwrap_or_default()))
+        }
+        asr::Route::Refuse => Err(asr::refusal(&selection.info, language)),
     }
 }
 

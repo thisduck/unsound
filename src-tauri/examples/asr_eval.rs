@@ -5,6 +5,7 @@
 //!   cargo run --release --example asr_eval -- sherpa-parakeet <dir> eval <manifest> <out.jsonl>
 //!   cargo run --release --example asr_eval -- wcpp-parakeet <ggml-parakeet.bin> eval <manifest> <out.jsonl>
 //!   cargo run --release --example asr_eval -- tc <model.gguf> eval <manifest> <out.jsonl>
+//!   cargo run --release --example asr_eval -- app-parakeet <model.gguf> eval <manifest> <out.jsonl>
 //!   ... probe <lang> <wav>...
 //!
 //! Whisper mirrors `stt::transcribe` with the clip's language passed in, as
@@ -34,6 +35,8 @@ fn main() {
         "wcpp-parakeet" => Box::new(engines::WcppParakeet::load(model)),
         #[cfg(not(no_parakeet))]
         "tc" => Box::new(engines::Tc::load(model)),
+        #[cfg(not(no_parakeet))]
+        "app-parakeet" => Box::new(engines::AppParakeet::load(model)),
         "whisper" => Box::new(engines::Whisper::load(model)),
         "sherpa-parakeet" => Box::new(engines::SherpaParakeet::load(model)),
         k => panic!("unknown engine {k}"),

@@ -276,8 +276,14 @@ pub fn load(app: &AppHandle) -> Settings {
         dictionary: raw.dictionary.unwrap_or_default(),
         command_keys: raw.command_keys.unwrap_or_default(),
         assistant: raw.assistant.unwrap_or_default(),
-        meetings: raw.meetings.unwrap_or_default(),
+        meetings: raw.meetings.map(migrate_meetings).unwrap_or_default(),
     }
+}
+
+/// A removed speech model id becomes its replacement.
+fn migrate_meetings(mut m: MeetingSettings) -> MeetingSettings {
+    m.speech_model = crate::models::migrate_id(&m.speech_model).to_string();
+    m
 }
 
 pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {

@@ -1,6 +1,6 @@
-//! Cleanup of Whisper output: non-speech tags, stock phrases Whisper emits for
-//! silence, and decoder loops. Words are Unicode runs between punctuation and
-//! whitespace, so this works the same for non-Latin scripts.
+//! Cleanup of speech-model output: non-speech tags, stock phrases Whisper emits
+//! for silence, and decoder loops. Words are Unicode runs between punctuation
+//! and whitespace, so this works the same for non-Latin scripts.
 use std::collections::HashMap;
 
 const NO_SPEECH_PROBABILITY_THRESHOLD: f32 = 0.6;
@@ -252,9 +252,42 @@ pub fn sanitize_segment(text: &str, no_speech_probability: f32) -> String {
     collapse_repetitions(&cleaned)
 }
 
+/// Clean output from a model that gives no no-speech probability (Parakeet).
+/// Its stock phrases are never treated as silence: Parakeet was not trained on
+/// subtitles and does not invent them, so "Thank you." is speech. Tags and
+/// decoder loops are removed as for Whisper.
+pub fn sanitize_unscored(text: &str) -> String {
+    sanitize_segment(text, 0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parakeet_output_keeps_short_phrases_and_fillers() {
+        for text in [
+            "Thank you.",
+            "Bye.",
+            "Uh, so, um, I think we should, uh, ship it on Friday.",
+            "Twenty twenty six was the year we moved to three hundred and fifty users.",
+            "Yeah. Yeah. Yeah.",
+            "Mm-hmm.",
+        ] {
+            assert_eq!(sanitize_unscored(text), text, "{text}");
+        }
+    }
+
+    #[test]
+    fn parakeet_loops_on_vocal_noise_are_dropped_or_collapsed() {
+        // A whole piece that is one looping n-gram (humming, a laugh track).
+        assert_eq!(sanitize_unscored(&"la la ".repeat(10)), "");
+        assert_eq!(sanitize_unscored(&"Oh, oh, oh, oh, ".repeat(4)), "");
+        // A loop after real speech keeps the speech and one copy of the loop.
+        let looped = format!("We should test this before the release on Friday.{}", " Mm.".repeat(12));
+        assert_eq!(sanitize_unscored(&looped), "We should test this before the release on Friday. Mm.");
+        assert_eq!(sanitize_unscored("Subtitles by the Amara.org community"), "");
+    }
 
     #[test]
     fn strips_blank_audio_markers() {

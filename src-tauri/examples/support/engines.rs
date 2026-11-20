@@ -1,6 +1,7 @@
 //! Speech engines for the spike examples (asr_eval, three_engines): Whisper as
-//! unsound runs it, the sherpa-onnx Parakeet unsound ships, and whisper.cpp's
-//! own Parakeet TDT on the shared ggml. Not part of the app.
+//! unsound runs it, the sherpa-onnx Parakeet unsound used to ship, whisper.cpp's
+//! own Parakeet TDT, and transcribe.cpp (directly and through the app's
+//! `parakeet` module), all on the shared ggml.
 
 use super::harness::{Asr, Output};
 use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
@@ -62,7 +63,7 @@ impl Asr for Whisper {
     }
 }
 
-/// Same config as `asr::Parakeet` (sherpa-onnx, CPU int8, 2 threads).
+/// Same config as the removed `asr::Parakeet` (sherpa-onnx, CPU int8, 2 threads).
 pub struct SherpaParakeet(pub TransducerRecognizer);
 
 impl SherpaParakeet {
@@ -87,7 +88,7 @@ impl SherpaParakeet {
 
 impl Asr for SherpaParakeet {
     fn run(&mut self, pcm: &[f32], _lang: &str) -> Output {
-        // Like asr::Parakeet: one span per chunk.
+        // Like the removed asr::Parakeet: one span per chunk.
         let text = self.0.transcribe(16000, pcm);
         let spans = vec![(0.0, pcm.len() as f64 / 16000.0, text.clone())];
         Output { text, spans }
@@ -132,6 +133,47 @@ impl Asr for Tc {
             }
             Err(e) => {
                 eprintln!("transcribe.cpp run failed: {e}");
+                Output { text: String::new(), spans: vec![] }
+            }
+        }
+    }
+}
+
+/// Parakeet as the app runs it (`unsound_lib::parakeet`: cached model and
+/// session, word timestamps), unfiltered, for checks against `Tc`/standalone.
+#[cfg(not(no_parakeet))]
+pub struct AppParakeet {
+    state: unsound_lib::parakeet::ParakeetState,
+    path: std::path::PathBuf,
+}
+
+#[cfg(not(no_parakeet))]
+impl AppParakeet {
+    pub fn load(path: &str) -> Self {
+        let state = unsound_lib::parakeet::ParakeetState::default();
+        let path = std::path::PathBuf::from(path);
+        state.warmup(&path).expect("parakeet load");
+        AppParakeet { state, path }
+    }
+}
+
+#[cfg(not(no_parakeet))]
+impl Drop for AppParakeet {
+    fn drop(&mut self) {
+        self.state.clear();
+    }
+}
+
+#[cfg(not(no_parakeet))]
+impl Asr for AppParakeet {
+    fn run(&mut self, pcm: &[f32], _lang: &str) -> Output {
+        match self.state.transcribe(&self.path, pcm, None) {
+            Ok(o) => Output {
+                spans: o.words.iter().map(|w| (w.start_ms as f64 / 1000.0, w.end_ms as f64 / 1000.0, w.text.clone())).collect(),
+                text: o.text,
+            },
+            Err(e) => {
+                eprintln!("parakeet run failed: {e}");
                 Output { text: String::new(), spans: vec![] }
             }
         }

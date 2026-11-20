@@ -37,6 +37,7 @@ pub mod stt;
 mod summary;
 mod notes_quality;
 mod participants;
+pub mod parakeet;
 mod roster;
 mod meeting_research;
 mod reminders;
@@ -49,6 +50,8 @@ mod updates;
 mod util;
 #[cfg(test)]
 mod reliability_tests;
+#[cfg(test)]
+mod engine_tests;
 
 use audio::{AudioState, RecordingResult};
 use llm::LlmState;
@@ -73,6 +76,8 @@ enum ShortcutMode {
 pub struct AppState {
     audio: AudioState,
     stt: SttState,
+    /// Cached Parakeet model (transcribe.cpp), like `stt` for Whisper.
+    parakeet: parakeet::ParakeetState,
     llm: LlmState,
     /// System-audio (ScreenCaptureKit) capture — the "them" channel in a
     /// meeting. Separate from the mic so who-said-what stays attributable.
@@ -212,21 +217,14 @@ async fn transcribe(
         },
     };
     let initial_prompt = vocab_prompt(&app);
-    // Inference is heavy; keep it off the async runtime. The engine (whisper or
-    // a sherpa model) is resolved on the blocking thread.
+    // Inference is heavy; keep it off the async runtime. The engine is
+    // resolved on the blocking thread.
     let worker_app = app.clone();
     let text = tauri::async_runtime::spawn_blocking(move || {
         // On auto, use the language detected while recording, sparing Whisper
         // its own detection pass.
         let language = language.or(recording.language);
-        let mut engine = asr::resolve(&worker_app, &model_id)?;
-        asr::transcribe_text(
-            &worker_app,
-            &mut engine,
-            &recording.samples,
-            language.as_deref(),
-            initial_prompt.as_deref(),
-        )
+        transcribe_take(&worker_app, &model_id, language.as_deref(), &recording.samples, initial_prompt.as_deref())
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -239,15 +237,22 @@ async fn transcribe(
 #[tauri::command]
 async fn warm_stt(app: AppHandle, model_id: String) -> Result<(), String> {
     *app.state::<AppState>().dictation_stt.lock().unwrap() = model_id.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        // The sherpa models are built per use, so there's nothing to keep warm.
-        match asr::whisper_path(&app, &model_id)? {
-            Some(path) => app.state::<AppState>().stt.warmup(&path),
-            None => Ok(()),
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || asr::warm(&app, &model_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// A finished take through the engine its language routes to.
+fn transcribe_take(
+    app: &AppHandle,
+    model_id: &str,
+    language: Option<&str>,
+    samples: &[f32],
+    initial_prompt: Option<&str>,
+) -> Result<String, String> {
+    let (mut engine, language) = asr::resolve_for_take(app, model_id, language, samples)?;
+    let st = app.state::<AppState>();
+    asr::transcribe_text(asr::Caches::of(&st), &mut engine, samples, language.as_deref(), initial_prompt)
 }
 
 /// The user's corrected vocabulary, as a Whisper `initial_prompt` that biases
@@ -315,14 +320,7 @@ async fn transcribe_file(
     let initial_prompt = vocab_prompt(&app);
     let worker_app = app.clone();
     let text = tauri::async_runtime::spawn_blocking(move || {
-        let mut engine = asr::resolve(&worker_app, &model_id)?;
-        asr::transcribe_text(
-            &worker_app,
-            &mut engine,
-            &samples,
-            language.as_deref(),
-            initial_prompt.as_deref(),
-        )
+        transcribe_take(&worker_app, &model_id, language.as_deref(), &samples, initial_prompt.as_deref())
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -1123,8 +1121,7 @@ fn command_up(app: &AppHandle) {
             } else {
                 model
             };
-            let mut engine = asr::resolve(&app, &model)?;
-            asr::transcribe_text(&app, &mut engine, &samples, None, vocab_prompt(&app).as_deref())
+            transcribe_take(&app, &model, None, &samples, vocab_prompt(&app).as_deref())
         })();
         match text {
             Ok(t) if !t.trim().is_empty() => {
@@ -1454,6 +1451,10 @@ pub fn run() {
                 meeting_fixture_runner::launch_if_requested(&handle);
                 return Ok(());
             }
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || models::remove_retired(&h));
+            }
             reminders::start(handle.clone());
             agent::start(&handle);
             meeting::start_recovery(handle.clone());
@@ -1600,11 +1601,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // Release cached whisper/llama models before process exit;
+            // Release cached whisper/parakeet/llama models before process exit;
             // ggml's Metal teardown asserts if their buffers are still alive.
             if let tauri::RunEvent::Exit = event {
                 let state = app.state::<AppState>();
                 state.stt.clear();
+                state.parakeet.clear();
                 state.llm.clear();
             }
         });

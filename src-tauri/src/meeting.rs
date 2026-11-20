@@ -25,11 +25,8 @@ const RATE: i64 = audio::WHISPER_SAMPLE_RATE as i64;
 const PARTIAL_MIN_SAMPLES: usize = audio::WHISPER_SAMPLE_RATE as usize;
 /// When behind, consecutive segments of one channel are transcribed together
 /// up to this long — one Whisper encoder pass instead of several (its encoder
-/// costs the same for 3 s of audio as for 30 s).
+/// costs the same for 3 s of audio as for 30 s). See `asr::Engine::batches`.
 const BATCH_MAX_SAMPLES: usize = 25 * audio::WHISPER_SAMPLE_RATE as usize;
-/// Silence between batched segments, and before every segment (Whisper drops
-/// words that start right at sample zero).
-const GAP_SAMPLES: usize = 4_800;
 /// After a bare "unsound", the next line within this long is the request.
 const ARMED_MS: i64 = 12_000;
 
@@ -118,9 +115,18 @@ pub fn start_with_options(app: &AppHandle, opts: StartOptions) -> Result<(), Str
         return start(app, opts, PathBuf::new());
     }
     let vad_path = models::downloaded_model_path(app, "vad-silero")?;
-    // Surface a missing speech model early; the engine itself is built on the
-    // transcription thread (sherpa recognizers are !Send).
+    // Surface a missing speech model, or a language nothing downloaded can
+    // transcribe, before recording; the engine itself is built on the
+    // transcription thread (Moonshine is !Send).
+    let mut opts = opts;
     models::downloaded_model_path(app, &opts.stt_model)?;
+    let selection = asr::Selection::load(app, &opts.stt_model)?;
+    if let Some(lang) = opts.language.as_deref() {
+        if selection.route(asr::Heard::Known(lang)) == asr::Route::Refuse {
+            return Err(asr::refusal(&selection.info, Some(lang)));
+        }
+    }
+    opts.stt_model = selection.info.id;
     let id = opts.meeting_id.clone();
     start(app, opts, vad_path).map_err(|e| {
         if active_meeting(app).as_deref() != Some(&id) {
@@ -1141,11 +1147,14 @@ struct Piece {
 struct Live {
     meeting_id: String,
     language: Option<String>,
-    /// Whisper on auto: detect the language once from the first speech, then
-    /// lock it (auto-detect per segment costs a second encoder pass each time
-    /// and can flip languages on short lines).
+    /// On auto: detect the language once from the first speech, then lock it
+    /// (auto-detect per segment costs Whisper a second encoder pass each time
+    /// and can flip languages on short lines). Always a Whisper model: the
+    /// selected one, or the fallback for a model with only some languages.
     detect_with: Option<PathBuf>,
     detect_buf: Vec<f32>,
+    /// A detector existed: an unlocked language means "not sure (yet)".
+    could_detect: bool,
     embedder: Option<speakers::Embedder>,
     tracker: speakers::SpeakerTracker,
     emb_model: String,
@@ -1173,17 +1182,36 @@ fn run_transcribe(
     // Dictionary plus the people on the call, refreshed as they appear.
     let mut people = crate::participants::Live::new(&settings);
     let recovering = active_meeting(&app).as_deref() != Some(&meeting_id);
-    // Build the engine on this thread (sherpa recognizers are !Send).
+    // Build the engine on this thread (Moonshine is !Send).
     let mut engine = asr::resolve(&app, &model_id)?;
+    // Only models with some languages are routed (fixtures have no entry).
+    let selection = asr::Selection::load(&app, &model_id).ok().filter(|s| s.is_limited());
+    // Whisper hears what the selected model has no language for.
+    let mut fallback = selection
+        .as_ref()
+        .and_then(|s| s.fallback.clone())
+        .map(|(_, path)| asr::Engine::Whisper(path));
     // Warm the model up front so the first segment of the meeting isn't slow.
     let mut detect_with = None;
-    if let asr::Engine::Whisper(path) = &engine {
+    {
         let st = app.state::<AppState>();
-        if let Err(e) = st.stt.warmup(path) {
+        let warmed = match &engine {
+            asr::Engine::Whisper(path) => {
+                if language.is_none() {
+                    detect_with = Some(path.clone());
+                }
+                st.stt.warmup(path)
+            }
+            asr::Engine::Parakeet(path) => st.parakeet.warmup(path),
+            _ => Ok(()),
+        };
+        if let Err(e) = warmed {
             eprintln!("[meeting] warmup failed: {e}");
         }
         if language.is_none() {
-            detect_with = Some(path.clone());
+            if let Some(path) = selection.as_ref().and_then(|s| s.detector()) {
+                detect_with = Some(path.to_path_buf());
+            }
         }
     }
     let s = settings::load(&app);
@@ -1212,6 +1240,7 @@ fn run_transcribe(
     let mut live = Live {
         meeting_id: meeting_id.clone(),
         language,
+        could_detect: detect_with.is_some(),
         detect_with,
         detect_buf: Vec::new(),
         embedder,
@@ -1250,9 +1279,10 @@ fn run_transcribe(
             match job {
                 Job::Command { samples, at_ms } => {
                     let text = complete_partial(&depth, || {
+                        let engine = pick_engine(&mut engine, &mut fallback, selection.as_ref(), &live)?;
                         asr::transcribe_preview(
-                            &app,
-                            &mut engine,
+                            asr::Caches::of(&app.state::<AppState>()),
+                            engine,
                             &samples,
                             live.language.as_deref(),
                             prompt.as_deref(),
@@ -1275,9 +1305,10 @@ fn run_transcribe(
                 }
                 Job::Partial { samples, speaker } => {
                     let text = complete_partial(&depth, || {
+                        let engine = pick_engine(&mut engine, &mut fallback, selection.as_ref(), &live)?;
                         asr::transcribe_preview(
-                            &app,
-                            &mut engine,
+                            asr::Caches::of(&app.state::<AppState>()),
+                            engine,
                             &samples,
                             live.language.as_deref(),
                             prompt.as_deref(),
@@ -1290,11 +1321,12 @@ fn run_transcribe(
                 }
             }
         }
+        let batches = pick_engine(&mut engine, &mut fallback, selection.as_ref(), &live)?.batches();
         let jobs = meeting_work::next_batch(
             &db,
             &meeting_id,
-            matches!(engine, asr::Engine::Whisper(_)),
-            GAP_SAMPLES as i64,
+            batches,
+            asr::PIECE_GAP_SAMPLES as i64,
         )?;
         if !jobs.is_empty() {
             let queued_at=jobs.iter().map(|j|j.queued_at_ms).filter(|t|*t>0).min().unwrap_or(0);
@@ -1332,6 +1364,8 @@ fn run_transcribe(
                 process_finals(
                     &app,
                     &mut engine,
+                    &mut fallback,
+                    selection.as_ref(),
                     &mut live,
                     pieces,
                     prompt.as_deref(),
@@ -1352,11 +1386,36 @@ fn run_transcribe(
     }
 }
 
-/// Transcribe a batch of segments (one Whisper pass), then label, correct,
-/// scan for the wake word, persist and emit each resulting line.
+/// The engine for the language as now known: the selected one, or Whisper
+/// for speech the selected model has no language for (and, on auto, until
+/// detection is sure).
+fn pick_engine<'a>(
+    engine: &'a mut asr::Engine,
+    fallback: &'a mut Option<asr::Engine>,
+    selection: Option<&asr::Selection>,
+    live: &Live,
+) -> Result<&'a mut asr::Engine, String> {
+    let Some(selection) = selection else { return Ok(engine) };
+    let heard = match live.language.as_deref() {
+        Some(lang) => asr::Heard::Known(lang),
+        None if live.could_detect => asr::Heard::Unsure,
+        None => asr::Heard::Unknown,
+    };
+    match selection.route(heard) {
+        asr::Route::Selected => Ok(engine),
+        asr::Route::Fallback => fallback.as_mut().ok_or_else(|| "no Whisper model to fall back on".to_string()),
+        asr::Route::Refuse => Err(asr::refusal(&selection.info, live.language.as_deref())),
+    }
+}
+
+/// Transcribe a batch of segments (one Whisper pass, or one Parakeet piece),
+/// then label, correct, scan for the wake word, persist and emit each line.
+#[allow(clippy::too_many_arguments)]
 fn process_finals(
     app: &AppHandle,
     engine: &mut asr::Engine,
+    fallback: &mut Option<asr::Engine>,
+    selection: Option<&asr::Selection>,
     live: &mut Live,
     batch: Vec<Piece>,
     prompt: Option<&str>,
@@ -1364,20 +1423,12 @@ fn process_finals(
     cancel: Arc<AtomicBool>,
 ) -> Result<bool, String> {
     maybe_lock_language(app, live, &batch);
-
-    // Lay the batch out on one buffer: [gap][piece 0][gap][piece 1]…
-    let mut buf: Vec<f32> = Vec::new();
-    let mut spans: Vec<(i64, i64)> = Vec::new(); // (offset_ms, len_ms) in buf
-    for p in &batch {
-        buf.extend(std::iter::repeat_n(0.0, GAP_SAMPLES));
-        let off = buf.len() as i64 * 1000 / RATE;
-        buf.extend_from_slice(&p.samples);
-        spans.push((off, p.samples.len() as i64 * 1000 / RATE));
-    }
-    let parts = asr::transcribe_parts_checked(
-        app,
+    let engine = pick_engine(engine, fallback, selection, live)?;
+    let pieces: Vec<&[f32]> = batch.iter().map(|p| p.samples.as_slice()).collect();
+    let parts = asr::transcribe_pieces(
+        asr::Caches::of(&app.state::<AppState>()),
         engine,
-        &buf,
+        &pieces,
         live.language.as_deref(),
         prompt,
         cancel.clone(),
@@ -1404,35 +1455,20 @@ fn process_finals(
         })
         .collect();
 
-    let mut segs: Vec<Segment> = Vec::new();
-    for (s, e, text) in parts {
-        // Which piece this text came from: the one its midpoint falls in.
-        let mid = (s + e) / 2;
-        let i = spans
-            .iter()
-            .position(|(off, len)| mid >= *off && mid <= off + len)
-            .or_else(|| {
-                spans
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, (off, len))| (mid - (off + len / 2)).abs())
-                    .map(|(i, _)| i)
-            })
-            .unwrap_or(0);
-        let (off, len) = spans[i];
-        let p = &batch[i];
-        let start_ms = p.base_ms + (s - off).clamp(0, len);
-        let end_ms = p.base_ms + (e - off).clamp(0, len);
-        let text = apply_dictionary(&text, &live.dictionary);
-        segs.push(Segment {
-            id: 0,
-            speaker: labels[i].clone(),
-            source: p.source.to_string(),
-            start_ms,
-            end_ms: end_ms.max(start_ms),
-            text,
-        });
-    }
+    let mut segs: Vec<Segment> = parts
+        .into_iter()
+        .map(|part| {
+            let p = &batch[part.piece];
+            Segment {
+                id: 0,
+                speaker: labels[part.piece].clone(),
+                source: p.source.to_string(),
+                start_ms: p.base_ms + part.start_ms,
+                end_ms: p.base_ms + part.end_ms,
+                text: apply_dictionary(&part.text, &live.dictionary),
+            }
+        })
+        .collect();
     if cancel.load(Ordering::Relaxed) {
         return Ok(false);
     }
@@ -1581,7 +1617,7 @@ fn finish_speakers(app: &AppHandle, live: &mut Live) {
 
 /// Apply the user's learned corrections ("pria" → "Priya") to meeting text:
 /// whole words, case-insensitive.
-fn apply_dictionary(text: &str, dict: &[(String, String)]) -> String {
+pub(crate) fn apply_dictionary(text: &str, dict: &[(String, String)]) -> String {
     let mut out = text.to_string();
     for (from, to) in dict {
         out = store::replace_words(&out, from, to);
