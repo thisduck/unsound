@@ -126,9 +126,10 @@ with different models to compare.
 
 Curated registry:
 
-- **Speech-to-text (Whisper):** tiny / base / small / medium / large-v3-turbo /
-  large-v3, English-only base & small variants, plus fine-tunes for South Asian
-  languages — IndicWhisper Medium (AI4Bharat) and Whisper Hindi→Hinglish.
+- **Speech-to-text (Whisper):** tiny / base / small / medium / large-v3-turbo
+  (default) / large-v3, English-only base & small variants, plus fine-tunes for
+  South Asian languages — IndicWhisper Medium (AI4Bharat) and Whisper
+  Hindi→Hinglish.
 - **Cleanup (llama.cpp GGUF):** Qwen3 4B (default), Gemma 3 4B, Qwen 2.5
   (1.5B/3B/7B), Llama 3.1 8B, Llama 3.2 (1B/3B).
 

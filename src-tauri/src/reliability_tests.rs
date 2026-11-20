@@ -170,7 +170,7 @@ fn killed_process_recovers_commits_and_requeues_unfinished_and_unqueued_audio() 
     assert!(samples.iter().all(|s| (*s - 0.25).abs() < 0.001));
     // A queued second and an unqueued VAD tail both survive. The committed
     // first second is never transcribed again, including on a second restart.
-    meeting_work::recover_channel(&db, "interrupted", "system", 48_000).unwrap();
+    meeting_work::recover_channel(&db, "interrupted", "system", 48_000, Some(&wav)).unwrap();
     meeting_work::state(&db, "interrupted", "finishing", "").unwrap();
     for (start, end, text) in [
         (16_000, 32_000, "queued"),
@@ -185,7 +185,7 @@ fn killed_process_recovers_commits_and_requeues_unfinished_and_unqueued_audio() 
     }
     drop(db);
     let db = store::open_path(&dir.path().join("unsound.db")).unwrap();
-    meeting_work::recover_channel(&db, "interrupted", "system", 48_000).unwrap();
+    meeting_work::recover_channel(&db, "interrupted", "system", 48_000, Some(&wav)).unwrap();
     assert!(meeting_work::next(&db, "interrupted").unwrap().is_none());
     assert!(store::recover_open_meetings(&db).unwrap().is_empty());
     assert_eq!(

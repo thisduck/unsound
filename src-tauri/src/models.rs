@@ -148,7 +148,7 @@ fn builtin_registry() -> Vec<ModelInfo> {
             488 * MB,
             "Good balance of speed and accuracy.",
             WHISPER_LANGS,
-            true,
+            false,
         ),
         m(
             "whisper-small-en",
@@ -176,9 +176,9 @@ fn builtin_registry() -> Vec<ModelInfo> {
             ModelKind::Stt,
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
             1620 * MB,
-            "Best accuracy at near-medium speed.",
+            "Recommended default: close to Large v3 accuracy at near-medium speed.",
             WHISPER_LANGS,
-            false,
+            true,
         ),
         m(
             "whisper-large-v3",

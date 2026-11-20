@@ -3,8 +3,13 @@
 use crate::store::{Db, Segment};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
+use std::path::Path;
 
 pub const MAX_SAMPLES: i64 = 25 * 16_000;
+/// A forced split looks this far back from the limit for a quiet moment.
+const CUT_SEARCH_SAMPLES: i64 = 3 * 16_000;
+const CUT_WINDOW: usize = 1_600; // 100 ms
+const CUT_HOP: usize = 160; // 10 ms
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -137,20 +142,78 @@ pub fn enqueue(
     end: i64,
     skipped: bool,
 ) -> Result<(), String> {
+    enqueue_split(db, id, source, speaker, start, end, skipped, None)
+}
+
+/// `enqueue`, cutting a range longer than `MAX_SAMPLES` at the quietest moment
+/// of the saved audio shortly before each limit rather than mid-word.
+#[allow(clippy::too_many_arguments)]
+fn enqueue_split(
+    db: &Db,
+    id: &str,
+    source: &str,
+    speaker: &str,
+    start: i64,
+    end: i64,
+    skipped: bool,
+    audio: Option<&Path>,
+) -> Result<(), String> {
     if start < 0 || end < start {
         return Err("invalid audio range".into());
     }
+    let ranges = split_range(start, end, |from, to| {
+        let samples = crate::audio_store::read_samples(audio?, from, to).ok()?;
+        quietest_point(&samples).map(|offset| from + offset as i64)
+    });
     let mut conn = db.0.lock().unwrap();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let mut pos = start;
-    while pos < end {
-        let next = (pos + MAX_SAMPLES).min(end);
+    for (from, to) in ranges {
         tx.execute("INSERT OR IGNORE INTO transcription_jobs(meeting_id,source,speaker,start_sample,end_sample,done,queued_at_ms)
-            VALUES (?1,?2,?3,?4,?5,?6,?7)", params![id,source,speaker,pos,next,skipped,crate::meeting_metrics::unix_ms()])
+            VALUES (?1,?2,?3,?4,?5,?6,?7)", params![id,source,speaker,from,to,skipped,crate::meeting_metrics::unix_ms()])
             .map_err(|e|e.to_string())?;
-        pos = next;
     }
     tx.commit().map_err(|e| e.to_string())
+}
+
+/// Contiguous, non-overlapping pieces of `[start, end)`, each at most
+/// `MAX_SAMPLES`. `cut(from, to)` may pick a split inside the last
+/// `CUT_SEARCH_SAMPLES` before a limit; otherwise the piece ends at the limit.
+fn split_range(start: i64, end: i64, mut cut: impl FnMut(i64, i64) -> Option<i64>) -> Vec<(i64, i64)> {
+    let mut ranges = Vec::new();
+    let mut pos = start;
+    while pos < end {
+        let limit = pos + MAX_SAMPLES;
+        let next = if limit >= end {
+            end
+        } else {
+            cut(limit - CUT_SEARCH_SAMPLES, limit)
+                .filter(|c| *c > pos && *c <= limit)
+                .unwrap_or(limit)
+        };
+        ranges.push((pos, next));
+        pos = next;
+    }
+    ranges
+}
+
+/// Offset of the centre of the lowest-energy `CUT_WINDOW` in `samples`; the
+/// later window wins a tie, keeping pieces close to full length.
+fn quietest_point(samples: &[f32]) -> Option<usize> {
+    if samples.len() < CUT_WINDOW {
+        return None;
+    }
+    let mut energy = vec![0f64; samples.len() + 1];
+    for (i, s) in samples.iter().enumerate() {
+        energy[i + 1] = energy[i] + (*s as f64) * (*s as f64);
+    }
+    let mut best: Option<(f64, usize)> = None;
+    for at in (0..=samples.len() - CUT_WINDOW).step_by(CUT_HOP) {
+        let e = energy[at + CUT_WINDOW] - energy[at];
+        if best.is_none_or(|(b, _)| e <= b) {
+            best = Some((e, at));
+        }
+    }
+    best.map(|(_, at)| at + CUT_WINDOW / 2)
 }
 
 pub fn next(db: &Db, id: &str) -> Result<Option<Job>, String> {
@@ -296,7 +359,13 @@ pub fn mask_private_audio(
 /// Fill gaps, including speech still inside VAD when the process died. Completed
 /// and deliberately excluded ranges are coverage too, so replay cannot duplicate
 /// transcript or expose a dictation/command tap. Called only after capture stops.
-pub fn recover_channel(db: &Db, id: &str, source: &str, total: i64) -> Result<(), String> {
+pub fn recover_channel(
+    db: &Db,
+    id: &str,
+    source: &str,
+    total: i64,
+    audio: Option<&Path>,
+) -> Result<(), String> {
     let mut covered: Vec<(i64, i64)> = {
         let conn = db.0.lock().unwrap();
         let mut q = conn.prepare("SELECT start_sample,end_sample FROM transcription_jobs WHERE meeting_id=?1 AND source=?2")
@@ -325,7 +394,7 @@ pub fn recover_channel(db: &Db, id: &str, source: &str, total: i64) -> Result<()
     let mut cursor = 0;
     for (start, end) in covered {
         if start > cursor {
-            enqueue(db, id, source, speaker, cursor, start.min(total), false)?;
+            enqueue_split(db, id, source, speaker, cursor, start.min(total), false, audio)?;
         }
         cursor = cursor.max(end).min(total);
         if cursor == total {
@@ -333,7 +402,7 @@ pub fn recover_channel(db: &Db, id: &str, source: &str, total: i64) -> Result<()
         }
     }
     if cursor < total {
-        enqueue(db, id, source, speaker, cursor, total, false)?;
+        enqueue_split(db, id, source, speaker, cursor, total, false, audio)?;
     }
     saved(db, id, source, total)
 }
@@ -423,8 +492,8 @@ mod reliability_tests {
         exclusion(&db, "m", 4000, None).unwrap(); // command still held at crash
         drop(db);
         let db = store::open_path(&dir.path().join("db")).unwrap();
-        recover_channel(&db, "m", "mic", 80_000).unwrap();
-        recover_channel(&db, "m", "mic", 80_000).unwrap();
+        recover_channel(&db, "m", "mic", 80_000, None).unwrap();
+        recover_channel(&db, "m", "mic", 80_000, None).unwrap();
         assert_eq!(statuses(&db).unwrap()[0].pending, 2);
         let j = next(&db, "m").unwrap().unwrap();
         assert_eq!((j.start, j.end), (0, 16_000));
@@ -446,7 +515,7 @@ mod reliability_tests {
     #[test]
     fn arbitrarily_long_backlog_is_split_into_bounded_disk_ranges() {
         let (_dir, db) = fixture();
-        recover_channel(&db, "m", "system", MAX_SAMPLES * 1000 + 53).unwrap();
+        recover_channel(&db, "m", "system", MAX_SAMPLES * 1000 + 53, None).unwrap();
         assert_eq!(statuses(&db).unwrap()[0].pending, 1001);
         let mut cursor = 0;
         while let Some(job) = next(&db, "m").unwrap() {
@@ -456,6 +525,80 @@ mod reliability_tests {
             complete(&db, "m", job.id, &[]).unwrap();
         }
         assert_eq!(cursor, MAX_SAMPLES * 1000 + 53);
+    }
+
+    /// A loud tone with silence over `quiet` (sample range).
+    fn tone_with_gap(len: usize, quiet: std::ops::Range<usize>) -> Vec<f32> {
+        (0..len)
+            .map(|i| if quiet.contains(&i) { 0.0 } else { 0.5 * ((i as f32) * 0.07).sin() })
+            .collect()
+    }
+
+    #[test]
+    fn quietest_point_finds_the_pause() {
+        let samples = tone_with_gap(48_000, 20_000..23_200);
+        let at = quietest_point(&samples).unwrap();
+        assert!((20_000 + CUT_WINDOW / 2..=23_200 - CUT_WINDOW / 2).contains(&at), "{at}");
+        assert_eq!(quietest_point(&samples[..CUT_WINDOW - 1]), None);
+    }
+
+    #[test]
+    fn split_range_uses_valid_cuts_and_stays_contiguous() {
+        let ranges = split_range(100, 100 + MAX_SAMPLES * 3, |from, to| {
+            assert_eq!(to - from, CUT_SEARCH_SAMPLES);
+            Some(to - 8_000)
+        });
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(ranges[0], (100, 100 + MAX_SAMPLES - 8_000));
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0);
+        }
+        assert!(ranges.iter().all(|(a, b)| a < b && b - a <= MAX_SAMPLES));
+        assert_eq!(ranges.last().unwrap().1, 100 + MAX_SAMPLES * 3);
+        // A cut outside the piece falls back to the fixed limit.
+        let fixed = split_range(0, MAX_SAMPLES * 2, |_, to| Some(to + 1));
+        assert_eq!(fixed, [(0, MAX_SAMPLES), (MAX_SAMPLES, MAX_SAMPLES * 2)]);
+        assert!(split_range(5, 5, |_, _| None).is_empty());
+    }
+
+    #[test]
+    fn recovery_splits_long_gaps_at_pauses_deterministically() {
+        let (dir, db) = fixture();
+        let wav = dir.path().join("system.wav");
+        let total = 60 * 16_000;
+        let pause = 360_000..363_200; // 22.5-22.7 s
+        let mut writer = crate::audio_store::WavWriter::create(&wav).unwrap();
+        writer.append(&tone_with_gap(total, pause.clone())).unwrap();
+        writer.finish().unwrap();
+        let jobs = |db: &Db| {
+            let mut out = Vec::new();
+            while let Some(job) = next(db, "m").unwrap() {
+                out.push((job.start, job.end));
+                complete(db, "m", job.id, &[]).unwrap();
+            }
+            out
+        };
+        recover_channel(&db, "m", "system", total as i64, Some(&wav)).unwrap();
+        recover_channel(&db, "m", "system", total as i64, Some(&wav)).unwrap();
+        let first = jobs(&db);
+        assert!(pause.contains(&(first[0].1 as usize)), "{first:?}");
+        assert_eq!(first[0].0, 0);
+        for pair in first.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0);
+        }
+        assert!(first.iter().all(|(a, b)| b - a <= MAX_SAMPLES));
+        assert_eq!(first.last().unwrap().1, total as i64);
+
+        let other = tempfile::tempdir().unwrap();
+        let db2 = store::open_path(&other.path().join("db")).unwrap();
+        store::create_meeting(
+            &db2,
+            &serde_json::from_value(json!({"id":"m","startedAt":"2026-01-01T00:00:00Z"})).unwrap(),
+        )
+        .unwrap();
+        begin(&db2, "m", "test-model", None, "").unwrap();
+        recover_channel(&db2, "m", "system", total as i64, Some(&wav)).unwrap();
+        assert_eq!(jobs(&db2), first);
     }
 
     #[test]

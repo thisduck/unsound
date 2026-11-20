@@ -29,7 +29,7 @@ mod secrets;
 mod settings;
 mod speakers;
 mod store;
-mod stt;
+pub mod stt;
 mod summary;
 mod notes_quality;
 mod meeting_research;

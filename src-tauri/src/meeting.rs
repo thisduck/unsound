@@ -322,7 +322,7 @@ fn recover_audio(app: &AppHandle, id: &str) -> Result<(), String> {
         audio_store::repair(&path)?;
         let samples = audio_store::sample_count(&path)?;
         total = total.max(samples);
-        meeting_work::recover_channel(&app.state::<Db>(), id, source, samples)?;
+        meeting_work::recover_channel(&app.state::<Db>(), id, source, samples, Some(&path))?;
     }
     if let Some(m) = store::get_meeting(&app.state::<Db>(), id)? {
         if let Some(start) = crate::util::unix_ms_from_iso(&m.started_at) {

@@ -3,8 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+mod filter;
+use filter::{collapse_repetitions, sanitize_segment};
+
 const SILENCE_PEAK_THRESHOLD: f32 = 0.005;
-const NO_SPEECH_PROBABILITY_THRESHOLD: f32 = 0.6;
 /// Below this, a background language guess is discarded and the final
 /// transcription detects the language itself, as it would without one.
 const LANGUAGE_MIN_PROBABILITY: f32 = 0.5;
@@ -13,31 +15,6 @@ const LANGUAGE_MIN_PROBABILITY: f32 = 0.5;
 /// zero. A short quiet lead-in gives its speech detector enough context without
 /// delaying capture or changing the duration reported to the UI.
 const LEADING_SILENCE_SAMPLES: usize = 8_000; // 500 ms at 16 kHz
-
-/// Whisper can emit special markers, or a short stock phrase such as "Thank
-/// you", when it believes the input contains no speech. Keep that model output
-/// from becoming user text while preserving the same words when they were
-/// actually spoken.
-fn sanitize_segment(text: &str, no_speech_probability: f32) -> String {
-    let mut cleaned = text.to_string();
-    let marker = "[BLANK_AUDIO]";
-    let lowercase_marker = marker.to_ascii_lowercase();
-    while let Some(start) = cleaned.to_ascii_lowercase().find(&lowercase_marker) {
-        cleaned.replace_range(start..start + marker.len(), "");
-    }
-    let words = cleaned
-        .trim()
-        .chars()
-        .filter(|c| c.is_alphabetic() || c.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
-    if no_speech_probability >= NO_SPEECH_PROBABILITY_THRESHOLD && words == "thank you" {
-        String::new()
-    } else {
-        cleaned
-    }
-}
 
 fn is_effectively_silent(samples: &[f32]) -> bool {
     samples
@@ -55,6 +32,34 @@ fn n_threads() -> i32 {
         .map(|n| n.get() as i32)
         .unwrap_or(4)
         .min(8)
+}
+
+/// Decoding parameters shared by every Whisper call (and `examples/stt_bench`),
+/// so they cannot drift apart. Greedy, no conditioning on previous text.
+pub fn decode_params<'a, 'b>(n_threads: i32, language: Option<&'a str>) -> FullParams<'a, 'b> {
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_n_threads(n_threads);
+    params.set_language(language);
+    params.set_translate(false);
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_suppress_blank(true);
+    // Suppress symbol and annotation tokens (♪, [, (...), as openai-whisper
+    // does by default; cuts "[Music]"-style output on noise.
+    params.set_suppress_nst(true);
+    params
+}
+
+/// Abort `full` soon after `stop` is set. Wired directly: whisper-rs 0.16's
+/// set_abort_callback_safe hands its trampoline the wrong pointer type, so the
+/// closure reads garbage and aborts at once.
+///
+/// SAFETY: the caller keeps `stop` alive until `full` returns.
+unsafe fn set_abort(params: &mut FullParams, stop: &Arc<AtomicBool>) {
+    params.set_abort_callback(Some(abort_when_set));
+    params.set_abort_callback_user_data(Arc::as_ptr(stop) as *mut std::ffi::c_void);
 }
 
 fn with_leading_silence(samples: &[f32]) -> Vec<f32> {
@@ -104,13 +109,7 @@ impl SttState {
         let mut ws = ctx
             .create_state()
             .map_err(|e| format!("failed to create whisper state: {e}"))?;
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_n_threads(1);
-        params.set_language(Some("en"));
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
+        let params = decode_params(1, Some("en"));
         // ~0.3s of silence is enough to build the graph and compile kernels.
         let warm = vec![0.0f32; 4800];
         let _ = ws.full(params, &warm);
@@ -180,28 +179,14 @@ pub fn transcribe_until(
         .create_state()
         .map_err(|e| format!("failed to create whisper state: {e}"))?;
 
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_n_threads(n_threads());
-    params.set_language(language.or(Some("auto")));
-    params.set_translate(false);
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    params.set_suppress_blank(true);
+    let mut params = decode_params(n_threads(), language.or(Some("auto")));
     // Bias recognition toward the user's vocabulary (names, jargon).
     if let Some(p) = initial_prompt {
         params.set_initial_prompt(p);
     }
     if let Some(stop) = stop.as_ref() {
-        // Wired directly: whisper-rs 0.16's set_abort_callback_safe hands its
-        // trampoline the wrong pointer type, so the closure reads garbage and
-        // aborts at once.
         // SAFETY: `stop` is alive until this function returns, after `full`.
-        unsafe {
-            params.set_abort_callback(Some(abort_when_set));
-            params.set_abort_callback_user_data(Arc::as_ptr(stop) as *mut std::ffi::c_void);
-        }
+        unsafe { set_abort(&mut params, stop) };
     }
 
     // Dictation often begins immediately after push-to-talk is pressed. Keep
@@ -221,7 +206,8 @@ pub fn transcribe_until(
             text.push_str(&sanitize_segment(&piece, segment.no_speech_probability()));
         }
     }
-    Ok(text.trim().to_string())
+    // A loop can also span Whisper's segment boundaries.
+    Ok(collapse_repetitions(text.trim()))
 }
 
 /// Like `transcribe`, but keeps Whisper's per-segment timestamps — the shape a
@@ -251,24 +237,14 @@ pub fn transcribe_segments_until(
         .create_state()
         .map_err(|e| format!("failed to create whisper state: {e}"))?;
 
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_n_threads(n_threads());
-    params.set_language(language.or(Some("auto")));
-    params.set_translate(false);
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    params.set_suppress_blank(true);
+    let mut params = decode_params(n_threads(), language.or(Some("auto")));
     if let Some(p) = initial_prompt {
         params.set_initial_prompt(p);
     }
 
     if let Some(stop) = stop.as_ref() {
-        unsafe {
-            params.set_abort_callback(Some(abort_when_set));
-            params.set_abort_callback_user_data(Arc::as_ptr(stop) as *mut std::ffi::c_void);
-        }
+        // SAFETY: `stop` is alive until this function returns, after `full`.
+        unsafe { set_abort(&mut params, stop) };
     }
 
     ws.full(params, samples)
@@ -301,21 +277,6 @@ pub fn transcribe_segments_until(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn strips_blank_audio_markers() {
-        assert_eq!(sanitize_segment(" [BLANK_AUDIO] ", 0.0), "  ");
-        assert_eq!(
-            sanitize_segment("hello [blank_audio] world", 0.0),
-            "hello  world"
-        );
-    }
-
-    #[test]
-    fn drops_thank_you_only_when_model_detects_no_speech() {
-        assert_eq!(sanitize_segment("Thank you.", 0.9), "");
-        assert_eq!(sanitize_segment("Thank you.", 0.1), "Thank you.");
-    }
 
     #[test]
     fn preserves_word_boundaries_between_segments() {

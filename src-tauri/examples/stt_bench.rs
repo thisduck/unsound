@@ -1,5 +1,5 @@
 //! Times the speech models on this machine, to find where transcription
-//! latency goes. Mirrors the app's `stt::transcribe` params.
+//! latency goes. Uses the app's `stt::decode_params`.
 //! Run: cargo run --release --example stt_bench -- <models_dir> <wav>...
 
 use std::path::{Path, PathBuf};
@@ -8,7 +8,8 @@ use std::time::Instant;
 use sherpa_rs::moonshine::{MoonshineConfig, MoonshineRecognizer};
 use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
 use unsound_lib::audiofile::decode_to_samples;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use unsound_lib::stt::decode_params;
+use whisper_rs::{WhisperContext, WhisperContextParameters};
 
 fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1000.0
@@ -28,19 +29,11 @@ fn whisper_full(ctx: &WhisperContext, samples: &[f32], run: &Run) -> (f64, f64, 
     let t = Instant::now();
     let mut ws = ctx.create_state().unwrap();
     let state_ms = ms(t);
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     let threads = std::thread::available_parallelism()
         .map(|n| n.get() as i32)
         .unwrap_or(4)
         .min(8);
-    params.set_n_threads(threads);
-    params.set_language(Some(run.lang));
-    params.set_translate(false);
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    params.set_suppress_blank(true);
+    let mut params = decode_params(threads, Some(run.lang));
     if let Some(a) = run.audio_ctx {
         params.set_audio_ctx(a);
     }
