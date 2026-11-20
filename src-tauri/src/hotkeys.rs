@@ -127,6 +127,11 @@ pub fn set_bindings(bindings: &[(String, Mode)]) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether fn-key shortcuts tried to start and failed for lack of permission.
+pub fn listener_failed() -> bool {
+    LISTENER_STATE.load(Ordering::SeqCst) == 3
+}
+
 /// Start (or confirm) the event-tap listener. Returns true if it is running.
 pub fn ensure_listener(app: &AppHandle) -> bool {
     let _ = APP.set(app.clone());

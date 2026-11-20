@@ -3,6 +3,7 @@ import { api, on, formatBytes, formatDuration, LANGUAGES, ModelInfo, Style } fro
 import { useLevelHistory } from "./Wave";
 import { SettingsSheet, type SettingsSection } from "./SettingsSheet";
 import { Onboarding } from "./Onboarding";
+import { PermissionsCheck, useOpenPermissions } from "./Permissions";
 import { Dictations, type Take } from "./Dictations";
 import { Inbox, NeedsYou, useInbox } from "./Inbox";
 import { Meetings, type RecordingInfo } from "./Meetings";
@@ -79,6 +80,9 @@ export default function App() {
   const inbox = useInbox();
   const [rawOpen, setRawOpen] = useState(false);
   const [onboarding, setOnboarding] = useState(() => !localStorage.getItem("unsound.onboarded"));
+  // Only people already set up at launch get the missing-permission check.
+  const [onboardedAtLaunch] = useState(() => !!localStorage.getItem("unsound.onboarded"));
+  useOpenPermissions(useCallback(() => setSettingsOpen("permissions"), []));
   const [prompt, setPrompt] = useLocalStorage("unsound.prompt", "");
   const [defaultPrompt, setDefaultPrompt] = useState("");
   const [sttId, setSttId] = useLocalStorage("unsound.stt", "");
@@ -762,6 +766,7 @@ export default function App() {
           }}
         />
       )}
+      {onboardedAtLaunch && !onboarding && <PermissionsCheck />}
       {dragOver && (
         <div className="drop-veil">
           <div className="drop-veil-inner">

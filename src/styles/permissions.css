@@ -1,0 +1,47 @@
+/* ── permissions: onboarding step, settings page, launch check ──── */
+
+.perm-row {
+  gap: 12px;
+}
+
+.perm-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r);
+  background: var(--tint);
+  color: var(--accent);
+}
+
+.perm-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.perm-granted {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ok);
+  white-space: nowrap;
+}
+
+.perm-granted svg {
+  width: 14px;
+  height: 14px;
+}
+
+.perm-relaunch {
+  align-items: center;
+  background: var(--tint);
+  border-color: transparent;
+  color: var(--ink);
+}
+
+.ob-step .pref-group + .pref-group {
+  margin-top: 12px;
+}

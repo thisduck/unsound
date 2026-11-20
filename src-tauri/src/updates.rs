@@ -122,7 +122,7 @@ pub async fn download_app_update(app: AppHandle, state: State<'_, Updates>) -> R
     Ok(())
 }
 
-fn busy_reason(app: &AppHandle) -> Result<Option<String>, String> {
+pub(crate) fn busy_reason(app: &AppHandle) -> Result<Option<String>, String> {
     if ACTIVE_WORK.load(Ordering::SeqCst) > 0 {
         return Ok(Some(
             "Wait for current processing to finish before updating.".into(),

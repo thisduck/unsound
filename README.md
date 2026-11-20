@@ -60,6 +60,25 @@ use the network as configured and approved.
 Pick the models you like from a built-in library (smaller and faster, or
 larger and sharper) — they download once and you can swap them anytime.
 
+### macOS permissions
+
+The welcome guide asks for these in order; everything except the first two is
+optional and can be skipped. **Settings › Permissions** shows each one's status
+and lets you grant it later (it opens the right System Settings pane when macOS
+won't ask again).
+
+| Permission | Used for | |
+|---|---|---|
+| Microphone | Dictation, and your side of a meeting | Required |
+| Accessibility | Typing text into other apps, fn-key shortcuts, seeing which call you're in and who's on it | Required |
+| Screen & System Audio Recording | The other people's audio in a meeting (audio only; without it, meetings record your mic only). Takes effect after unsound relaunches | Optional |
+| Calendars | Naming meetings and attendees from the current event. Granting it from unsound also turns on "Use my calendar" | Optional |
+| Automation | The assistant drafting in Mail and adding to Reminders. macOS asks the first time | Optional |
+| Notifications | Follow-up reminders | Optional |
+
+If you set up unsound before this list existed and Microphone or Accessibility
+is off, it shows the list once at launch.
+
 ---
 
 ## How it works (for the technically curious)
@@ -180,8 +199,9 @@ npm run tauri build    # produce a bundled .app / .dmg
 The first build compiles whisper.cpp and llama.cpp from source and takes a few
 minutes; after that builds are incremental.
 
-Note for dev mode: macOS attributes the microphone permission to your
-terminal. The bundled app has its own `NSMicrophoneUsageDescription`
+Note for dev mode: macOS attributes the microphone and other privacy
+permissions to your terminal, so Settings › Permissions reflects the
+terminal's grants. The bundled app has its own usage descriptions
 (see `src-tauri/Info.plist`).
 
 ## Roadmap

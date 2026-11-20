@@ -6,6 +6,7 @@ import { DetailView } from "./meetings/DetailView";
 import { ListView } from "./meetings/ListView";
 import { LiveView } from "./meetings/LiveView";
 import { mergeTask } from "./meetings/TaskCard";
+import { openPermissions } from "./permissionsModel";
 import { Icon, Kbd } from "./ui";
 
 type Phase = "idle" | "starting" | "recording" | "stopping";
@@ -471,7 +472,10 @@ export function Meetings({ stt, llm, language, models, onModelsChanged, onActiva
         <div className="alert warn" role="status">
           <Icon name="alert" />
           <span className="alert-body">{warning}</span>
-          <div className="alert-actions"><button className="btn btn-quiet btn-sm" onClick={() => setWarning(null)}>Dismiss</button></div>
+          <div className="alert-actions">
+            {warning.startsWith("System audio") && <button className="btn btn-quiet btn-sm" onClick={openPermissions}>Permissions</button>}
+            <button className="btn btn-quiet btn-sm" onClick={() => setWarning(null)}>Dismiss</button>
+          </div>
         </div>
       )}
       {error && (

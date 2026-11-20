@@ -12,6 +12,7 @@ import {
   ToolGuide,
 } from "./api";
 import { ACTION_LABELS } from "./meetings/TaskCard";
+import { openPermissions } from "./permissionsModel";
 import { PrefCard, PrefCheck, PrefGroup, PrefRow } from "./sections";
 import { Icon, useConfirm } from "./ui";
 
@@ -1105,6 +1106,11 @@ export function MeetingsSection({ models, onError }: { models: ModelInfo[]; onEr
             <Icon name="alert" />
             <div className="alert-body">
               Calendar access is off. Allow unsound in System Settings › Privacy &amp; Security › Calendars.
+            </div>
+            <div className="alert-actions">
+              <button className="btn btn-quiet btn-sm" onClick={openPermissions}>
+                Permissions
+              </button>
             </div>
           </div>
         )}

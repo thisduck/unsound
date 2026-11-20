@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { formatBytes, ModelInfo } from "./api";
-import { ModelLibrary, ModelRow, PermissionsSection, ShortcutsSection, useDownloads } from "./sections";
+import { PermissionsStep } from "./Permissions";
+import { ModelLibrary, ModelRow, ShortcutsSection, useDownloads } from "./sections";
 import { Icon, Logo } from "./ui";
 
 interface Props {
@@ -94,17 +95,9 @@ export function Onboarding({ models, onChanged, onDone }: Props) {
     </div>,
 
     /* 3 · permissions */
-    <div className="ob-step" key="permissions">
-      <h1 className="ob-title">Allow access</h1>
-      <p className="ob-text">macOS asks once for each.</p>
-      <PermissionsSection onError={setErr} />
-      <div className="ob-actions">
-        <button className="btn btn-primary ob-primary" onClick={() => setStep(3)}>
-          Continue
-        </button>
-      </div>
+    <PermissionsStep key="permissions" onNext={() => setStep(3)} onError={setErr}>
       {error}
-    </div>,
+    </PermissionsStep>,
 
     /* 4 · shortcut */
     <div className="ob-step" key="shortcut">

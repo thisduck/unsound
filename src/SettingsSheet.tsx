@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUpdates } from "./UpdateCenter";
 import { api, ModelInfo, ModelKind } from "./api";
@@ -6,7 +6,6 @@ import {
   DictionarySection,
   MicPicker,
   ModelLibrary,
-  PermissionsSection,
   PrefCard,
   PrefCheck,
   PrefGroup,
@@ -15,16 +14,17 @@ import {
   StylesSection,
 } from "./sections";
 import { AssistantSection, MeetingsSection } from "./AssistantSettings";
+import { PermissionsPane, useOpenPermissions } from "./Permissions";
 import { Icon, IconName, Segmented, useConfirm } from "./ui";
 
-export type SettingsSection = "general" | "dictation" | "meetings" | "assistant" | "models";
+export type SettingsSection = "general" | "dictation" | "meetings" | "assistant" | "models" | "permissions";
 
 const SECTIONS: { id: SettingsSection; label: string; icon: IconName; desc: string }[] = [
   {
     id: "general",
     label: "General",
     icon: "settings",
-    desc: "Shortcuts, microphone, permissions and updates.",
+    desc: "Shortcuts, microphone, text size and updates.",
   },
   {
     id: "dictation",
@@ -49,6 +49,12 @@ const SECTIONS: { id: SettingsSection; label: string; icon: IconName; desc: stri
     label: "Models",
     icon: "download",
     desc: "Download and manage the models that run on this Mac.",
+  },
+  {
+    id: "permissions",
+    label: "Permissions",
+    icon: "shield",
+    desc: "What unsound can use on this Mac, and why.",
   },
 ];
 
@@ -124,6 +130,7 @@ export function SettingsSheet({
     setSection(id);
     bodyRef.current?.scrollTo(0, 0);
   };
+  useOpenPermissions(useCallback(() => go("permissions"), []));
 
   const current = SECTIONS.find((s) => s.id === section)!;
 
@@ -161,6 +168,8 @@ export function SettingsSheet({
         return <AssistantSection models={models} onError={setErr} onOpenShortcuts={() => go("general")} />;
       case "models":
         return <ModelsPane models={models} onChanged={onChanged} onError={setErr} />;
+      case "permissions":
+        return <PermissionsPane onError={setErr} />;
     }
   };
 
@@ -285,10 +294,6 @@ function GeneralPane({
             </p>
           </div>
         </PrefCard>
-      </PrefGroup>
-
-      <PrefGroup title="Permissions">
-        <PermissionsSection onError={onError} />
       </PrefGroup>
 
       <PrefGroup title="Updates">

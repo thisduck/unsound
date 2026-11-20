@@ -21,6 +21,7 @@ const hooks = registerHooks({
         return virtual(`import { createElement } from ${JSON.stringify(import.meta.resolve("react"))};
           export function ${name}(props) { return createElement(${JSON.stringify(name)}, props); }`);
       }
+      if (specifier === "./permissionsModel") return { url: new URL("../src/permissionsModel.ts", import.meta.url).href, shortCircuit: true };
       if (name === "TaskCard") return virtual("export const mergeTask = (tasks, task) => [...tasks, task];");
       if (specifier === "./ui") {
         return virtual(`import { createElement } from ${JSON.stringify(import.meta.resolve("react"))};

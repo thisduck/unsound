@@ -19,5 +19,12 @@ export async function openApp() {
   await browser.waitUntil(async () => (await skip.isExisting()) || (await $(".topbar-nav").isExisting()));
   if (await skip.isExisting()) await skip.click();
   await $(".topbar-nav").waitForDisplayed();
+  // The launch-time permissions check appears for set-up profiles missing
+  // Microphone or Accessibility; mark it seen so restarts aren't blocked.
+  await browser.execute(() =>
+    localStorage.setItem("unsound.permissions.reviewed", JSON.stringify(["microphone", "accessibility"])),
+  );
+  const later = $("button=Not now");
+  if (await later.isExisting()) await later.click();
 }
 
