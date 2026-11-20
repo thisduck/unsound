@@ -1,11 +1,12 @@
-# transcribe-cpp-sys (patched, spike)
+# transcribe-cpp-sys (patched)
 
 transcribe-cpp-sys 0.4.2 (the crates.io tarball of
 [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp), MIT, the
-engine Handy uses), wired in by `[patch.crates-io]` in `src-tauri/Cargo.toml`
-and used only by the spike examples (`transcribe-cpp` is a dev-dependency).
-It builds transcribe.cpp against the ggml llama-cpp-sys-2 installs, as the
-vendored whisper-rs-sys does, so the program keeps one ggml:
+engine Handy uses), wired in by `[patch.crates-io]` in `src-tauri/Cargo.toml`.
+The app runs Parakeet TDT through it (`src/parakeet.rs`, via the safe
+`transcribe-cpp` crate). It builds transcribe.cpp against the ggml
+llama-cpp-sys-2 installs, as the vendored whisper-rs-sys does, so the program
+keeps one ggml:
 
 1. `CMakeLists.txt`: `TRANSCRIBE_USE_SYSTEM_GGML` does `find_package(ggml)`
    instead of `add_subdirectory(ggml)`. The vendored `ggml/` tree (25 MB) is
@@ -31,8 +32,18 @@ check when Metal cannot map a buffer. llama-cpp-sys-2 0.1.161 ships ggml
 
 ## Updating
 
-When llama-cpp-2 moves, re-run the spike checks (README in
-`src-tauri/spikes/parakeet-eval/`): transcripts must stay non-empty and match
-the standalone `parakeet-eval` build, which uses transcribe.cpp's own ggml.
+Bumping llama-cpp-2 changes the ggml under all three engines — whisper.cpp,
+llama.cpp and transcribe.cpp — and a mismatch can fail silently (empty or
+garbled transcripts, not errors). Re-verify all three, as described in
+`src-tauri/spikes/parakeet-eval/README.md`:
+
+- `examples/asr_eval.rs` with `app-parakeet` (v2 and v3) over the eval sets:
+  transcripts non-empty and identical to the standalone `parakeet-eval`
+  build, which uses transcribe.cpp's own ggml;
+- the same with `whisper`, against a run from the build before the bump;
+- `examples/three_engines.rs` with `PARAKEET=app`: Whisper, Parakeet and an
+  LLM in one process, checked with `check_three.py`;
+- `src/engine_tests.rs` (ignored test): the app's dictation and meeting paths.
+
 When transcribe.cpp moves, re-apply the three patches (marked `unsound:`) and
 check that `nm -u libtranscribe.a` needs no ggml symbol the shared ggml lacks.

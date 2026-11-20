@@ -1,7 +1,8 @@
 # Parakeet spike: accuracy, latency, linking
 
-Measured on an M5 Max (128 GB), macOS 26.5.1, 2026-11-20. Nothing here is
-wired into the app's engine list.
+Measured on an M5 Max (128 GB), macOS 26.5.1, 2026-11-20. The app now runs
+Parakeet v2/v3 through transcribe.cpp (`src/parakeet.rs`); the rest of this
+directory is the evaluation that chose it.
 
 ## What is here
 
@@ -11,7 +12,7 @@ wired into the app's engine list.
 - `src/harness.rs` — engine-agnostic eval loop (JSONL manifest in, JSONL out),
   shared with `examples/asr_eval.rs` and `examples/three_engines.rs`.
 - `../../examples/support/engines.rs` — Whisper (mirrors `stt::transcribe`),
-  sherpa Parakeet (mirrors `asr::Parakeet`), whisper.cpp's `parakeet.h`, and
+  sherpa Parakeet (the removed `asr::Parakeet`), whisper.cpp's `parakeet.h`, and
   transcribe.cpp on the shared ggml.
 - `../fluidaudio-eval/` — FluidAudio (CoreML) runner, same output format.
 - `fetch_sets.py`, `make_noise.py` — seeded subsets of public test sets with

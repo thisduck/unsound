@@ -94,7 +94,9 @@ microphone ──cpal──▶ 16kHz mono PCM ──whisper.cpp──▶ raw tra
 ```
 
 - **Shell:** [Tauri 2](https://tauri.app) — Rust backend, React + TypeScript front end.
-- **Speech-to-text:** [whisper.cpp](https://github.com/ggml-org/whisper.cpp) via `whisper-rs`, Metal-accelerated on macOS.
+- **Speech-to-text:** [whisper.cpp](https://github.com/ggml-org/whisper.cpp) via `whisper-rs`, Metal-accelerated on macOS,
+  or Parakeet through [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) (also Metal). Both are
+  built on the ggml that llama.cpp ships, so the app carries one copy of it.
 - **Cleanup LLM:** [llama.cpp](https://github.com/ggml-org/llama.cpp) via `llama-cpp-2`, Metal-accelerated on macOS. Runs any GGUF instruct model.
 - **Audio capture:** `cpal` (CoreAudio / WASAPI), downmixed and resampled to the 16 kHz mono Whisper expects with `rubato`.
 
@@ -149,6 +151,14 @@ Curated registry:
   (default) / large-v3, English-only base & small variants, plus fine-tunes for
   South Asian languages — IndicWhisper Medium (AI4Bharat) and Whisper
   Hindi→Hinglish.
+- **Speech-to-text (Parakeet):** NVIDIA Parakeet TDT 0.6B v2 (English) and v3
+  (25 European languages), Q8_0 GGUF conversions by Handy. Faster and more
+  accurate than Large v3 Turbo on meeting audio in our tests, but with no
+  vocabulary hints; speech in other languages goes to a downloaded Whisper
+  model. Weights are licensed [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
+  by NVIDIA ([v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2),
+  [v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)).
+- **Live meetings (sherpa-onnx):** Moonshine Base, a small English model.
 - **Cleanup (llama.cpp GGUF):** Qwen3 4B (default), Gemma 3 4B, Qwen 2.5
   (1.5B/3B/7B), Llama 3.1 8B, Llama 3.2 (1B/3B).
 
@@ -221,8 +231,8 @@ terminal's grants. The bundled app has its own usage descriptions
       translate to another language (at the cleanup stage)
 - [x] Adjustable text size (accessibility)
 - [ ] Per-app automatic styles (informal in Slack, professional in Mail)
-- [ ] A second STT engine (sherpa-onnx) for Parakeet/Moonshine and better
-      Urdu/Punjabi coverage
+- [x] A second STT engine: Parakeet on the GPU (transcribe.cpp)
+- [ ] Better Urdu/Punjabi coverage
 - [ ] Windows build (same codebase; CPU inference by default, Vulkan optional)
 - [ ] iOS / Android — whisper.cpp and llama.cpp both run on mobile; the plan
       is to reuse the pipeline design and model registry, with a native or

@@ -17,7 +17,8 @@ whisper-rs-sys 0.15.0 with these changes, wired in by `[patch.crates-io]` in
    engine (`include/parakeet.h`, `src/parakeet.cpp`), built by the same CMake
    run on the same ggml. `wrapper.h` adds it to the bindings and `build.rs`
    links `libparakeet`, so `whisper_rs_sys::parakeet_*` is callable (used by
-   `examples/asr_eval.rs` and `examples/three_engines.rs`; not by the app).
+   `examples/asr_eval.rs` and `examples/three_engines.rs`; not by the app,
+   which runs Parakeet through transcribe.cpp).
    Models: `ggml-org/parakeet-GGUF` (`ggml-parakeet-tdt-0.6b-v3-*.bin`).
    The fallback `src/bindings.rs` predates this and has no `parakeet_*`.
 4. **`extern crate llama_cpp_sys_2`** in `src/lib.rs`, so a binary that uses
@@ -38,3 +39,7 @@ move `whisper.cpp/` to the whisper.cpp release whose bundled ggml
 transcription still produces text: a mismatched ggml can fail silently — e.g.
 llama-cpp-sys-2 0.1.150's ggml had a Metal im2col bug that made Whisper's
 encoder output NaN (empty transcripts).
+
+transcribe.cpp (Parakeet, `vendor/transcribe-cpp-sys`) runs on the same ggml,
+so a bump must re-verify all three engines — Whisper, Parakeet and the LLM —
+with the checks listed in that crate's README.

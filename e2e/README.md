@@ -15,7 +15,7 @@ Capture checkpoints each channel's WAV before publishing its sample ranges to
 SQLite. Final transcription jobs contain sample offsets, not audio buffers. One
 meeting transcription worker reads at most 25 seconds per batch, plus leading silence; its disposable
 preview/command channel holds at most four jobs, each capped at 25 seconds. Long
-backlogs stay on disk. Whisper still batches short turns from the same channel;
+backlogs stay on disk. Whisper still batches short turns from the same channel (Parakeet takes one turn per call);
 all completion markers in a batch commit with its transcript. Silence padding uses a fixed-size buffer.
 
 Transcript rows and their job completion marker commit in one transaction. A
@@ -50,8 +50,8 @@ silence buffer in memory.
 
 “Pause” prevents an in-flight result from committing and requests native
 cancellation. The supervisor also cancels after 90 seconds without progress.
-Whisper has an abort callback; other native model calls may need to return on their
-own. A stuck call keeps the single meeting-worker slot, so retry does not create
+Whisper has an abort callback, and Parakeet one polled between decode steps (its
+encoder pass runs to the end); Moonshine calls must return on their own. A stuck call keeps the single meeting-worker slot, so retry does not create
 unbounded replacement threads. If it cannot stop, restart the app; pending work
 remains on disk. Capture and its stop control do not wait for that inference call.
 
