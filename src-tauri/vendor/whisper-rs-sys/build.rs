@@ -331,6 +331,9 @@ fn main() {
     } else {
         println!("cargo:rustc-link-lib=static=whisper");
     }
+    // unsound: whisper.cpp builds its Parakeet TDT library alongside whisper,
+    // on the same (llama-cpp-sys-2) ggml; link it so `parakeet_*` is usable.
+    println!("cargo:rustc-link-lib=static=parakeet");
     // unsound: no ggml libraries — llama-cpp-sys-2 links its ggml and backends.
 
     println!(

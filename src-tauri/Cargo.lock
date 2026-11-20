@@ -5816,6 +5816,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "transcribe-cpp"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cf6687b4c73890aea4515632afb1586d48998f22f38e02e3cfbcd7d1543cd4a"
+dependencies = [
+ "log",
+ "thiserror 2.0.18",
+ "transcribe-cpp-sys",
+]
+
+[[package]]
+name = "transcribe-cpp-sys"
+version = "0.4.2"
+dependencies = [
+ "cmake",
+ "llama-cpp-sys-2",
+ "serde_json",
+]
+
+[[package]]
 name = "transpose"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5973,7 +5993,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "transcribe-cpp",
  "whisper-rs",
+ "whisper-rs-sys",
 ]
 
 [[package]]

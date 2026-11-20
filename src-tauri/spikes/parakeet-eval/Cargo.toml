@@ -1,0 +1,13 @@
+[package]
+name = "parakeet-eval"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Spike: Parakeet (transcribe.cpp, ggml + Metal) accuracy/latency bench, standalone so ggml linking does not block measurement"
+
+# Standalone: not part of the unsound crate's build.
+[workspace]
+
+[dependencies]
+transcribe-cpp = "=0.4.2"
+serde_json = "1"

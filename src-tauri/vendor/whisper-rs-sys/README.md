@@ -1,6 +1,6 @@
 # whisper-rs-sys (patched)
 
-whisper-rs-sys 0.15.0 with two changes, wired in by `[patch.crates-io]` in
+whisper-rs-sys 0.15.0 with these changes, wired in by `[patch.crates-io]` in
 `src-tauri/Cargo.toml`:
 
 1. **One ggml.** whisper.cpp and llama.cpp each bundle ggml, the tensor
@@ -13,6 +13,16 @@ whisper-rs-sys 0.15.0 with two changes, wired in by `[patch.crates-io]` in
 2. **whisper.cpp v1.9.4** (was 1.8.3), a release built for a ggml close to
    llama-cpp-sys-2 0.1.157's (0.23 vs 0.24). Its API only adds to 1.8.3's, so
    whisper-rs 0.16 is unchanged.
+3. **Parakeet exposed** (spike). whisper.cpp v1.9.4 ships its own Parakeet TDT
+   engine (`include/parakeet.h`, `src/parakeet.cpp`), built by the same CMake
+   run on the same ggml. `wrapper.h` adds it to the bindings and `build.rs`
+   links `libparakeet`, so `whisper_rs_sys::parakeet_*` is callable (used by
+   `examples/asr_eval.rs` and `examples/three_engines.rs`; not by the app).
+   Models: `ggml-org/parakeet-GGUF` (`ggml-parakeet-tdt-0.6b-v3-*.bin`).
+   The fallback `src/bindings.rs` predates this and has no `parakeet_*`.
+4. **`extern crate llama_cpp_sys_2`** in `src/lib.rs`, so a binary that uses
+   whisper-rs but never touches llama-cpp-2 still links the ggml archives
+   (before, such a binary failed with undefined `ggml_*`).
 
 `whisper.cpp/` holds only what the build needs from the v1.9.4 tag: `src/`,
 `cmake/`, `include/`, `CMakeLists.txt`, `LICENSE` (MIT), and

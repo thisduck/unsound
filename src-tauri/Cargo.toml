@@ -22,6 +22,10 @@ automation = ["dep:tauri-plugin-automation"]
 
 [dev-dependencies]
 tempfile = "3"
+# Raw FFI (whisper.cpp's parakeet.h) for examples/asr_eval.rs; the vendored crate.
+whisper-rs-sys = "0.15.0"
+# Spike (examples only): transcribe.cpp built on the same llama.cpp ggml.
+transcribe-cpp = "=0.4.2"
 
 [dependencies]
 tauri-plugin-automation = { version = "0.1.2", optional = true }
@@ -87,3 +91,9 @@ objc2-event-kit = { version = "0.3", default-features = false, features = [
 # it rather than two colliding versions. See vendor/whisper-rs-sys/README.md.
 [patch.crates-io]
 whisper-rs-sys = { path = "vendor/whisper-rs-sys" }
+# transcribe.cpp on the same ggml (spike; examples only). See vendor/transcribe-cpp-sys/README.md.
+transcribe-cpp-sys = { path = "vendor/transcribe-cpp-sys" }
+
+# Spike examples: `--cfg no_parakeet` builds them against the unpatched vendor crate (baseline).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(no_parakeet)"] }
