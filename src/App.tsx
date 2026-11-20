@@ -10,6 +10,7 @@ import { Meetings, type RecordingInfo } from "./Meetings";
 import { createDictationQueue, type DictationState } from "./dictationQueue";
 import { UpdateCenter } from "./UpdateCenter";
 import { Icon, Logo } from "./ui";
+import { languageNote, migrateSttId } from "./speech";
 
 type Phase = "idle" | "recording" | "transcribing" | "cleaning";
 
@@ -219,6 +220,18 @@ export default function App() {
   const llmModels = models.filter((m) => m.kind === "llm" && m.downloaded);
   const stt = sttModels.find((m) => m.id === sttId) ?? sttModels[0];
   const llm = llmModels.find((m) => m.id === llmId) ?? llmModels[0];
+
+  // A removed speech model (the old CPU Parakeet) becomes its replacement,
+  // which is a new download; until then the first installed model stands in.
+  useEffect(() => {
+    const next = migrateSttId(sttId);
+    if (next === sttId || models.length === 0) return;
+    setSttId(next);
+    const m = models.find((x) => x.id === next);
+    if (m && !m.downloaded) {
+      setError(`${m.name} now runs on the GPU and needs a new download (${formatBytes(m.sizeBytes)}) in Settings › Models.`);
+    }
+  }, [sttId, models]);
 
   // Load the speech model ahead of the first take, so it isn't the slow one.
   useEffect(() => {
@@ -713,6 +726,7 @@ export default function App() {
             shortcut={shortcut}
             language={language}
             onLanguage={setLanguage}
+            languageNote={languageNote(stt, language, models)}
             styleSwitcher={styleSwitcher}
             outLangSwitcher={outLangSwitcher}
             onToggleRecord={() => toggleRecord()}

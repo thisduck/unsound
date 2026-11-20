@@ -42,6 +42,8 @@ interface Props {
   shortcut: string | null;
   language: string;
   onLanguage: (code: string) => void;
+  /// How the speech model handles the spoken language, when it can't simply.
+  languageNote: { tone: "info" | "warn"; text: string } | null;
   styleSwitcher: ReactNode;
   outLangSwitcher: ReactNode;
   onToggleRecord: () => void;
@@ -217,6 +219,12 @@ export function Dictations(p: Props) {
         <p className="page-hint">
           Press <Kbd>{formatShortcut(p.shortcut)}</Kbd> in any app to dictate. The text is typed where your cursor is.
         </p>
+      )}
+      {p.languageNote && (
+        <div className={"alert " + p.languageNote.tone} role="status">
+          <Icon name={p.languageNote.tone === "warn" ? "alert" : "info"} />
+          <span className="alert-body">{p.languageNote.text}</span>
+        </div>
       )}
 
       <div className="card dict-split">

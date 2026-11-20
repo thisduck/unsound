@@ -1,6 +1,7 @@
 import { ReactNode, useEffect, useId, useRef, useState } from "react";
 import { api, DictEntry, formatBytes, formatShortcut, ModelInfo, ModelKind, on, Style } from "./api";
 import { Icon, useConfirm } from "./ui";
+import { supportedLanguageNames } from "./speech";
 
 /* ── layout helpers shared by settings, onboarding and meeting setup ── */
 
@@ -731,7 +732,13 @@ export function ModelRow({
         </div>
         <div className="pref-desc">
           {model.description}
-          {model.languages && <> · {model.languages}</>} · {formatBytes(model.sizeBytes)}
+          {model.languages && (
+            <>
+              {" · "}
+              <span title={supportedLanguageNames(model) || undefined}>{model.languages}</span>
+            </>
+          )}{" "}
+          · {formatBytes(model.sizeBytes)}
         </div>
       </div>
       <div className="pref-control">
@@ -775,7 +782,7 @@ export function ModelRow({
 }
 
 const LIBRARY_GROUPS: { kind: ModelKind; title: string; hint: string; full?: boolean }[] = [
-  { kind: "stt", title: "Speech models", hint: "Turn speech into text. English-only versions are a little more accurate in English." },
+  { kind: "stt", title: "Speech models", hint: "Turn speech into text. Parakeet is faster and more accurate in its languages; Whisper covers the rest and takes your dictionary as a hint." },
   { kind: "llm", title: "Cleanup models", hint: "Clean up dictations and write summaries. Any GGUF instruct model works." },
   { kind: "diarize", title: "Speaker detection", hint: "Tells voices apart in recordings. Stronger models separate similar voices better.", full: true },
   { kind: "vad", title: "Voice activity detection", hint: "Splits recordings at pauses.", full: true },

@@ -15,6 +15,7 @@ import { ACTION_LABELS } from "./meetings/TaskCard";
 import { openPermissions } from "./permissionsModel";
 import { PrefCard, PrefCheck, PrefGroup, PrefRow } from "./sections";
 import { Icon, useConfirm } from "./ui";
+import { languageNote } from "./speech";
 
 const JIRA_TOKEN = "jira-api-token";
 const ENDPOINT_KEY = "assistant-endpoint-key";
@@ -982,6 +983,11 @@ export function MeetingsSection({ models, onError }: { models: ModelInfo[]; onEr
   // "" means the default speaker model (CAM++).
   const embValue = s.embeddingModel || "diarize-embedding";
   const langValue = s.language === null ? "same" : s.language === "" ? "auto" : s.language;
+  // Only when both are set here; "same as dictation" is noted on Dictations.
+  const langNote =
+    s.speechModel && s.language !== null
+      ? languageNote(stts.find((m) => m.id === s.speechModel), s.language, models)
+      : null;
 
   const forget = (name: string) =>
     confirm({
@@ -1014,7 +1020,9 @@ export function MeetingsSection({ models, onError }: { models: ModelInfo[]; onEr
                 </option>
               ))}
               {s.speechModel && !stts.some((m) => m.id === s.speechModel) && (
-                <option value={s.speechModel}>{s.speechModel} (not installed)</option>
+                <option value={s.speechModel}>
+                  {models.find((m) => m.id === s.speechModel)?.name ?? s.speechModel} (not installed)
+                </option>
               )}
             </select>
           </PrefRow>
@@ -1075,6 +1083,12 @@ export function MeetingsSection({ models, onError }: { models: ModelInfo[]; onEr
             </select>
           </PrefRow>
         </PrefCard>
+        {langNote && (
+          <div className={"alert " + langNote.tone} role="status">
+            <Icon name={langNote.tone === "warn" ? "alert" : "info"} />
+            <div className="alert-body">{langNote.text}</div>
+          </div>
+        )}
       </PrefGroup>
 
       <PrefGroup title="Recording">

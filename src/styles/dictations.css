@@ -4,6 +4,11 @@
   max-width: 900px;
 }
 
+/* The speech model can't take the spoken language as is. */
+.dictations > .alert {
+  margin-bottom: 14px;
+}
+
 .dict-split {
   display: grid;
   grid-template-columns: 272px minmax(0, 1fr);

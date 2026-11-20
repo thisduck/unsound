@@ -29,6 +29,10 @@ export interface ModelInfo {
   /// Multi-file bundle models (e.g. Moonshine) list their file URLs; empty for
   /// ordinary single-file models.
   files?: string[];
+  /// Speech engine (speech models only).
+  engine?: "whisper" | "parakeet" | "moonshine";
+  /// Spoken languages a speech model can transcribe; empty = any.
+  supportedLanguages?: string[];
 }
 
 export interface PermissionStatus {
@@ -665,31 +669,7 @@ export function formatShortcut(shortcut: string): string {
     .join(" ");
 }
 
-// Common Whisper languages; "" means auto-detect. Whisper supports ~99 —
-// this is the frequently-used subset, alphabetical after Auto.
-export const LANGUAGES: { code: string; name: string }[] = [
-  { code: "", name: "Auto-detect" },
-  { code: "ar", name: "Arabic" },
-  { code: "zh", name: "Chinese" },
-  { code: "nl", name: "Dutch" },
-  { code: "en", name: "English" },
-  { code: "fr", name: "French" },
-  { code: "de", name: "German" },
-  { code: "hi", name: "Hindi" },
-  { code: "it", name: "Italian" },
-  { code: "ja", name: "Japanese" },
-  { code: "ko", name: "Korean" },
-  { code: "pl", name: "Polish" },
-  { code: "pa", name: "Punjabi" },
-  { code: "pt", name: "Portuguese" },
-  { code: "ru", name: "Russian" },
-  { code: "es", name: "Spanish" },
-  { code: "sv", name: "Swedish" },
-  { code: "tr", name: "Turkish" },
-  { code: "uk", name: "Ukrainian" },
-  { code: "ur", name: "Urdu" },
-  { code: "vi", name: "Vietnamese" },
-];
+export { LANGUAGES } from "./languages.ts";
 
 export function formatBytes(n: number): string {
   if (!n) return "?";
