@@ -43,7 +43,13 @@
     "macOS": {
       "minimumSystemVersion": "12.0",
       "entitlements": "entitlements.plist",
-      "hardenedRuntime": true
+      "hardenedRuntime": true,
+      "dmg": {
+        "background": "dmg/dmg-background.tiff",
+        "windowSize": { "width": 600, "height": 428 },
+        "appPosition": { "x": 160, "y": 225 },
+        "applicationFolderPosition": { "x": 440, "y": 225 }
+      }
     },
     "createUpdaterArtifacts": true
   },
